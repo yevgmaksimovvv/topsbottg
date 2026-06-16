@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import csv
-import io
-from collections.abc import Iterable, Sequence
+import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from string import Formatter
 
@@ -10,6 +9,7 @@ from sqlalchemy import exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from topsbottg.logging_utils import log_event
 from topsbottg.models import (
     AuditLog,
     PaymentProfile,
@@ -21,8 +21,10 @@ from topsbottg.models import (
     User,
 )
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_MESSAGE_TEMPLATE = """Всем привет!
-Выплачиваем ЗАРПЛАТУ за работу в период с {period_from} по {period_to}.
+Выплачиваем ЗАРПЛАТУ за работу в период {period_label}.
 
 Для получения выплаты проверьте или заполните платежные данные.
 
@@ -30,9 +32,7 @@ DEFAULT_MESSAGE_TEMPLATE = """Всем привет!
 укажите фамилию и имя, номер телефона для перевода / СБП, банк.
 
 Если перевод на чужие данные:
-укажите ваши фамилию и имя, имя владельца, номер телефона владельца, банк.
-
-После сохранения бот должен ответить: «Ваше сообщение сохранено»."""
+укажите ваши фамилию и имя, имя владельца, номер телефона владельца, банк."""
 
 ACTIVATED_PAYOUT_STATUSES = {
     PayoutStatus.sending.value,
@@ -43,6 +43,21 @@ ACTIVATED_PAYOUT_STATUSES = {
 PAYMENT_RECEIPT_RECIPIENT_STATUSES = {
     RecipientStatus.sent.value,
     RecipientStatus.payment_required.value,
+}
+
+_PAYOUT_PERIOD_MONTH_MAX_DAYS = {
+    1: 31,
+    2: 29,
+    3: 31,
+    4: 30,
+    5: 31,
+    6: 30,
+    7: 31,
+    8: 31,
+    9: 30,
+    10: 31,
+    11: 30,
+    12: 31,
 }
 
 
@@ -56,10 +71,42 @@ def payment_profile_snapshot(profile: PaymentProfile) -> dict[str, str | None]:
     }
 
 
+def format_payout_period_label(
+    start_day: int,
+    start_month: int,
+    end_day: int,
+    end_month: int,
+) -> str:
+    return f"{start_day:02d}.{start_month:02d} — {end_day:02d}.{end_month:02d}"
+
+
+def validate_payout_period_parts(
+    period_start_day: int,
+    period_start_month: int,
+    period_end_day: int,
+    period_end_month: int,
+) -> None:
+    def _validate_part(day: int, month: int, *, side: str) -> None:
+        if not 1 <= month <= 12:
+            raise ValueError(f"Месяц {side} периода должен быть от 1 до 12.")
+        if not 1 <= day <= 31:
+            raise ValueError(f"День {side} периода должен быть от 1 до 31.")
+        max_day = _PAYOUT_PERIOD_MONTH_MAX_DAYS[month]
+        if day > max_day:
+            raise ValueError(f"Для {side} периода указана невозможная дата.")
+
+    _validate_part(period_start_day, period_start_month, side="начала")
+    _validate_part(period_end_day, period_end_month, side="окончания")
+
+
 def render_message_template(payout: Payout) -> str:
     return payout.message_template.format(
-        period_from=payout.period_from.isoformat(),
-        period_to=payout.period_to.isoformat(),
+        period_label=format_payout_period_label(
+            payout.period_start_day,
+            payout.period_start_month,
+            payout.period_end_day,
+            payout.period_end_month,
+        ),
     )
 
 
@@ -93,20 +140,48 @@ def validate_message_template(template: str) -> None:
     try:
         parts = list(formatter.parse(template))
     except ValueError as exc:
-        raise ValueError("message_template is invalid") from exc
-    allowed_fields = {"period_from", "period_to"}
+        raise ValueError("Шаблон сообщения некорректен.") from exc
+    allowed_fields = {"period_start", "period_end", "period_label"}
     for _literal_text, field_name, format_spec, conversion in parts:
         if field_name is None:
             continue
         if field_name not in allowed_fields:
-            raise ValueError("message_template may use only {period_from} and {period_to}")
+            raise ValueError(
+                "В шаблоне можно использовать только {period_start}, {period_end} и {period_label}."
+            )
         if format_spec or conversion:
-            raise ValueError("message_template placeholders must not use formatting options")
+            raise ValueError("Плейсхолдеры шаблона не должны использовать форматирование.")
 
 
-def _validate_payout_period(period_from, period_to) -> None:
-    if period_from > period_to:
-        raise ValueError("period_from must be earlier than or equal to period_to")
+def _log_payout_action(
+    event: str,
+    message: str,
+    *,
+    action: str,
+    payout_id: int | None = None,
+    actor_telegram_id: int | None = None,
+    admin_id: int | None = None,
+    recipients_count: int | None = None,
+    result_status: str | None = None,
+    result_count: int | None = None,
+    reason: str | None = None,
+    error_type: str | None = None,
+) -> None:
+    log_event(
+        logger,
+        "INFO" if event.endswith("_requested") or event.endswith("_completed") else "ERROR",
+        event,
+        message,
+        action=action,
+        payout_id=payout_id,
+        actor_telegram_id=actor_telegram_id,
+        admin_id=admin_id,
+        recipients_count=recipients_count,
+        result_status=result_status,
+        result_count=result_count,
+        reason=reason,
+        error_type=error_type,
+    )
 
 
 async def log_audit(
@@ -118,15 +193,28 @@ async def log_audit(
     entity_id: str,
     metadata: dict | None = None,
 ) -> None:
-    session.add(
-        AuditLog(
-            actor_telegram_id=actor_telegram_id,
+    try:
+        session.add(
+            AuditLog(
+                actor_telegram_id=actor_telegram_id,
+                action=action,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                metadata=metadata,
+            )
+        )
+    except Exception as exc:
+        log_event(
+            logger,
+            "ERROR",
+            "audit_log_write_failed",
+            "Не удалось записать audit log",
             action=action,
             entity_type=entity_type,
             entity_id=entity_id,
-            metadata=metadata,
+            error_type=type(exc).__name__,
         )
-    )
+        raise
 
 
 async def get_or_create_user(session: AsyncSession, telegram_id: int, full_name: str | None = None) -> User:
@@ -169,22 +257,76 @@ async def get_user_by_telegram_id(session: AsyncSession, telegram_id: int) -> Us
 
 
 async def upsert_full_name(session: AsyncSession, telegram_id: int, full_name: str) -> User:
-    user = await get_or_create_user(session, telegram_id, full_name=full_name)
-    user.full_name = full_name
-    await session.flush()
+    log_event(
+        logger,
+        "INFO",
+        "user_profile_upsert_requested",
+        "Запрошено обновление профиля пользователя",
+        telegram_user_id=telegram_id,
+    )
+    try:
+        user = await get_or_create_user(session, telegram_id, full_name=full_name)
+        user.full_name = full_name
+        await session.flush()
+    except Exception as exc:
+        log_event(
+            logger,
+            "ERROR",
+            "user_profile_upsert_failed",
+            "Не удалось обновить профиль пользователя",
+            telegram_user_id=telegram_id,
+            error_type=type(exc).__name__,
+        )
+        raise
+    log_event(
+        logger,
+        "INFO",
+        "user_profile_upsert_completed",
+        "Профиль пользователя обновлён",
+        telegram_user_id=telegram_id,
+        user_id=user.id,
+    )
     return user
 
 
 async def upsert_payment_profile(session: AsyncSession, user: User, payload: dict | str) -> PaymentProfile:
-    raw_payment_details = _normalize_raw_payment_details(payload)
-    profile = await session.scalar(select(PaymentProfile).where(PaymentProfile.user_id == user.id))
-    if profile is None:
-        profile = PaymentProfile(user_id=user.id, raw_payment_details=raw_payment_details)
-        session.add(profile)
-    else:
-        profile.raw_payment_details = raw_payment_details
-        profile.deleted_at = None
-    await session.flush()
+    log_event(
+        logger,
+        "INFO",
+        "payment_details_upsert_requested",
+        "Запрошено обновление платёжных данных",
+        telegram_user_id=user.telegram_id,
+        user_id=user.id,
+    )
+    try:
+        raw_payment_details = _normalize_raw_payment_details(payload)
+        profile = await session.scalar(select(PaymentProfile).where(PaymentProfile.user_id == user.id))
+        if profile is None:
+            profile = PaymentProfile(user_id=user.id, raw_payment_details=raw_payment_details)
+            session.add(profile)
+        else:
+            profile.raw_payment_details = raw_payment_details
+            profile.deleted_at = None
+        await session.flush()
+    except Exception as exc:
+        log_event(
+            logger,
+            "ERROR",
+            "payment_details_upsert_failed",
+            "Не удалось обновить платёжные данные",
+            telegram_user_id=user.telegram_id,
+            user_id=user.id,
+            error_type=type(exc).__name__,
+        )
+        raise
+    log_event(
+        logger,
+        "INFO",
+        "payment_details_upsert_completed",
+        "Платёжные данные обновлены",
+        telegram_user_id=user.telegram_id,
+        user_id=user.id,
+    )
     return profile
 
 
@@ -200,7 +342,6 @@ async def list_users(
     *,
     search: str | None = None,
     has_payment_profile: bool | None = None,
-    is_active: bool | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> list[tuple[User, PaymentProfile | None]]:
@@ -214,15 +355,14 @@ async def list_users(
             func.length(func.trim(PaymentProfile.raw_payment_details)) > 0,
         )
     )
-    stmt = select(User.id).order_by(User.id.desc())
+    stmt = select(User.id).order_by(func.lower(User.full_name), User.id)
     if search:
         needle = search.strip()
-        if dialect_name == "sqlite":
-            stmt = stmt.where(User.full_name.like(f"%{needle}%"))
-        else:
-            stmt = stmt.where(func.lower(User.full_name).like(f"%{needle.lower()}%"))
-    if is_active is not None:
-        stmt = stmt.where(User.is_active == is_active)
+        if needle:
+            if dialect_name == "sqlite":
+                stmt = stmt.where(User.full_name.like(f"%{needle}%"))
+            else:
+                stmt = stmt.where(func.lower(User.full_name).like(f"%{needle.lower()}%"))
     if has_payment_profile is True:
         stmt = stmt.where(profile_exists)
     elif has_payment_profile is False:
@@ -247,157 +387,383 @@ async def list_users(
 
 
 async def create_payout(session: AsyncSession, *, actor_telegram_id: int, payload: dict) -> Payout:
-    message_template = payload.get("message_template") or DEFAULT_MESSAGE_TEMPLATE
-    validate_message_template(message_template)
-    _validate_payout_period(payload["period_from"], payload["period_to"])
-    payout = Payout(
-        title=payload["title"],
-        period_from=payload["period_from"],
-        period_to=payload["period_to"],
-        message_template=message_template,
-        status=PayoutStatus.draft.value,
-        created_by_telegram_id=actor_telegram_id,
-    )
-    session.add(payout)
-    await session.flush()
-    await log_audit(
-        session,
-        actor_telegram_id=actor_telegram_id,
+    _log_payout_action(
+        "payout_action_requested",
+        "Запрошено создание выплаты",
         action="create_payout",
-        entity_type="payout",
-        entity_id=str(payout.id),
+        actor_telegram_id=actor_telegram_id,
+    )
+    try:
+        message_template = payload.get("message_template") or DEFAULT_MESSAGE_TEMPLATE
+        validate_message_template(message_template)
+        period_start_day = payload["period_start_day"]
+        period_start_month = payload["period_start_month"]
+        period_end_day = payload["period_end_day"]
+        period_end_month = payload["period_end_month"]
+        validate_payout_period_parts(period_start_day, period_start_month, period_end_day, period_end_month)
+        payout = Payout(
+            period_start_day=period_start_day,
+            period_start_month=period_start_month,
+            period_end_day=period_end_day,
+            period_end_month=period_end_month,
+            message_template=message_template,
+            status=PayoutStatus.draft.value,
+            created_by_telegram_id=actor_telegram_id,
+        )
+        session.add(payout)
+        await session.flush()
+        await log_audit(
+            session,
+            actor_telegram_id=actor_telegram_id,
+            action="create_payout",
+            entity_type="payout",
+            entity_id=str(payout.id),
+        )
+    except Exception as exc:
+        _log_payout_action(
+            "payout_action_failed",
+            "Не удалось создать выплату",
+            action="create_payout",
+            actor_telegram_id=actor_telegram_id,
+            reason="validation_or_db_error",
+            error_type=type(exc).__name__,
+        )
+        raise
+    _log_payout_action(
+        "payout_action_completed",
+        "Выплата создана",
+        action="create_payout",
+        payout_id=payout.id,
+        actor_telegram_id=actor_telegram_id,
     )
     return payout
 
 
 async def update_payout(session: AsyncSession, payout: Payout, *, actor_telegram_id: int, payload: dict) -> Payout:
-    next_title = payout.title if payload.get("title") is None else payload["title"]
-    next_period_from = payout.period_from if payload.get("period_from") is None else payload["period_from"]
-    next_period_to = payout.period_to if payload.get("period_to") is None else payload["period_to"]
-    payload_message_template = payload.get("message_template")
-    next_message_template = payout.message_template if payload_message_template is None else payload_message_template
-    if next_message_template is not None:
-        validate_message_template(next_message_template)
-    _validate_payout_period(next_period_from, next_period_to)
-    payout.title = next_title
-    payout.period_from = next_period_from
-    payout.period_to = next_period_to
-    if next_message_template is not None:
-        payout.message_template = next_message_template
-    await session.flush()
-    await log_audit(
-        session,
-        actor_telegram_id=actor_telegram_id,
+    _log_payout_action(
+        "payout_action_requested",
+        "Запрошено обновление выплаты",
         action="update_payout",
-        entity_type="payout",
-        entity_id=str(payout.id),
-        metadata=payload,
+        payout_id=payout.id,
+        actor_telegram_id=actor_telegram_id,
+    )
+    try:
+        payload_message_template = payload.get("message_template")
+        next_message_template = (
+            payout.message_template if payload_message_template is None else payload_message_template
+        )
+        if next_message_template is not None:
+            validate_message_template(next_message_template)
+        next_period_start_day = payload.get("period_start_day", payout.period_start_day)
+        next_period_start_month = payload.get("period_start_month", payout.period_start_month)
+        next_period_end_day = payload.get("period_end_day", payout.period_end_day)
+        next_period_end_month = payload.get("period_end_month", payout.period_end_month)
+        validate_payout_period_parts(
+            next_period_start_day,
+            next_period_start_month,
+            next_period_end_day,
+            next_period_end_month,
+        )
+        payout.period_start_day = next_period_start_day
+        payout.period_start_month = next_period_start_month
+        payout.period_end_day = next_period_end_day
+        payout.period_end_month = next_period_end_month
+        if next_message_template is not None:
+            payout.message_template = next_message_template
+        await session.flush()
+        await log_audit(
+            session,
+            actor_telegram_id=actor_telegram_id,
+            action="update_payout",
+            entity_type="payout",
+            entity_id=str(payout.id),
+            metadata=payload,
+        )
+    except Exception as exc:
+        _log_payout_action(
+            "payout_action_failed",
+            "Не удалось обновить выплату",
+            action="update_payout",
+            payout_id=payout.id,
+            actor_telegram_id=actor_telegram_id,
+            reason="validation_or_db_error",
+            error_type=type(exc).__name__,
+        )
+        raise
+    _log_payout_action(
+        "payout_action_completed",
+        "Выплата обновлена",
+        action="update_payout",
+        payout_id=payout.id,
+        actor_telegram_id=actor_telegram_id,
     )
     return payout
 
 
 async def set_payout_sending(session: AsyncSession, payout: Payout, *, actor_telegram_id: int) -> Payout:
-    if payout.status != PayoutStatus.draft.value:
-        raise ValueError("payout can only be sent from draft")
-    payout.status = PayoutStatus.sending.value
-    await session.flush()
-    await log_audit(
-        session,
-        actor_telegram_id=actor_telegram_id,
+    _log_payout_action(
+        "payout_action_requested",
+        "Запрошен перевод выплаты в sending",
         action="send_payout",
-        entity_type="payout",
-        entity_id=str(payout.id),
+        payout_id=payout.id,
+        actor_telegram_id=actor_telegram_id,
+    )
+    try:
+        if payout.status != PayoutStatus.draft.value:
+            raise ValueError("payout can only be sent from draft")
+        payout.status = PayoutStatus.sending.value
+        await session.flush()
+        await log_audit(
+            session,
+            actor_telegram_id=actor_telegram_id,
+            action="send_payout",
+            entity_type="payout",
+            entity_id=str(payout.id),
+        )
+    except Exception as exc:
+        _log_payout_action(
+            "payout_action_failed",
+            "Не удалось перевести выплату в sending",
+            action="send_payout",
+            payout_id=payout.id,
+            actor_telegram_id=actor_telegram_id,
+            reason="validation_or_db_error",
+            error_type=type(exc).__name__,
+        )
+        raise
+    _log_payout_action(
+        "payout_action_completed",
+        "Выплата переведена в sending",
+        action="send_payout",
+        payout_id=payout.id,
+        actor_telegram_id=actor_telegram_id,
+        result_status=payout.status,
     )
     return payout
 
 
 async def complete_payout(session: AsyncSession, payout: Payout, *, actor_telegram_id: int) -> Payout:
-    if payout.status == PayoutStatus.completed.value:
-        return payout
-    if payout.status == PayoutStatus.cancelled.value:
-        raise ValueError("cancelled payout cannot be completed")
-    if payout.status not in {PayoutStatus.sent.value, PayoutStatus.partially_failed.value}:
-        raise ValueError("payout can only be completed after worker finished")
-    payout.status = PayoutStatus.completed.value
-    await session.flush()
-    await log_audit(
-        session,
-        actor_telegram_id=actor_telegram_id,
+    _log_payout_action(
+        "payout_action_requested",
+        "Запрошено закрытие выплаты",
         action="complete_payout",
-        entity_type="payout",
-        entity_id=str(payout.id),
+        payout_id=payout.id,
+        actor_telegram_id=actor_telegram_id,
+    )
+    try:
+        if payout.status == PayoutStatus.completed.value:
+            return payout
+        if payout.status == PayoutStatus.cancelled.value:
+            raise ValueError("cancelled payout cannot be completed")
+        if payout.status not in {PayoutStatus.sent.value, PayoutStatus.partially_failed.value}:
+            raise ValueError("payout can only be completed after worker finished")
+        payout.status = PayoutStatus.completed.value
+        await session.flush()
+        await log_audit(
+            session,
+            actor_telegram_id=actor_telegram_id,
+            action="complete_payout",
+            entity_type="payout",
+            entity_id=str(payout.id),
+        )
+    except Exception as exc:
+        _log_payout_action(
+            "payout_action_failed",
+            "Не удалось закрыть выплату",
+            action="complete_payout",
+            payout_id=payout.id,
+            actor_telegram_id=actor_telegram_id,
+            reason="validation_or_db_error",
+            error_type=type(exc).__name__,
+        )
+        raise
+    _log_payout_action(
+        "payout_action_completed",
+        "Выплата закрыта",
+        action="complete_payout",
+        payout_id=payout.id,
+        actor_telegram_id=actor_telegram_id,
+        result_status=payout.status,
     )
     return payout
 
 
 async def cancel_payout(session: AsyncSession, payout: Payout, *, actor_telegram_id: int) -> Payout:
-    if payout.status == PayoutStatus.completed.value:
-        raise ValueError("completed payout cannot be cancelled")
-    if payout.status == PayoutStatus.cancelled.value:
-        return payout
-    payout.status = PayoutStatus.cancelled.value
-    await session.flush()
-    await log_audit(
-        session,
-        actor_telegram_id=actor_telegram_id,
+    _log_payout_action(
+        "payout_action_requested",
+        "Запрошена отмена выплаты",
         action="cancel_payout",
-        entity_type="payout",
-        entity_id=str(payout.id),
+        payout_id=payout.id,
+        actor_telegram_id=actor_telegram_id,
+    )
+    try:
+        if payout.status == PayoutStatus.completed.value:
+            raise ValueError("completed payout cannot be cancelled")
+        if payout.status == PayoutStatus.cancelled.value:
+            return payout
+        payout.status = PayoutStatus.cancelled.value
+        await session.flush()
+        await log_audit(
+            session,
+            actor_telegram_id=actor_telegram_id,
+            action="cancel_payout",
+            entity_type="payout",
+            entity_id=str(payout.id),
+        )
+    except Exception as exc:
+        _log_payout_action(
+            "payout_action_failed",
+            "Не удалось отменить выплату",
+            action="cancel_payout",
+            payout_id=payout.id,
+            actor_telegram_id=actor_telegram_id,
+            reason="validation_or_db_error",
+            error_type=type(exc).__name__,
+        )
+        raise
+    _log_payout_action(
+        "payout_action_completed",
+        "Выплата отменена",
+        action="cancel_payout",
+        payout_id=payout.id,
+        actor_telegram_id=actor_telegram_id,
+        result_status=payout.status,
     )
     return payout
 
 
 async def add_recipients(session: AsyncSession, payout: Payout, user_ids: Sequence[int]) -> list[PayoutRecipient]:
-    created: list[PayoutRecipient] = []
-    existing = await session.scalars(
-        select(PayoutRecipient.user_id).where(
-            PayoutRecipient.payout_id == payout.id, PayoutRecipient.user_id.in_(list(user_ids))
-        )
+    _log_payout_action(
+        "payout_action_requested",
+        "Запрошено добавление получателей",
+        action="add_recipients",
+        payout_id=payout.id,
+        recipients_count=len(user_ids),
     )
-    existing_ids = set(existing.all())
-    for user_id in user_ids:
-        if user_id in existing_ids:
-            continue
-        recipient = PayoutRecipient(payout_id=payout.id, user_id=user_id, status=RecipientStatus.pending.value)
-        session.add(recipient)
-        created.append(recipient)
-    await session.flush()
+    try:
+        created: list[PayoutRecipient] = []
+        existing = await session.scalars(
+            select(PayoutRecipient.user_id).where(
+                PayoutRecipient.payout_id == payout.id, PayoutRecipient.user_id.in_(list(user_ids))
+            )
+        )
+        existing_ids = set(existing.all())
+        for user_id in user_ids:
+            if user_id in existing_ids:
+                continue
+            recipient = PayoutRecipient(payout_id=payout.id, user_id=user_id, status=RecipientStatus.pending.value)
+            session.add(recipient)
+            created.append(recipient)
+        await session.flush()
+    except Exception as exc:
+        _log_payout_action(
+            "payout_action_failed",
+            "Не удалось добавить получателей",
+            action="add_recipients",
+            payout_id=payout.id,
+            recipients_count=len(user_ids),
+            reason="validation_or_db_error",
+            error_type=type(exc).__name__,
+        )
+        raise
+    _log_payout_action(
+        "payout_action_completed",
+        "Получатели добавлены",
+        action="add_recipients",
+        payout_id=payout.id,
+        recipients_count=len(created),
+        result_count=len(created),
+    )
     return created
 
 
 async def cancel_recipient(
     session: AsyncSession, recipient: PayoutRecipient, *, actor_telegram_id: int
 ) -> PayoutRecipient:
-    if recipient.status == RecipientStatus.paid.value:
-        raise ValueError("paid recipient cannot be cancelled")
-    if recipient.status != RecipientStatus.cancelled.value:
-        recipient.status = RecipientStatus.cancelled.value
-        await session.flush()
-        await log_audit(
-            session,
-            actor_telegram_id=actor_telegram_id,
+    _log_payout_action(
+        "payout_action_requested",
+        "Запрошена отмена получателя",
+        action="cancel_recipient",
+        payout_id=recipient.payout_id,
+        actor_telegram_id=actor_telegram_id,
+    )
+    try:
+        if recipient.status == RecipientStatus.paid.value:
+            raise ValueError("paid recipient cannot be cancelled")
+        if recipient.status != RecipientStatus.cancelled.value:
+            recipient.status = RecipientStatus.cancelled.value
+            await session.flush()
+            await log_audit(
+                session,
+                actor_telegram_id=actor_telegram_id,
+                action="cancel_recipient",
+                entity_type="payout_recipient",
+                entity_id=str(recipient.id),
+            )
+    except Exception as exc:
+        _log_payout_action(
+            "payout_action_failed",
+            "Не удалось отменить получателя",
             action="cancel_recipient",
-            entity_type="payout_recipient",
-            entity_id=str(recipient.id),
+            payout_id=recipient.payout_id,
+            actor_telegram_id=actor_telegram_id,
+            reason="validation_or_db_error",
+            error_type=type(exc).__name__,
         )
+        raise
+    _log_payout_action(
+        "payout_action_completed",
+        "Получатель отменён",
+        action="cancel_recipient",
+        payout_id=recipient.payout_id,
+        actor_telegram_id=actor_telegram_id,
+        result_status=recipient.status,
+    )
     return recipient
 
 
 async def retry_failed_recipient(
     session: AsyncSession, recipient: PayoutRecipient, *, actor_telegram_id: int
 ) -> PayoutRecipient:
-    if recipient.status != RecipientStatus.failed.value:
-        raise ValueError("recipient can only be retried from failed")
-    recipient.status = RecipientStatus.pending.value
-    recipient.failed_at = None
-    recipient.failure_reason = None
-    await session.flush()
-    await log_audit(
-        session,
-        actor_telegram_id=actor_telegram_id,
+    _log_payout_action(
+        "payout_action_requested",
+        "Запрошен повторный запуск получателя",
         action="retry_failed_recipient",
-        entity_type="payout_recipient",
-        entity_id=str(recipient.id),
+        payout_id=recipient.payout_id,
+        actor_telegram_id=actor_telegram_id,
+    )
+    try:
+        if recipient.status != RecipientStatus.failed.value:
+            raise ValueError("recipient can only be retried from failed")
+        recipient.status = RecipientStatus.pending.value
+        recipient.failed_at = None
+        recipient.failure_reason = None
+        await session.flush()
+        await log_audit(
+            session,
+            actor_telegram_id=actor_telegram_id,
+            action="retry_failed_recipient",
+            entity_type="payout_recipient",
+            entity_id=str(recipient.id),
+        )
+    except Exception as exc:
+        _log_payout_action(
+            "payout_action_failed",
+            "Не удалось повторно запустить получателя",
+            action="retry_failed_recipient",
+            payout_id=recipient.payout_id,
+            actor_telegram_id=actor_telegram_id,
+            reason="validation_or_db_error",
+            error_type=type(exc).__name__,
+        )
+        raise
+    _log_payout_action(
+        "payout_action_completed",
+        "Получатель повторно запущен",
+        action="retry_failed_recipient",
+        payout_id=recipient.payout_id,
+        actor_telegram_id=actor_telegram_id,
+        result_status=recipient.status,
     )
     return recipient
 
@@ -410,19 +776,46 @@ async def mark_paid(
     paid_at: datetime | None = None,
     paid_note: str | None = None,
 ) -> PayoutRecipient:
-    if recipient.status != RecipientStatus.payment_received.value:
-        raise ValueError("recipient can only be marked paid from payment_received")
-    recipient.status = RecipientStatus.paid.value
-    recipient.paid_at = paid_at or utcnow()
-    recipient.paid_by_admin_id = actor_telegram_id
-    recipient.paid_note = paid_note
-    await session.flush()
-    await log_audit(
-        session,
-        actor_telegram_id=actor_telegram_id,
+    _log_payout_action(
+        "payout_action_requested",
+        "Запрошена отметка выплаты получателю",
         action="recipient_marked_paid",
-        entity_type="payout_recipient",
-        entity_id=str(recipient.id),
+        payout_id=recipient.payout_id,
+        actor_telegram_id=actor_telegram_id,
+    )
+    try:
+        if recipient.status != RecipientStatus.payment_received.value:
+            raise ValueError("recipient can only be marked paid from payment_received")
+        recipient.status = RecipientStatus.paid.value
+        recipient.paid_at = paid_at or utcnow()
+        recipient.paid_by_admin_id = actor_telegram_id
+        recipient.paid_note = paid_note
+        await session.flush()
+        await log_audit(
+            session,
+            actor_telegram_id=actor_telegram_id,
+            action="recipient_marked_paid",
+            entity_type="payout_recipient",
+            entity_id=str(recipient.id),
+        )
+    except Exception as exc:
+        _log_payout_action(
+            "payout_action_failed",
+            "Не удалось отметить выплату получателю",
+            action="recipient_marked_paid",
+            payout_id=recipient.payout_id,
+            actor_telegram_id=actor_telegram_id,
+            reason="validation_or_db_error",
+            error_type=type(exc).__name__,
+        )
+        raise
+    _log_payout_action(
+        "payout_action_completed",
+        "Выплата получателю отмечена",
+        action="recipient_marked_paid",
+        payout_id=recipient.payout_id,
+        actor_telegram_id=actor_telegram_id,
+        result_status=recipient.status,
     )
     return recipient
 
@@ -567,85 +960,6 @@ async def claim_pending_recipients(session: AsyncSession, *, limit: int) -> list
         .order_by(PayoutRecipient.id.asc())
     )
     return list(rows)
-
-
-async def format_users_csv(rows: Iterable[tuple[User, PaymentProfile | None]]) -> str:
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(
-        [
-            "user_id",
-            "telegram_id",
-            "full_name",
-            "is_active",
-            "has_payment_profile",
-            "raw_payment_details",
-        ]
-    )
-    for user, profile in rows:
-        writer.writerow(
-            [
-                user.id,
-                user.telegram_id,
-                user.full_name,
-                user.is_active,
-                bool(profile and profile.raw_payment_details and profile.raw_payment_details.strip()),
-                getattr(profile, "raw_payment_details", ""),
-            ]
-        )
-    return buffer.getvalue()
-
-
-async def format_recipients_csv(session: AsyncSession, payout_id: int) -> str:
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(
-        [
-            "recipient_id",
-            "payout_id",
-            "user_id",
-            "telegram_id",
-            "full_name",
-            "status",
-            "sent_at",
-            "failed_at",
-            "failure_reason",
-            "replied_at",
-            "paid_at",
-            "paid_by_admin_id",
-            "raw_reply",
-            "raw_payment_details",
-        ]
-    )
-    recipients = await session.scalars(
-        select(PayoutRecipient)
-        .options(selectinload(PayoutRecipient.user))
-        .options(selectinload(PayoutRecipient.payment_replies))
-        .where(PayoutRecipient.payout_id == payout_id)
-        .order_by(PayoutRecipient.id.asc())
-    )
-    for recipient in recipients:
-        reply = recipient.payment_replies[-1] if recipient.payment_replies else None
-        snapshot = recipient.payment_profile_snapshot or {}
-        writer.writerow(
-            [
-                recipient.id,
-                recipient.payout_id,
-                recipient.user_id,
-                recipient.user.telegram_id,
-                recipient.user.full_name,
-                recipient.status,
-                recipient.sent_at or "",
-                recipient.failed_at or "",
-                recipient.failure_reason or "",
-                recipient.replied_at or "",
-                recipient.paid_at or "",
-                recipient.paid_by_admin_id or "",
-                reply.raw_text if reply else "",
-                snapshot.get("raw_payment_details", ""),
-            ]
-        )
-    return buffer.getvalue()
 
 
 async def finalize_payout_after_worker(session: AsyncSession, payout: Payout) -> Payout | None:

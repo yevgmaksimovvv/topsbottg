@@ -48,32 +48,16 @@
             </div>
           </div>
 
-          <div class="controls controls-users">
-            <label class="field">
-              <span>Поиск</span>
-              <input id="desktop-search" autocomplete="off" placeholder="Поиск по ФИО" />
-            </label>
-            <label class="field">
-              <span>Платежи</span>
-              <select id="desktop-has-payment">
-                <option value="">Все</option>
-                <option value="true">С данными</option>
-                <option value="false">Без данных</option>
-              </select>
-            </label>
-            <label class="field">
-              <span>Активность</span>
-              <select id="desktop-is-active">
-                <option value="">Все</option>
-                <option value="true">Активные</option>
-                <option value="false">Неактивные</option>
-              </select>
-            </label>
-            <div class="field field-button">
-              <span>&nbsp;</span>
-              <button type="button" class="secondary-button" data-action="load-more-users">Загрузить ещё</button>
+            <div class="controls controls-users">
+              <label class="field">
+                <span>Поиск</span>
+                <input id="desktop-search" autocomplete="off" placeholder="Поиск по ФИО" />
+              </label>
+              <div class="field field-button">
+                <span>&nbsp;</span>
+                <button type="button" class="secondary-button" data-action="load-more-users">Загрузить ещё</button>
+              </div>
             </div>
-          </div>
 
           <div id="desktop-users" class="list-root"></div>
           <div id="desktop-selection-bar" class="selection-bar hidden"></div>
@@ -87,21 +71,25 @@
             </div>
           </div>
 
-          <div class="composer-form">
-            <div class="controls controls-composer">
-              <label class="field">
-                <span>Название</span>
-                <input id="desktop-payout-title" />
-              </label>
-              <label class="field">
-                <span>Период с</span>
-                <input id="desktop-period-from" type="date" />
-              </label>
-              <label class="field">
-                <span>Период по</span>
-                <input id="desktop-period-to" type="date" />
-              </label>
-            </div>
+            <div class="composer-form">
+              <div class="controls controls-composer">
+                <label class="field">
+                  <span>День начала</span>
+                  <input id="desktop-period-start-day" type="number" min="1" max="31" inputmode="numeric" placeholder="ДД" />
+                </label>
+                <label class="field">
+                  <span>Месяц начала</span>
+                  <input id="desktop-period-start-month" type="number" min="1" max="12" inputmode="numeric" placeholder="ММ" />
+                </label>
+                <label class="field">
+                  <span>День окончания</span>
+                  <input id="desktop-period-end-day" type="number" min="1" max="31" inputmode="numeric" placeholder="ДД" />
+                </label>
+                <label class="field">
+                  <span>Месяц окончания</span>
+                  <input id="desktop-period-end-month" type="number" min="1" max="12" inputmode="numeric" placeholder="ММ" />
+                </label>
+              </div>
 
             <label class="field">
               <span>Шаблон сообщения</span>
@@ -176,22 +164,6 @@
                 <span>Поиск</span>
                 <input id="mobile-search" autocomplete="off" placeholder="Поиск по ФИО" />
               </label>
-              <label class="field">
-                <span>Платежи</span>
-                <select id="mobile-has-payment">
-                  <option value="">Все</option>
-                  <option value="true">С данными</option>
-                  <option value="false">Без данных</option>
-                </select>
-              </label>
-              <label class="field">
-                <span>Активность</span>
-                <select id="mobile-is-active">
-                  <option value="">Все</option>
-                  <option value="true">Активные</option>
-                  <option value="false">Неактивные</option>
-                </select>
-              </label>
               <div class="field field-button">
                 <span>&nbsp;</span>
                 <button type="button" class="secondary-button" data-action="load-more-users">Загрузить ещё</button>
@@ -215,16 +187,20 @@
             <div class="composer-form">
               <div class="controls controls-composer">
                 <label class="field">
-                  <span>Название</span>
-                  <input id="mobile-payout-title" />
+                  <span>День начала</span>
+                  <input id="mobile-period-start-day" type="number" min="1" max="31" inputmode="numeric" placeholder="ДД" />
                 </label>
                 <label class="field">
-                  <span>Период с</span>
-                  <input id="mobile-period-from" type="date" />
+                  <span>Месяц начала</span>
+                  <input id="mobile-period-start-month" type="number" min="1" max="12" inputmode="numeric" placeholder="ММ" />
                 </label>
                 <label class="field">
-                  <span>Период по</span>
-                  <input id="mobile-period-to" type="date" />
+                  <span>День окончания</span>
+                  <input id="mobile-period-end-day" type="number" min="1" max="31" inputmode="numeric" placeholder="ДД" />
+                </label>
+                <label class="field">
+                  <span>Месяц окончания</span>
+                  <input id="mobile-period-end-month" type="number" min="1" max="12" inputmode="numeric" placeholder="ММ" />
                 </label>
               </div>
 

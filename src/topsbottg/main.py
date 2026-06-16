@@ -11,6 +11,7 @@ from topsbottg.api import create_app, get_readiness_checks
 from topsbottg.bot import build_router
 from topsbottg.config import Settings, get_settings
 from topsbottg.db import make_engine, make_session_factory
+from topsbottg.logging_utils import log_event
 from topsbottg.worker import run_worker
 
 logging.basicConfig(level=logging.INFO)
@@ -36,8 +37,25 @@ async def run_startup_preflight(settings: Settings, session_factory) -> None:
     checks = await get_readiness_checks(settings, session_factory)
     failed_checks = [name for name, status in checks.items() if status != "ok"]
     if failed_checks:
+        log_event(
+            logger,
+            "ERROR",
+            "app_startup_failed",
+            "Проверка запуска не пройдена",
+            reason=",".join(failed_checks),
+            db_ready=checks.get("database") == "ok",
+            telegram_ready=checks.get("telegram") == "ok",
+        )
         logger.error("startup readiness failed: %s", ", ".join(failed_checks))
         raise RuntimeError("startup readiness failed")
+    log_event(
+        logger,
+        "INFO",
+        "app_startup_ready",
+        "Проверки запуска успешно пройдены",
+        db_ready=True,
+        telegram_ready=True,
+    )
 
 
 def create_runtime(settings: Settings) -> FastAPI:
@@ -47,6 +65,15 @@ def create_runtime(settings: Settings) -> FastAPI:
 
     @app.on_event("startup")
     async def startup() -> None:
+        log_event(
+            logger,
+            "INFO",
+            "app_startup_started",
+            "Приложение запускается",
+            mini_app_url_present=bool(settings.mini_app_url),
+            bot_token_present=bool(settings.bot_token),
+            admin_ids_count=len(settings.admin_ids_set),
+        )
         await run_startup_preflight(settings, session_factory)
         app.state.stop_event = asyncio.Event()
         bot = Bot(token=settings.bot_token)

@@ -1,10 +1,10 @@
 export const PAYOUT_STATUS_LABELS = {
-  draft: "черновик",
-  sending: "идет рассылка",
-  sent: "отправлено",
-  partially_failed: "часть отправок не удалась",
-  completed: "закрыта админом",
-  cancelled: "отменена",
+  draft: "Черновик",
+  sending: "Рассылка идет",
+  sent: "Разослана",
+  partially_failed: "Часть отправок не удалась",
+  completed: "Завершена",
+  cancelled: "Отменена",
 };
 
 export const RECIPIENT_STATUS_LABELS = {
@@ -26,17 +26,19 @@ export const MOBILE_QUERY = window.matchMedia("(max-width: 759px)");
 
 export const COMPOSER_IDS = {
   desktop: {
-    title: "desktop-payout-title",
-    periodFrom: "desktop-period-from",
-    periodTo: "desktop-period-to",
+    periodStartDay: "desktop-period-start-day",
+    periodStartMonth: "desktop-period-start-month",
+    periodEndDay: "desktop-period-end-day",
+    periodEndMonth: "desktop-period-end-month",
     messageTemplate: "desktop-message-template",
     validation: "desktop-payout-validation",
     preview: "desktop-preview",
   },
   mobile: {
-    title: "mobile-payout-title",
-    periodFrom: "mobile-period-from",
-    periodTo: "mobile-period-to",
+    periodStartDay: "mobile-period-start-day",
+    periodStartMonth: "mobile-period-start-month",
+    periodEndDay: "mobile-period-end-day",
+    periodEndMonth: "mobile-period-end-month",
     messageTemplate: "mobile-message-template",
     validation: "mobile-payout-validation",
     preview: "mobile-preview",

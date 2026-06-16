@@ -12,17 +12,16 @@ export const state = {
   selectedPayoutId: null,
   selectedPayoutDetail: null,
   composer: {
-    title: "",
-    periodFrom: "",
-    periodTo: "",
+    periodStartDay: "",
+    periodStartMonth: "",
+    periodEndDay: "",
+    periodEndMonth: "",
     messageTemplate: "",
   },
   usersLimit: USERS_LIMIT,
   usersOffset: 0,
   usersHasMore: false,
   usersSearch: "",
-  usersHasPayment: "",
-  usersIsActive: "",
   loading: {
     users: false,
     payouts: false,
@@ -30,7 +29,6 @@ export const state = {
     createPayout: false,
     attachSelected: false,
     sendPayout: false,
-    exportCsv: false,
     markPaid: false,
     revealPaymentDetails: false,
   },
@@ -47,6 +45,33 @@ export const state = {
 };
 
 export const $ = (id) => document.getElementById(id);
+
+function padPeriodPart(value) {
+  return String(value).padStart(2, "0");
+}
+
+export function formatPayoutPeriodLabel(startDay, startMonth, endDay, endMonth) {
+  return `${padPeriodPart(startDay)}.${padPeriodPart(startMonth)} — ${padPeriodPart(endDay)}.${padPeriodPart(endMonth)}`;
+}
+
+export function payoutPeriodLabel(payout) {
+  if (!payout) return "";
+  if (payout.period_label) return payout.period_label;
+  if (
+    payout.period_start_day &&
+    payout.period_start_month &&
+    payout.period_end_day &&
+    payout.period_end_month
+  ) {
+    return formatPayoutPeriodLabel(
+      payout.period_start_day,
+      payout.period_start_month,
+      payout.period_end_day,
+      payout.period_end_month
+    );
+  }
+  return "";
+}
 
 function readTelegramWebApp() {
   return window.Telegram?.WebApp || null;
@@ -92,9 +117,10 @@ export function getComposerElements() {
   const ids = COMPOSER_IDS[side];
   return {
     side,
-    title: $(ids.title),
-    periodFrom: $(ids.periodFrom),
-    periodTo: $(ids.periodTo),
+    periodStartDay: $(ids.periodStartDay),
+    periodStartMonth: $(ids.periodStartMonth),
+    periodEndDay: $(ids.periodEndDay),
+    periodEndMonth: $(ids.periodEndMonth),
     messageTemplate: $(ids.messageTemplate),
     validation: $(ids.validation),
     preview: $(ids.preview),
@@ -103,9 +129,10 @@ export function getComposerElements() {
 
 export function getAllComposerElementPairs() {
   return Object.values(COMPOSER_IDS).map((ids) => ({
-    title: $(ids.title),
-    periodFrom: $(ids.periodFrom),
-    periodTo: $(ids.periodTo),
+    periodStartDay: $(ids.periodStartDay),
+    periodStartMonth: $(ids.periodStartMonth),
+    periodEndDay: $(ids.periodEndDay),
+    periodEndMonth: $(ids.periodEndMonth),
     messageTemplate: $(ids.messageTemplate),
     validation: $(ids.validation),
     preview: $(ids.preview),
@@ -117,21 +144,14 @@ export function syncFilterInputs() {
     const input = $(id);
     if (input) input.value = state.usersSearch;
   });
-  ["desktop-has-payment", "mobile-has-payment"].forEach((id) => {
-    const select = $(id);
-    if (select) select.value = state.usersHasPayment;
-  });
-  ["desktop-is-active", "mobile-is-active"].forEach((id) => {
-    const select = $(id);
-    if (select) select.value = state.usersIsActive;
-  });
 }
 
 export function syncComposerFields() {
   getAllComposerElementPairs().forEach((fields) => {
-    if (fields.title) fields.title.value = state.composer.title;
-    if (fields.periodFrom) fields.periodFrom.value = state.composer.periodFrom;
-    if (fields.periodTo) fields.periodTo.value = state.composer.periodTo;
+    if (fields.periodStartDay) fields.periodStartDay.value = state.composer.periodStartDay;
+    if (fields.periodStartMonth) fields.periodStartMonth.value = state.composer.periodStartMonth;
+    if (fields.periodEndDay) fields.periodEndDay.value = state.composer.periodEndDay;
+    if (fields.periodEndMonth) fields.periodEndMonth.value = state.composer.periodEndMonth;
     if (fields.messageTemplate) fields.messageTemplate.value = state.composer.messageTemplate;
     if (fields.validation) {
       fields.validation.textContent = "";

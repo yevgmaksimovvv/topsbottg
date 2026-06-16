@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
-
 import pytest
 from aiogram.types import InlineKeyboardMarkup
 
@@ -18,6 +16,16 @@ class FakeBot:
         self.sent.append((chat_id, text, reply_markup))
 
 
+def _payout_payload() -> dict[str, object]:
+    return {
+        "period_start_day": 1,
+        "period_start_month": 2,
+        "period_end_day": 28,
+        "period_end_month": 2,
+        "message_template": None,
+    }
+
+
 @pytest.mark.asyncio
 async def test_worker_sends_only_sending_claimed_recipient(session_factory, settings):
     async with session_factory() as session:
@@ -25,12 +33,7 @@ async def test_worker_sends_only_sending_claimed_recipient(session_factory, sett
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Май",
-                "period_from": datetime(2026, 2, 1).date(),
-                "period_to": datetime(2026, 2, 28).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.sending.value
@@ -38,6 +41,7 @@ async def test_worker_sends_only_sending_claimed_recipient(session_factory, sett
     bot = FakeBot()
     await process_recipient(bot, session_factory, settings, recipient.id)
     assert len(bot.sent) == 1
+    assert "01.02 — 28.02" in bot.sent[0][1]
     assert isinstance(bot.sent[0][2], InlineKeyboardMarkup)
 
 
@@ -59,12 +63,7 @@ async def test_worker_does_not_resend_non_sending(session_factory, settings):
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Май",
-                "period_from": datetime(2026, 2, 1).date(),
-                "period_to": datetime(2026, 2, 28).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.sent.value
@@ -81,12 +80,7 @@ async def test_worker_success_without_profile_sets_payment_required(session_fact
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Май",
-                "period_from": datetime(2026, 2, 1).date(),
-                "period_to": datetime(2026, 2, 28).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.sending.value
@@ -110,12 +104,7 @@ async def test_worker_success_with_profile_sets_sent(session_factory, settings):
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Май",
-                "period_from": datetime(2026, 2, 1).date(),
-                "period_to": datetime(2026, 2, 28).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.sending.value
@@ -138,12 +127,7 @@ async def test_worker_send_failure_sets_failed(session_factory, settings):
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Май",
-                "period_from": datetime(2026, 2, 1).date(),
-                "period_to": datetime(2026, 2, 28).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.sending.value
@@ -161,12 +145,7 @@ async def test_worker_does_not_overwrite_paid(session_factory, settings):
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Май",
-                "period_from": datetime(2026, 2, 1).date(),
-                "period_to": datetime(2026, 2, 28).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.paid.value
@@ -184,12 +163,7 @@ async def test_worker_does_not_overwrite_payment_received(session_factory, setti
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Май",
-                "period_from": datetime(2026, 2, 1).date(),
-                "period_to": datetime(2026, 2, 28).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.payment_received.value

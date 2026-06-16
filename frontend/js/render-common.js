@@ -1,5 +1,5 @@
 import { PAYOUT_STATUS_LABELS } from "./constants.js";
-import { $, canUseApi, state } from "./store.js";
+import { $, canUseApi, payoutPeriodLabel, formatPayoutPeriodLabel, state } from "./store.js";
 import { badgeClassForStatus, emptyStateMarkup, escapeHtml, formatTime, statusLabel } from "./utils.js";
 
 function setTextAll(ids, text) {
@@ -7,6 +7,15 @@ function setTextAll(ids, text) {
     const node = $(id);
     if (node) node.textContent = text;
   });
+}
+
+function composerPeriodLabel() {
+  const startDay = state.composer.periodStartDay;
+  const startMonth = state.composer.periodStartMonth;
+  const endDay = state.composer.periodEndDay;
+  const endMonth = state.composer.periodEndMonth;
+  if (!startDay || !startMonth || !endDay || !endMonth) return "";
+  return formatPayoutPeriodLabel(startDay, startMonth, endDay, endMonth);
 }
 
 export function renderNotifications() {
@@ -61,9 +70,13 @@ export function formatPayoutPreviewText() {
   const payoutDetail = state.selectedPayoutDetail?.payout || null;
   const template = state.composer.messageTemplate.trim() || payoutDetail?.message_template || "";
   if (!template.trim()) return "";
-  const periodFrom = state.composer.periodFrom || payoutDetail?.period_from || "";
-  const periodTo = state.composer.periodTo || payoutDetail?.period_to || "";
-  return template.replaceAll("{period_from}", periodFrom).replaceAll("{period_to}", periodTo);
+  const periodLabel = composerPeriodLabel() || payoutPeriodLabel(payoutDetail);
+  const periodStart = periodLabel ? periodLabel.split(" — ")[0] : "";
+  const periodEnd = periodLabel ? periodLabel.split(" — ")[1] : "";
+  return template
+    .replaceAll("{period_start}", periodStart)
+    .replaceAll("{period_end}", periodEnd)
+    .replaceAll("{period_label}", periodLabel);
 }
 
 export function renderPreviewInto(rootId) {
@@ -122,7 +135,8 @@ export function recipientsEmptyMessage() {
 export function selectedPayoutSummaryText() {
   if (!state.selectedPayoutDetail) return "Выплата не выбрана";
   const { payout } = state.selectedPayoutDetail;
-  return `#${payout.id} · ${payout.title} · ${statusLabel(PAYOUT_STATUS_LABELS, payout.status)} · ${state.recipients.length} получ.`;
+  const periodLabel = payoutPeriodLabel(payout) || "Период не задан";
+  return `#${payout.id} · ${periodLabel} · ${statusLabel(PAYOUT_STATUS_LABELS, payout.status)} · ${state.recipients.length} получ.`;
 }
 
 export function renderCurrentPayoutInto(rootId) {
@@ -134,12 +148,19 @@ export function renderCurrentPayoutInto(rootId) {
   }
   const payout = state.selectedPayoutDetail.payout;
   const sendLoading = state.loading.sendPayout;
-  const exportLoading = state.loading.exportCsv;
+  const periodLabel = payoutPeriodLabel(payout) || "Период не задан";
+  const sendAction =
+    payout.status === "draft"
+      ? `<button type="button" data-action="send-payout" ${sendLoading ? "disabled" : ""}>${
+          sendLoading ? '<span class="spinner"></span> Рассылаем…' : "Разослать"
+        }</button>`
+      : "";
   root.innerHTML = `
     <div class="current-payout-card">
       <div class="current-payout-head">
         <div>
-          <strong>#${payout.id} · ${escapeHtml(payout.title)}</strong>
+          <strong>#${payout.id}</strong>
+          <div class="meta">Период: ${escapeHtml(periodLabel)}</div>
           <div class="meta">${escapeHtml(statusLabel(PAYOUT_STATUS_LABELS, payout.status))}</div>
         </div>
         <span class="badge ${badgeClassForStatus(payout.status)}">${escapeHtml(statusLabel(PAYOUT_STATUS_LABELS, payout.status))}</span>
@@ -147,14 +168,7 @@ export function renderCurrentPayoutInto(rootId) {
       <div class="current-payout-stats">
         <span>${state.recipients.length} получателей</span>
       </div>
-      <div class="current-payout-actions">
-        <button type="button" data-action="send-payout" ${sendLoading ? "disabled" : ""}>${
-          sendLoading ? '<span class="spinner"></span> Рассылаем…' : "Разослать"
-        }</button>
-        <button type="button" class="secondary-button" data-action="export-csv" ${exportLoading ? "disabled" : ""}>${
-          exportLoading ? '<span class="spinner"></span> Экспорт…' : "Скачать CSV"
-        }</button>
-      </div>
+      ${sendAction ? `<div class="current-payout-actions">${sendAction}</div>` : ""}
     </div>`;
 }
 

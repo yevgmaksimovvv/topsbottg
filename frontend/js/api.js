@@ -11,7 +11,7 @@ async function readErrorMessage(response) {
   return response.text();
 }
 
-async function api(path, options = {}) {
+export async function api(path, options = {}) {
   if (!canUseApi()) {
     throw new Error("Нет доступа к данным");
   }
@@ -30,23 +30,6 @@ async function api(path, options = {}) {
   const contentType = response.headers.get("content-type") || "";
   if (contentType.includes("application/json")) return response.json();
   return response.text();
-}
-
-function validatePayoutForm() {
-  const errors = [];
-  if (!state.composer.title.trim()) errors.push("Введите название выплаты.");
-  if (!state.composer.periodFrom) errors.push("Укажите дату начала периода.");
-  if (!state.composer.periodTo) errors.push("Укажите дату окончания периода.");
-  if (state.composer.periodFrom && state.composer.periodTo && state.composer.periodFrom > state.composer.periodTo) {
-    errors.push("Период начала не может быть позже периода окончания.");
-  }
-
-  document.querySelectorAll("#desktop-payout-validation, #mobile-payout-validation").forEach((node) => {
-    node.textContent = errors.join(" ");
-    node.classList.toggle("hidden", errors.length === 0);
-  });
-
-  return errors.length === 0 ? { ...state.composer } : null;
 }
 
 function setLoadingAndRender(key, value) {
@@ -97,8 +80,6 @@ async function loadUsers({ reset = true } = {}) {
     params.set("limit", String(state.usersLimit));
     params.set("offset", String(state.usersOffset));
     if (state.usersSearch.trim()) params.set("search", state.usersSearch.trim());
-    if (state.usersHasPayment !== "") params.set("has_payment_profile", state.usersHasPayment);
-    if (state.usersIsActive !== "") params.set("is_active", state.usersIsActive);
     const page = await api(`/admin/users?${params.toString()}`);
     if (requestId !== state.usersRequestId) return;
     state.users = reset ? page.items : [...state.users, ...page.items];
@@ -115,7 +96,7 @@ async function loadUsers({ reset = true } = {}) {
   }
 }
 
-async function loadPayouts() {
+export async function loadPayouts() {
   if (!canUseApi()) return;
   const requestId = ++state.payoutRequestId;
   setLoadingAndRender("payouts", true);
@@ -136,7 +117,7 @@ async function loadPayouts() {
   }
 }
 
-async function refreshSelectedPayout({ silent = false } = {}) {
+export async function refreshSelectedPayout({ silent = false } = {}) {
   if (!state.selectedPayoutId || !canUseApi()) return;
   const requestId = ++state.payoutRequestId;
   if (!silent) setLoadingAndRender("recipients", true);
@@ -161,114 +142,6 @@ async function selectPayout(id) {
   stopPolling();
   await refreshSelectedPayout();
   renderApp();
-}
-
-async function createPayout() {
-  if (!canUseApi()) return;
-  const payload = validatePayoutForm();
-  if (!payload) return;
-  if (!state.selectedUsers.size) {
-    const confirmed = window.confirm("Создать выплату без получателей?");
-    if (!confirmed) return;
-  }
-  setLoadingAndRender("createPayout", true);
-  clearError();
-  try {
-    const payout = await api("/admin/payouts", {
-      method: "POST",
-      body: JSON.stringify({
-        title: payload.title,
-        period_from: payload.periodFrom,
-        period_to: payload.periodTo,
-        message_template: payload.messageTemplate.trim() || null,
-      }),
-    });
-    if (state.selectedUsers.size) {
-      await api(`/admin/payouts/${payout.id}/recipients`, {
-        method: "POST",
-        body: JSON.stringify({ user_ids: [...state.selectedUsers] }),
-      });
-    }
-    setToastAndRender(`Выплата #${payout.id} создана.`);
-    await loadPayouts();
-    state.selectedPayoutId = payout.id;
-    await refreshSelectedPayout();
-  } catch (error) {
-    setErrorAndRender(error.message || "Не удалось создать выплату");
-  } finally {
-    setLoadingAndRender("createPayout", false);
-  }
-}
-
-async function attachSelected() {
-  if (!canUseApi() || !state.selectedPayoutId || !state.selectedUsers.size) return;
-  setLoadingAndRender("attachSelected", true);
-  try {
-    await api(`/admin/payouts/${state.selectedPayoutId}/recipients`, {
-      method: "POST",
-      body: JSON.stringify({ user_ids: [...state.selectedUsers] }),
-    });
-    setToastAndRender("Выбранные пользователи добавлены к выплате.");
-    await refreshSelectedPayout();
-    await loadPayouts();
-  } catch (error) {
-    setErrorAndRender(error.message || "Не удалось добавить пользователей");
-  } finally {
-    setLoadingAndRender("attachSelected", false);
-  }
-}
-
-async function sendPayout() {
-  if (!canUseApi() || !state.selectedPayoutId) return;
-  if (!state.selectedPayoutDetail || state.selectedPayoutDetail.payout.id !== state.selectedPayoutId) {
-    await refreshSelectedPayout({ silent: true });
-  }
-  const payout = state.selectedPayoutDetail?.payout;
-  const count = state.recipients.length;
-  const confirmed = window.confirm(
-    `Запустить рассылку выплаты "${payout?.title || state.selectedPayoutId}" для ${count} получателей?`
-  );
-  if (!confirmed) return;
-  setLoadingAndRender("sendPayout", true);
-  try {
-    await api(`/admin/payouts/${state.selectedPayoutId}/send`, { method: "POST" });
-    setToastAndRender("Рассылка запущена.");
-    await refreshSelectedPayout();
-    await loadPayouts();
-  } catch (error) {
-    setErrorAndRender(error.message || "Не удалось запустить рассылку");
-  } finally {
-    setLoadingAndRender("sendPayout", false);
-  }
-}
-
-async function exportCsv() {
-  if (!canUseApi() || !state.selectedPayoutId) return;
-  setLoadingAndRender("exportCsv", true);
-  try {
-    const response = await fetch(`/api/admin/payouts/${state.selectedPayoutId}/export.csv`, {
-      headers: {
-        "X-Telegram-Init-Data": state.initData,
-      },
-    });
-    if (!response.ok) {
-      throw new Error(await readErrorMessage(response));
-    }
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `payout-${state.selectedPayoutId}.csv`;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-    setToastAndRender("CSV выгружен.");
-  } catch (error) {
-    setErrorAndRender(error.message || "Не удалось выгрузить CSV");
-  } finally {
-    setLoadingAndRender("exportCsv", false);
-  }
 }
 
 async function markPaid(recipientId) {
@@ -338,7 +211,6 @@ export {
   closePaymentModal,
   copyPaymentDetails,
   createPayout,
-  exportCsv,
   loadPayouts,
   loadUsers,
   markPaid,

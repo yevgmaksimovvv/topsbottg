@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -10,7 +10,6 @@ class UserOut(BaseModel):
     telegram_user_id: int
     telegram_id: int
     full_name: str
-    is_active: bool
     has_payment_profile: bool
     payment_profile_id: int | None = None
 
@@ -43,16 +42,22 @@ class PaymentProfileRevealOut(BaseModel):
 
 
 class PayoutCreate(BaseModel):
-    title: str = Field(min_length=1, max_length=120)
-    period_from: date
-    period_to: date
+    model_config = ConfigDict(extra="forbid")
+
+    period_start_day: int
+    period_start_month: int
+    period_end_day: int
+    period_end_month: int
     message_template: str | None = Field(default=None, max_length=4000)
 
 
 class PayoutUpdate(BaseModel):
-    title: str | None = Field(default=None, min_length=1, max_length=120)
-    period_from: date | None = None
-    period_to: date | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    period_start_day: int | None = None
+    period_start_month: int | None = None
+    period_end_day: int | None = None
+    period_end_month: int | None = None
     message_template: str | None = Field(default=None, max_length=4000)
 
 
@@ -92,9 +97,11 @@ class RecipientOut(BaseModel):
 
 class PayoutOut(BaseModel):
     id: int
-    title: str
-    period_from: date
-    period_to: date
+    period_start_day: int
+    period_start_month: int
+    period_end_day: int
+    period_end_month: int
+    period_label: str
     message_template: str
     status: str
     created_by_telegram_id: int

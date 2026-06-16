@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -52,6 +54,16 @@ def _make_dispatcher(session_factory, settings) -> Dispatcher:
     return dispatcher
 
 
+def _payout_payload() -> dict[str, object]:
+    return {
+        "period_start_day": 1,
+        "period_start_month": 3,
+        "period_end_day": 31,
+        "period_end_month": 3,
+        "message_template": None,
+    }
+
+
 def _make_update(bot: Bot, user_id: int, text: str, update_id: int) -> Update:
     return Update.model_validate(
         {
@@ -100,6 +112,16 @@ def _expected_payment_prompt() -> str:
         "или\n"
         "карта 1111 1111 1111 1111, Сбер, Иван Иванович И."
     )
+
+
+def _events(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for record in caplog.records:
+        try:
+            events.append(json.loads(record.getMessage()))
+        except json.JSONDecodeError:
+            continue
+    return events
 
 
 async def test_main_keyboard_regular_user_has_no_admin_button():
@@ -178,7 +200,10 @@ async def test_start_registered_non_admin_has_no_admin_button(session_factory, s
 
 
 @pytest.mark.asyncio
-async def test_admin_command_shows_inline_web_app_button_for_admin(session_factory, settings):
+async def test_admin_command_shows_inline_web_app_button_for_admin(
+    session_factory, settings, caplog: pytest.LogCaptureFixture
+):
+    caplog.set_level(logging.INFO)
     async with session_factory() as session:
         await get_or_create_user(session, 123, "Админ Пользователь")
         await session.commit()
@@ -193,10 +218,16 @@ async def test_admin_command_shows_inline_web_app_button_for_admin(session_facto
     assert _inline_keyboard_texts(method.reply_markup) == [["Открыть админку"]]
     admin_button = _inline_keyboard_button(method.reply_markup, "Открыть админку")
     assert admin_button.web_app == WebAppInfo(url=settings.mini_app_url)
+    events = _events(caplog)
+    assert any(event.get("event") == "bot_admin_entrypoint_requested" for event in events)
+    assert any(event.get("event") == "bot_admin_entrypoint_sent" for event in events)
 
 
 @pytest.mark.asyncio
-async def test_admin_command_is_not_available_for_non_admin(session_factory, settings):
+async def test_admin_command_is_not_available_for_non_admin(
+    session_factory, settings, caplog: pytest.LogCaptureFixture
+):
+    caplog.set_level(logging.INFO)
     async with session_factory() as session:
         await get_or_create_user(session, 111, "Обычный Пользователь")
         await session.commit()
@@ -209,6 +240,11 @@ async def test_admin_command_is_not_available_for_non_admin(session_factory, set
     method = _last_method(recording_session)
     assert method.text == "Команда доступна только админам."
     assert method.reply_markup is None
+    events = _events(caplog)
+    assert any(
+        event.get("event") == "bot_admin_entrypoint_denied" and event.get("reason") == "non_admin"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio
@@ -218,12 +254,7 @@ async def test_registration_full_name_asks_payment_decision_only_on_first_regist
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Июнь",
-                "period_from": datetime(2026, 3, 1).date(),
-                "period_to": datetime(2026, 3, 31).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(),
         )
         payout.status = PayoutStatus.sending.value
         payout = await add_recipients(session, payout, [user.id])
@@ -256,12 +287,7 @@ async def test_payment_later_returns_main_keyboard(session_factory, settings):
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Июнь",
-                "period_from": datetime(2026, 3, 1).date(),
-                "period_to": datetime(2026, 3, 31).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(),
         )
         payout.status = PayoutStatus.sending.value
         [recipient] = await add_recipients(session, payout, [user.id])
@@ -292,18 +318,16 @@ async def test_payment_later_returns_main_keyboard(session_factory, settings):
 
 
 @pytest.mark.asyncio
-async def test_payment_details_saved_returns_main_keyboard(session_factory, settings):
+async def test_payment_details_saved_returns_main_keyboard(
+    session_factory, settings, caplog: pytest.LogCaptureFixture
+):
+    caplog.set_level(logging.INFO)
     async with session_factory() as session:
         user = await get_or_create_user(session, 111, "Без ФИО")
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Июнь",
-                "period_from": datetime(2026, 3, 1).date(),
-                "period_to": datetime(2026, 3, 31).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(),
         )
         payout.status = PayoutStatus.sending.value
         [recipient] = await add_recipients(session, payout, [user.id])
@@ -340,6 +364,10 @@ async def test_payment_details_saved_returns_main_keyboard(session_factory, sett
         assert profile.raw_payment_details == "Сбер\n+7 999 123 45 67\nИван"
         recipient = await session.get(type(recipient), recipient.id)
         assert recipient.status == RecipientStatus.payment_received.value
+    events = _events(caplog)
+    assert any(event.get("event") == "bot_payment_details_update_started" for event in events)
+    assert any(event.get("event") == "bot_payment_details_update_completed" for event in events)
+    assert "Сбер" not in json.dumps(events, ensure_ascii=False)
 
 
 @pytest.mark.asyncio
@@ -349,12 +377,7 @@ async def test_empty_payment_details_rejected(session_factory, settings):
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Июнь",
-                "period_from": datetime(2026, 3, 1).date(),
-                "period_to": datetime(2026, 3, 31).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(),
         )
         payout.status = PayoutStatus.sending.value
         [recipient] = await add_recipients(session, payout, [user.id])
@@ -459,12 +482,7 @@ async def test_payment_details_saved_admin_keeps_admin_button(session_factory, s
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Июнь",
-                "period_from": datetime(2026, 3, 1).date(),
-                "period_to": datetime(2026, 3, 31).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(),
         )
         payout.status = PayoutStatus.sending.value
         [recipient] = await add_recipients(session, payout, [123])

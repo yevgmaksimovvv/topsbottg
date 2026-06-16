@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import JSON, BigInteger, Boolean, Date, DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy import JSON, BigInteger, CheckConstraint, DateTime, ForeignKey, Index, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -47,7 +47,6 @@ class User(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
     full_name: Mapped[str] = mapped_column(Text, nullable=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     payment_profile: Mapped[PaymentProfile | None] = relationship(back_populates="user")
     payout_recipients: Mapped[list[PayoutRecipient]] = relationship(back_populates="user")
@@ -66,11 +65,18 @@ class PaymentProfile(Base, TimestampMixin):
 
 class Payout(Base, TimestampMixin):
     __tablename__ = "payouts"
+    __table_args__ = (
+        CheckConstraint("period_start_day BETWEEN 1 AND 31", name="ck_payouts_period_start_day"),
+        CheckConstraint("period_start_month BETWEEN 1 AND 12", name="ck_payouts_period_start_month"),
+        CheckConstraint("period_end_day BETWEEN 1 AND 31", name="ck_payouts_period_end_day"),
+        CheckConstraint("period_end_month BETWEEN 1 AND 12", name="ck_payouts_period_end_month"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    title: Mapped[str] = mapped_column(Text, nullable=False)
-    period_from: Mapped[date] = mapped_column(Date, nullable=False)
-    period_to: Mapped[date] = mapped_column(Date, nullable=False)
+    period_start_day: Mapped[int] = mapped_column(nullable=False)
+    period_start_month: Mapped[int] = mapped_column(nullable=False)
+    period_end_day: Mapped[int] = mapped_column(nullable=False)
+    period_end_month: Mapped[int] = mapped_column(nullable=False)
     message_template: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default=PayoutStatus.draft.value)
     created_by_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)

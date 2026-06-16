@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import importlib
+import json
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import sqlalchemy as sa
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from sqlalchemy import select
 
-from topsbottg.models import AuditLog, PayoutRecipient, RecipientStatus
+from topsbottg.models import AuditLog, PayoutRecipient, PayoutStatus, RecipientStatus
 from topsbottg.services import (
     add_recipients,
     cancel_recipient,
@@ -14,13 +20,14 @@ from topsbottg.services import (
     confirm_saved_profile,
     create_payout,
     finalize_payout_after_worker,
-    format_recipients_csv,
     get_or_create_user,
+    list_users,
     mark_paid,
     recover_stale_sending,
     retry_failed_recipient,
     save_payment_reply,
     save_profile_and_snapshot,
+    set_payout_sending,
     soft_delete_payment_profile,
     start_user,
     update_payout,
@@ -30,6 +37,16 @@ from topsbottg.services import (
 )
 
 
+def _events(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for record in caplog.records:
+        try:
+            events.append(json.loads(record.getMessage()))
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
 async def _create_payout_with_recipient(session_factory, *, with_profile: bool = False):
     async with session_factory() as session:
         user = await get_or_create_user(session, 111, "Иван Иванов")
@@ -37,9 +54,10 @@ async def _create_payout_with_recipient(session_factory, *, with_profile: bool =
             session,
             actor_telegram_id=123,
             payload={
-                "title": "Май",
-                "period_from": datetime(2026, 2, 1).date(),
-                "period_to": datetime(2026, 2, 28).date(),
+                "period_start_day": 1,
+                "period_start_month": 2,
+                "period_end_day": 28,
+                "period_end_month": 2,
                 "message_template": None,
             },
         )
@@ -48,6 +66,23 @@ async def _create_payout_with_recipient(session_factory, *, with_profile: bool =
         [recipient] = await add_recipients(session, payout, [user.id])
         await session.commit()
     return payout, recipient, user
+
+
+def _payout_payload(
+    *,
+    start_day: int = 1,
+    start_month: int = 2,
+    end_day: int = 28,
+    end_month: int = 2,
+    message_template: str | None = None,
+) -> dict[str, object]:
+    return {
+        "period_start_day": start_day,
+        "period_start_month": start_month,
+        "period_end_day": end_day,
+        "period_end_month": end_month,
+        "message_template": message_template,
+    }
 
 
 @pytest.mark.asyncio
@@ -81,7 +116,8 @@ async def test_update_full_name(session_factory):
 
 
 def test_validate_message_template_accepts_allowed_placeholders():
-    validate_message_template("Выплата за {period_from} - {period_to}")
+    validate_message_template("Выплата за {period_label}")
+    validate_message_template("Выплата за {period_start} - {period_end}")
     validate_message_template("Escaped braces {{ok}} and text")
 
 
@@ -89,8 +125,8 @@ def test_validate_message_template_accepts_allowed_placeholders():
     "template",
     [
         "Bad {name}",
-        "Bad {period_from!r}",
-        "Bad {period_to:>10}",
+        "Bad {period_label!r}",
+        "Bad {period_label:>10}",
         "Bad {",
     ],
 )
@@ -100,7 +136,8 @@ def test_validate_message_template_rejects_invalid_templates(template):
 
 
 @pytest.mark.asyncio
-async def test_payment_profile_lifecycle(session_factory):
+async def test_payment_profile_lifecycle(session_factory, caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO)
     async with session_factory() as session:
         user = await get_or_create_user(session, 111, "Иван Иванов")
         await session.commit()
@@ -115,6 +152,62 @@ async def test_payment_profile_lifecycle(session_factory):
         await session.commit()
         profile = await session.scalar(select(type(profile)).where(type(profile).user_id == user.id))
         assert profile.deleted_at is not None
+    events = _events(caplog)
+    assert any(event.get("event") == "payment_details_upsert_requested" for event in events)
+    assert any(event.get("event") == "payment_details_upsert_completed" for event in events)
+    assert "Иван Иванов\n+79990000000\nT-Bank" not in json.dumps(events, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_list_users_sorts_by_full_name_then_id(session_factory):
+    async with session_factory() as session:
+        first = await get_or_create_user(session, 111, "Иван Иванов")
+        second = await get_or_create_user(session, 222, "Алексей Петров")
+        third = await get_or_create_user(session, 333, "Иван Иванов")
+        await session.commit()
+
+    async with session_factory() as session:
+        rows = await list_users(session, limit=10)
+
+    assert [user.full_name for user, _ in rows] == ["Алексей Петров", "Иван Иванов", "Иван Иванов"]
+    assert [user.id for user, _ in rows] == [second.id, first.id, third.id]
+
+
+def test_remove_user_is_active_migration_roundtrip():
+    migration_path = Path(__file__).resolve().parents[1] / "migrations/versions/0006_remove_user_is_active.py"
+    spec = importlib.util.spec_from_file_location("remove_user_is_active_migration", migration_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    sa.Table(
+        "users",
+        metadata,
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column("telegram_id", sa.BigInteger(), nullable=False),
+        sa.Column("full_name", sa.Text(), nullable=False),
+        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
+        sa.UniqueConstraint("telegram_id"),
+    )
+    metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        context = MigrationContext.configure(connection)
+        ops = Operations(context)
+        original_op = migration.op
+        migration.op = ops
+        try:
+            migration.upgrade()
+            columns = {column["name"]: column for column in sa.inspect(connection).get_columns("users")}
+            assert "is_active" not in columns
+            migration.downgrade()
+            columns = {column["name"]: column for column in sa.inspect(connection).get_columns("users")}
+            assert "is_active" in columns
+            assert columns["is_active"]["nullable"] is False
+        finally:
+            migration.op = original_op
+    engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -125,9 +218,10 @@ async def test_create_payout_rejects_invalid_period(session_factory):
                 session,
                 actor_telegram_id=123,
                 payload={
-                    "title": "Bad",
-                    "period_from": datetime(2026, 2, 28).date(),
-                    "period_to": datetime(2026, 2, 1).date(),
+                    "period_start_day": 31,
+                    "period_start_month": 2,
+                    "period_end_day": 1,
+                    "period_end_month": 2,
                     "message_template": None,
                 },
             )
@@ -141,12 +235,122 @@ async def test_create_payout_rejects_invalid_template(session_factory):
                 session,
                 actor_telegram_id=123,
                 payload={
-                    "title": "Bad",
-                    "period_from": datetime(2026, 2, 1).date(),
-                    "period_to": datetime(2026, 2, 28).date(),
+                    "period_start_day": 1,
+                    "period_start_month": 2,
+                    "period_end_day": 28,
+                    "period_end_month": 2,
                     "message_template": "Hello {name}",
                 },
             )
+
+
+@pytest.mark.asyncio
+async def test_create_payout_accepts_same_start_and_end(session_factory):
+    async with session_factory() as session:
+        payout = await create_payout(
+            session,
+            actor_telegram_id=123,
+            payload={
+                "period_start_day": 5,
+                "period_start_month": 6,
+                "period_end_day": 5,
+                "period_end_month": 6,
+                "message_template": None,
+            },
+        )
+        await session.commit()
+    assert payout.period_start_day == 5
+    assert payout.period_end_day == 5
+
+
+@pytest.mark.asyncio
+async def test_create_two_payouts_with_same_period(session_factory):
+    async with session_factory() as session:
+        first = await create_payout(
+            session,
+            actor_telegram_id=123,
+            payload={
+                "period_start_day": 5,
+                "period_start_month": 6,
+                "period_end_day": 5,
+                "period_end_month": 6,
+                "message_template": None,
+            },
+        )
+        second = await create_payout(
+            session,
+            actor_telegram_id=123,
+            payload={
+                "period_start_day": 5,
+                "period_start_month": 6,
+                "period_end_day": 5,
+                "period_end_month": 6,
+                "message_template": None,
+            },
+        )
+        await session.commit()
+    assert first.id != second.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "expected_fragment"),
+    [
+        (
+            {
+                "period_start_day": 1,
+                "period_start_month": 13,
+                "period_end_day": 5,
+                "period_end_month": 6,
+                "message_template": None,
+            },
+            "Месяц начала",
+        ),
+        (
+            {
+                "period_start_day": 0,
+                "period_start_month": 6,
+                "period_end_day": 5,
+                "period_end_month": 6,
+                "message_template": None,
+            },
+            "День начала",
+        ),
+        (
+            {
+                "period_start_day": 31,
+                "period_start_month": 2,
+                "period_end_day": 5,
+                "period_end_month": 6,
+                "message_template": None,
+            },
+            "невозможная дата",
+        ),
+    ],
+)
+async def test_create_payout_rejects_day_month_validation(session_factory, payload, expected_fragment):
+    async with session_factory() as session:
+        with pytest.raises(ValueError) as exc_info:
+            await create_payout(session, actor_telegram_id=123, payload=payload)
+    assert expected_fragment in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_create_payout_accepts_29_february(session_factory):
+    async with session_factory() as session:
+        payout = await create_payout(
+            session,
+            actor_telegram_id=123,
+            payload={
+                "period_start_day": 29,
+                "period_start_month": 2,
+                "period_end_day": 29,
+                "period_end_month": 2,
+                "message_template": None,
+            },
+        )
+        await session.commit()
+    assert payout.period_start_day == 29
 
 
 @pytest.mark.asyncio
@@ -156,9 +360,10 @@ async def test_update_payout_validates_dates_and_template(session_factory):
             session,
             actor_telegram_id=123,
             payload={
-                "title": "Good",
-                "period_from": datetime(2026, 2, 1).date(),
-                "period_to": datetime(2026, 2, 28).date(),
+                "period_start_day": 1,
+                "period_start_month": 2,
+                "period_end_day": 28,
+                "period_end_month": 2,
                 "message_template": None,
             },
         )
@@ -172,8 +377,10 @@ async def test_update_payout_validates_dates_and_template(session_factory):
                 payout,
                 actor_telegram_id=123,
                 payload={
-                    "period_from": datetime(2026, 3, 1).date(),
-                    "period_to": datetime(2026, 2, 1).date(),
+                    "period_start_day": 31,
+                    "period_start_month": 4,
+                    "period_end_day": 1,
+                    "period_end_month": 4,
                 },
             )
         with pytest.raises(ValueError):
@@ -281,12 +488,7 @@ async def test_successful_send_without_profile_sets_payment_required(session_fac
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Июнь",
-                "period_from": datetime(2026, 3, 1).date(),
-                "period_to": datetime(2026, 3, 31).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(start_day=1, start_month=3, end_day=31, end_month=3),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.sending.value
@@ -309,12 +511,7 @@ async def test_successful_send_with_profile_sets_sent(session_factory):
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Июнь",
-                "period_from": datetime(2026, 3, 1).date(),
-                "period_to": datetime(2026, 3, 31).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(start_day=1, start_month=3, end_day=31, end_month=3),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.sending.value
@@ -377,12 +574,7 @@ async def test_payment_required_to_payment_received_after_raw_payment_details(se
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Июнь",
-                "period_from": datetime(2026, 3, 1).date(),
-                "period_to": datetime(2026, 3, 31).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(start_day=1, start_month=3, end_day=31, end_month=3),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.payment_required.value
@@ -410,12 +602,7 @@ async def test_free_text_reply_does_not_auto_mark_payment_received(session_facto
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Июнь",
-                "period_from": datetime(2026, 3, 1).date(),
-                "period_to": datetime(2026, 3, 31).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(start_day=1, start_month=3, end_day=31, end_month=3),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.sent.value
@@ -436,12 +623,7 @@ async def test_confirm_saved_profile_sets_payment_received(session_factory):
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Июль",
-                "period_from": datetime(2026, 4, 1).date(),
-                "period_to": datetime(2026, 4, 30).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(start_day=1, start_month=4, end_day=30, end_month=4),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.sent.value
@@ -465,12 +647,7 @@ async def test_confirm_saved_profile_idor_rejected(session_factory):
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Июль",
-                "period_from": datetime(2026, 4, 1).date(),
-                "period_to": datetime(2026, 4, 30).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(start_day=1, start_month=4, end_day=30, end_month=4),
         )
         [recipient] = await add_recipients(session, payout, [owner.id])
         recipient.status = RecipientStatus.sent.value
@@ -492,12 +669,7 @@ async def test_mark_paid_service(session_factory):
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Апрель",
-                "period_from": datetime(2026, 1, 1).date(),
-                "period_to": datetime(2026, 1, 31).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(start_day=1, start_month=1, end_day=31, end_month=1),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.payment_received.value
@@ -506,6 +678,35 @@ async def test_mark_paid_service(session_factory):
         await session.commit()
         assert recipient.status == RecipientStatus.paid.value
         assert recipient.paid_by_admin_id == 123
+
+
+@pytest.mark.asyncio
+async def test_add_recipients_logs_counts_without_details(session_factory, caplog: pytest.LogCaptureFixture):
+    caplog.set_level(logging.INFO)
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 111, "Иван Иванов")
+        payout = await create_payout(
+            session,
+            actor_telegram_id=123,
+            payload=_payout_payload(start_day=1, start_month=2, end_day=28, end_month=2),
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        payout = await session.get(type(payout), payout.id)
+        created = await add_recipients(session, payout, [user.id])
+        await session.commit()
+        assert len(created) == 1
+
+    events = _events(caplog)
+    completed = next(
+        event
+        for event in events
+        if event.get("event") == "payout_action_completed" and event.get("action") == "add_recipients"
+    )
+    assert completed["payout_id"] == payout.id
+    assert completed["result_count"] == 1
+    assert "Иван Иванов" not in json.dumps(events, ensure_ascii=False)
 
 
 @pytest.mark.asyncio
@@ -524,12 +725,7 @@ async def test_mark_paid_rejects_wrong_status(session_factory, initial_status):
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Апрель",
-                "period_from": datetime(2026, 1, 1).date(),
-                "period_to": datetime(2026, 1, 31).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(start_day=1, start_month=1, end_day=31, end_month=1),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = initial_status
@@ -545,12 +741,7 @@ async def test_paid_cannot_be_cancelled(session_factory):
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Апрель",
-                "period_from": datetime(2026, 1, 1).date(),
-                "period_to": datetime(2026, 1, 31).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(start_day=1, start_month=1, end_day=31, end_month=1),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.paid.value
@@ -584,12 +775,7 @@ async def test_payout_terminal_state_after_worker(session_factory):
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Март",
-                "period_from": datetime(2026, 2, 1).date(),
-                "period_to": datetime(2026, 2, 28).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(start_day=1, start_month=2, end_day=28, end_month=2),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.failed.value
@@ -610,12 +796,7 @@ async def test_retry_failed_recipient(session_factory):
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Март",
-                "period_from": datetime(2026, 2, 1).date(),
-                "period_to": datetime(2026, 2, 28).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(start_day=1, start_month=2, end_day=28, end_month=2),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.failed.value
@@ -628,89 +809,13 @@ async def test_retry_failed_recipient(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_csv_contains_snapshot_and_handles_missing_snapshot(session_factory):
-    async with session_factory() as session:
-        user = await get_or_create_user(session, 111, "Иван Иванов")
-        payout = await create_payout(
-            session,
-            actor_telegram_id=123,
-            payload={
-                "title": "Май",
-                "period_from": datetime(2026, 2, 1).date(),
-                "period_to": datetime(2026, 2, 28).date(),
-                "message_template": None,
-            },
-        )
-        [recipient] = await add_recipients(session, payout, [user.id])
-        recipient.status = RecipientStatus.payment_received.value
-        recipient.payment_profile_snapshot = {
-            "raw_payment_details": "Иван Иванов\n+79990000000\nT-Bank\nnote",
-        }
-        await session.commit()
-        csv_data = await format_recipients_csv(session, payout.id)
-        assert "raw_payment_details" in csv_data
-        assert "Иван Иванов" in csv_data
-        assert "T-Bank" in csv_data
-        header = csv_data.splitlines()[0]
-        assert "recipient_full_name" not in header
-        assert "phone" not in header
-        assert "bank_name" not in header
-        assert "comment" not in header
-
-    async with session_factory() as session:
-        payout = await create_payout(
-            session,
-            actor_telegram_id=123,
-            payload={
-                "title": "Пустая",
-                "period_from": datetime(2026, 2, 1).date(),
-                "period_to": datetime(2026, 2, 28).date(),
-                "message_template": None,
-            },
-        )
-        await session.commit()
-        csv_data = await format_recipients_csv(session, payout.id)
-        assert "recipient_id,payout_id,user_id" in csv_data
-
-
-@pytest.mark.asyncio
-async def test_csv_contains_snapshot_after_confirm_saved_profile(session_factory):
-    async with session_factory() as session:
-        user = await get_or_create_user(session, 111, "Иван Иванов")
-        await upsert_payment_profile(session, user, "Иван Иванов\n+79990000000\nT-Bank\nnote")
-        payout = await create_payout(
-            session,
-            actor_telegram_id=123,
-            payload={
-                "title": "Май",
-                "period_from": datetime(2026, 2, 1).date(),
-                "period_to": datetime(2026, 2, 28).date(),
-                "message_template": None,
-            },
-        )
-        [recipient] = await add_recipients(session, payout, [user.id])
-        recipient.status = RecipientStatus.sent.value
-        await session.commit()
-        await confirm_saved_profile(session, recipient_id=recipient.id, user_id=user.id)
-        await session.commit()
-        csv_data = await format_recipients_csv(session, payout.id)
-        assert "raw_payment_details" in csv_data
-        assert "Иван Иванов" in csv_data
-
-
-@pytest.mark.asyncio
 async def test_audit_log_does_not_store_payment_details(session_factory):
     async with session_factory() as session:
         user = await get_or_create_user(session, 111, "Иван Иванов")
         payout = await create_payout(
             session,
             actor_telegram_id=123,
-            payload={
-                "title": "Апрель",
-                "period_from": datetime(2026, 1, 1).date(),
-                "period_to": datetime(2026, 1, 31).date(),
-                "message_template": None,
-            },
+            payload=_payout_payload(start_day=1, start_month=1, end_day=31, end_month=1),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.payment_received.value
@@ -721,6 +826,20 @@ async def test_audit_log_does_not_store_payment_details(session_factory):
         log = rows.first()
         assert log is not None
         assert log.meta is None
+
+
+@pytest.mark.asyncio
+async def test_set_payout_sending_requires_draft_status(session_factory):
+    async with session_factory() as session:
+        payout = await create_payout(
+            session,
+            actor_telegram_id=123,
+            payload=_payout_payload(start_day=1, start_month=2, end_day=28, end_month=2),
+        )
+        payout.status = PayoutStatus.sent.value
+        await session.commit()
+        with pytest.raises(ValueError, match="payout can only be sent from draft"):
+            await set_payout_sending(session, payout, actor_telegram_id=123)
 
 
 def test_services_source_has_no_legacy_payment_helper():
