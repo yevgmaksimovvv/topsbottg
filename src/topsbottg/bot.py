@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -47,6 +47,8 @@ CHANGE_NAME_BUTTON_TEXT = "Изменить ФИО"
 PAYMENT_DETAILS_BUTTON_TEXT = "Платёжные данные"
 PAYMENT_DETAILS_BUTTON_TEXT_ALT = "Платежные данные"
 CHANGE_PAYMENT_DETAILS_BUTTON_TEXT = "Изменить платёжные данные"
+ADMIN_ENTRYPOINT_TEXT = "Админка"
+ADMIN_INLINE_BUTTON_TEXT = "Открыть админку"
 
 
 def _is_admin(settings, telegram_id: int) -> bool:
@@ -58,13 +60,27 @@ def main_keyboard(*, is_admin: bool = False, mini_app_url: str | None = None) ->
         [KeyboardButton(text=MY_DATA_BUTTON_TEXT), KeyboardButton(text=CHANGE_NAME_BUTTON_TEXT)],
         [KeyboardButton(text=CHANGE_PAYMENT_DETAILS_BUTTON_TEXT)],
     ]
-    if is_admin and mini_app_url:
-        keyboard.append([KeyboardButton(text="Админка", web_app=WebAppInfo(url=mini_app_url))])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
 def _main_keyboard_for(message: Message, settings) -> ReplyKeyboardMarkup:
     return main_keyboard(is_admin=_is_admin(settings, message.from_user.id), mini_app_url=settings.mini_app_url)
+
+
+def admin_keyboard(mini_app_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=ADMIN_INLINE_BUTTON_TEXT, web_app=WebAppInfo(url=mini_app_url))]]
+    )
+
+
+async def _show_admin_entrypoint(message: Message, settings) -> None:
+    if not _is_admin(settings, message.from_user.id):
+        await message.answer("Команда доступна только админам.")
+        return
+    if not settings.mini_app_url:
+        await message.answer("Админка недоступна.")
+        return
+    await message.answer("Откройте админку.", reply_markup=admin_keyboard(settings.mini_app_url))
 
 
 def payment_decision_keyboard() -> ReplyKeyboardMarkup:
@@ -166,6 +182,14 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
             return
         main_markup = _main_keyboard_for(message, _settings)
         await message.answer("Вы уже зарегистрированы. Что хотите изменить?", reply_markup=main_markup)
+
+    @router.message(Command("admin"))
+    async def admin_command(message: Message):
+        await _show_admin_entrypoint(message, _settings)
+
+    @router.message(F.text == ADMIN_ENTRYPOINT_TEXT)
+    async def admin_text(message: Message):
+        await _show_admin_entrypoint(message, _settings)
 
     @router.message(RegistrationFSM.registration_full_name)
     async def save_registration_name(message: Message, state: FSMContext):

@@ -7,7 +7,7 @@ import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
+from aiogram.types import InlineKeyboardMarkup, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, WebAppInfo
 from sqlalchemy import select
 
 from topsbottg.bot import build_router, main_keyboard
@@ -78,9 +78,14 @@ def _keyboard_texts(reply_markup):
     return [[button.text for button in row] for row in reply_markup.keyboard]
 
 
-def _keyboard_button(reply_markup, text: str):
-    assert isinstance(reply_markup, ReplyKeyboardMarkup)
-    for row in reply_markup.keyboard:
+def _inline_keyboard_texts(reply_markup):
+    assert isinstance(reply_markup, InlineKeyboardMarkup)
+    return [[button.text for button in row] for row in reply_markup.inline_keyboard]
+
+
+def _inline_keyboard_button(reply_markup, text: str):
+    assert isinstance(reply_markup, InlineKeyboardMarkup)
+    for row in reply_markup.inline_keyboard:
         for button in row:
             if button.text == text:
                 return button
@@ -105,16 +110,13 @@ async def test_main_keyboard_regular_user_has_no_admin_button():
     ]
 
 
-async def test_main_keyboard_admin_has_web_app_button(settings):
+async def test_main_keyboard_admin_has_no_admin_button(settings):
     keyboard = main_keyboard(is_admin=True, mini_app_url=settings.mini_app_url)
     assert _keyboard_texts(keyboard) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
-        ["Админка"],
     ]
-    admin_button = _keyboard_button(keyboard, "Админка")
-    assert admin_button.web_app is not None
-    assert admin_button.web_app.url == settings.mini_app_url
+    assert all(button.web_app is None for row in keyboard.keyboard for button in row)
 
 
 async def test_start_for_registered_user_shows_main_keyboard(session_factory, settings):
@@ -136,7 +138,7 @@ async def test_start_for_registered_user_shows_main_keyboard(session_factory, se
 
 
 @pytest.mark.asyncio
-async def test_start_registered_admin_gets_admin_webapp_button(session_factory, settings):
+async def test_start_registered_admin_has_no_admin_button_in_reply_keyboard(session_factory, settings):
     async with session_factory() as session:
         await get_or_create_user(session, 123, "Админ Пользователь")
         await session.commit()
@@ -151,11 +153,8 @@ async def test_start_registered_admin_gets_admin_webapp_button(session_factory, 
     assert _keyboard_texts(method.reply_markup) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
-        ["Админка"],
     ]
-    admin_button = _keyboard_button(method.reply_markup, "Админка")
-    assert admin_button.web_app is not None
-    assert admin_button.web_app.url == settings.mini_app_url
+    assert all(button.web_app is None for row in method.reply_markup.keyboard for button in row)
 
 
 @pytest.mark.asyncio
@@ -175,6 +174,41 @@ async def test_start_registered_non_admin_has_no_admin_button(session_factory, s
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
     ]
+    assert all(button.web_app is None for row in method.reply_markup.keyboard for button in row)
+
+
+@pytest.mark.asyncio
+async def test_admin_command_shows_inline_web_app_button_for_admin(session_factory, settings):
+    async with session_factory() as session:
+        await get_or_create_user(session, 123, "Админ Пользователь")
+        await session.commit()
+
+    bot, recording_session = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+
+    await dispatcher.feed_update(bot, _make_update(bot, 123, "/admin", 1))
+
+    method = _last_method(recording_session)
+    assert method.text == "Откройте админку."
+    assert _inline_keyboard_texts(method.reply_markup) == [["Открыть админку"]]
+    admin_button = _inline_keyboard_button(method.reply_markup, "Открыть админку")
+    assert admin_button.web_app == WebAppInfo(url=settings.mini_app_url)
+
+
+@pytest.mark.asyncio
+async def test_admin_command_is_not_available_for_non_admin(session_factory, settings):
+    async with session_factory() as session:
+        await get_or_create_user(session, 111, "Обычный Пользователь")
+        await session.commit()
+
+    bot, recording_session = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "/admin", 1))
+
+    method = _last_method(recording_session)
+    assert method.text == "Команда доступна только админам."
+    assert method.reply_markup is None
 
 
 @pytest.mark.asyncio
@@ -449,11 +483,8 @@ async def test_payment_details_saved_admin_keeps_admin_button(session_factory, s
     assert _keyboard_texts(method.reply_markup) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
-        ["Админка"],
     ]
-    admin_button = _keyboard_button(method.reply_markup, "Админка")
-    assert admin_button.web_app is not None
-    assert admin_button.web_app.url == settings.mini_app_url
+    assert all(button.web_app is None for row in method.reply_markup.keyboard for button in row)
 
 
 @pytest.mark.asyncio
@@ -474,11 +505,8 @@ async def test_change_full_name_admin_keeps_admin_button(session_factory, settin
     assert _keyboard_texts(method.reply_markup) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
-        ["Админка"],
     ]
-    admin_button = _keyboard_button(method.reply_markup, "Админка")
-    assert admin_button.web_app is not None
-    assert admin_button.web_app.url == settings.mini_app_url
+    assert all(button.web_app is None for row in method.reply_markup.keyboard for button in row)
 
 
 @pytest.mark.asyncio
@@ -531,7 +559,23 @@ async def test_delete_payment_button_not_in_main_keyboard():
     assert all("Удалить платёжные данные" not in row for row in keyboard)
 
 
-async def test_admin_button_hidden_when_mini_app_url_missing():
+async def test_admin_command_hidden_when_mini_app_url_missing(session_factory, settings, monkeypatch):
+    monkeypatch.setattr(settings, "mini_app_url", None)
+    async with session_factory() as session:
+        await get_or_create_user(session, 123, "Админ Пользователь")
+        await session.commit()
+
+    bot, recording_session = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+
+    await dispatcher.feed_update(bot, _make_update(bot, 123, "/admin", 1))
+
+    method = _last_method(recording_session)
+    assert method.text == "Админка недоступна."
+    assert method.reply_markup is None
+
+
+async def test_main_keyboard_ignores_admin_flag_when_mini_app_url_missing():
     keyboard = main_keyboard(is_admin=True, mini_app_url=None)
     assert _keyboard_texts(keyboard) == [
         ["Мои данные", "Изменить ФИО"],
