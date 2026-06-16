@@ -53,9 +53,11 @@ server {
     }
 
     location /miniapp/ {
+        keepalive_timeout 0;
+        add_header Connection close always;
+        add_header Cache-Control "no-store" always;
         alias /usr/share/nginx/html/miniapp/;
         try_files $uri $uri/ /miniapp/index.html;
-        add_header Cache-Control "no-store" always;
     }
 
     location / {
