@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>topsbottg · Admin Mini App</title>
+    <link rel="stylesheet" href="/miniapp/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="app-header">
+        <div>
+          <div class="eyebrow">Админ-панель</div>
+          <h1>Выплаты</h1>
+          <p>Пользователи, выплаты и получатели.</p>
+        </div>
+        <div id="auth-state" class="auth-pill hidden"></div>
+      </header>
+
+      <div id="auth-banner" class="auth-banner hidden" role="status"></div>
+      <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+      <div id="error-banner" class="error-banner hidden" role="alert"></div>
+
+      <nav class="mobile-nav" aria-label="Разделы">
+        <button type="button" data-mobile-view="users" class="mobile-nav-button">Пользователи</button>
+        <button type="button" data-mobile-view="composer" class="mobile-nav-button">Выплата</button>
+        <button type="button" data-mobile-view="payouts" class="mobile-nav-button">Список</button>
+        <button type="button" data-mobile-view="recipients" class="mobile-nav-button">Получатели</button>
+      </nav>
+
+      <section class="desktop-workspace">
+        <section class="panel users-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Пользователи</h2>
+              <p class="panel-note">Выберите людей для выплаты.</p>
+            </div>
+          </div>
+
+          <div class="users-toolbar">
+            <div class="selected-counter">
+              <span>Выбрано</span>
+              <strong id="selected-count">0</strong>
+            </div>
+            <div class="toolbar-actions">
+              <button type="button" class="secondary-button" data-action="clear-selection">Снять выбор</button>
+              <button type="button" class="secondary-button" data-action="reload-users">Обновить</button>
+            </div>
+          </div>
+
+          <div class="controls controls-users">
+            <label class="field">
+              <span>Поиск</span>
+              <input id="desktop-search" autocomplete="off" placeholder="Поиск по ФИО" />
+            </label>
+            <label class="field">
+              <span>Платежи</span>
+              <select id="desktop-has-payment">
+                <option value="">Все</option>
+                <option value="true">С данными</option>
+                <option value="false">Без данных</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Активность</span>
+              <select id="desktop-is-active">
+                <option value="">Все</option>
+                <option value="true">Активные</option>
+                <option value="false">Неактивные</option>
+              </select>
+            </label>
+            <div class="field field-button">
+              <span>&nbsp;</span>
+              <button type="button" class="secondary-button" data-action="load-more-users">Загрузить ещё</button>
+            </div>
+          </div>
+
+          <div id="desktop-users" class="list-root"></div>
+          <div id="desktop-selection-bar" class="selection-bar hidden"></div>
+        </section>
+
+        <section class="panel composer-panel">
+          <div class="panel-head">
+            <div>
+              <h2>Новая выплата</h2>
+              <p class="panel-note">Создайте сообщение и проверьте предпросмотр.</p>
+            </div>
+          </div>
+
+          <div class="composer-form">
+            <div class="controls controls-composer">
+              <label class="field">
+                <span>Название</span>
+                <input id="desktop-payout-title" />
+              </label>
+              <label class="field">
+                <span>Период с</span>
+                <input id="desktop-period-from" type="date" />
+              </label>
+              <label class="field">
+                <span>Период по</span>
+                <input id="desktop-period-to" type="date" />
+              </label>
+            </div>
+
+            <label class="field">
+              <span>Шаблон сообщения</span>
+              <textarea id="desktop-message-template" rows="10"></textarea>
+            </label>
+            <div id="desktop-payout-validation" class="form-hint hidden"></div>
+
+            <div id="desktop-preview" class="preview-root"></div>
+
+            <div class="action-row">
+              <button type="button" data-action="create-payout">Создать выплату</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="side-stack">
+          <section class="panel current-payout-panel">
+            <div class="panel-head">
+              <div>
+                <h2>Текущая выплата</h2>
+                <p class="panel-note">Статус и действия.</p>
+              </div>
+            </div>
+            <div id="desktop-current-payout" class="current-payout-root"></div>
+          </section>
+
+          <section class="panel payouts-panel">
+            <div class="panel-head">
+              <div>
+                <h2>Все выплаты</h2>
+                <p class="panel-note">История выплат.</p>
+              </div>
+            </div>
+            <div id="desktop-payouts" class="list-root"></div>
+          </section>
+
+          <section class="panel recipients-panel">
+            <div class="panel-head">
+              <div>
+                <h2>Получатели</h2>
+                <p class="panel-note">Статусы получателей.</p>
+              </div>
+            </div>
+            <div id="desktop-recipients" class="list-root"></div>
+          </section>
+        </section>
+      </section>
+
+      <section class="mobile-workspace">
+        <section class="mobile-view" data-mobile-panel="users">
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Пользователи</h2>
+                <p class="panel-note">Выберите людей для выплаты.</p>
+              </div>
+            </div>
+
+            <div class="users-toolbar">
+              <div class="selected-counter">
+                <span>Выбрано</span>
+                <strong id="selected-count-mobile">0</strong>
+              </div>
+              <div class="toolbar-actions">
+                <button type="button" class="secondary-button" data-action="clear-selection">Снять выбор</button>
+                <button type="button" class="secondary-button" data-action="reload-users">Обновить</button>
+              </div>
+            </div>
+
+            <div class="controls controls-users">
+              <label class="field">
+                <span>Поиск</span>
+                <input id="mobile-search" autocomplete="off" placeholder="Поиск по ФИО" />
+              </label>
+              <label class="field">
+                <span>Платежи</span>
+                <select id="mobile-has-payment">
+                  <option value="">Все</option>
+                  <option value="true">С данными</option>
+                  <option value="false">Без данных</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Активность</span>
+                <select id="mobile-is-active">
+                  <option value="">Все</option>
+                  <option value="true">Активные</option>
+                  <option value="false">Неактивные</option>
+                </select>
+              </label>
+              <div class="field field-button">
+                <span>&nbsp;</span>
+                <button type="button" class="secondary-button" data-action="load-more-users">Загрузить ещё</button>
+              </div>
+            </div>
+
+            <div id="mobile-users" class="list-root"></div>
+            <div id="mobile-selection-bar" class="selection-bar hidden"></div>
+          </section>
+        </section>
+
+        <section class="mobile-view" data-mobile-panel="composer">
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Новая выплата</h2>
+                <p class="panel-note">Создайте сообщение и проверьте предпросмотр.</p>
+              </div>
+            </div>
+
+            <div class="composer-form">
+              <div class="controls controls-composer">
+                <label class="field">
+                  <span>Название</span>
+                  <input id="mobile-payout-title" />
+                </label>
+                <label class="field">
+                  <span>Период с</span>
+                  <input id="mobile-period-from" type="date" />
+                </label>
+                <label class="field">
+                  <span>Период по</span>
+                  <input id="mobile-period-to" type="date" />
+                </label>
+              </div>
+
+              <label class="field">
+                <span>Шаблон сообщения</span>
+                <textarea id="mobile-message-template" rows="10"></textarea>
+              </label>
+              <div id="mobile-payout-validation" class="form-hint hidden"></div>
+
+              <div id="mobile-preview" class="preview-root"></div>
+
+              <div class="action-row">
+                <button type="button" data-action="create-payout">Создать выплату</button>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section class="mobile-view" data-mobile-panel="payouts">
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Текущая выплата</h2>
+                <p class="panel-note">Статус и действия.</p>
+              </div>
+            </div>
+            <div id="mobile-current-payout" class="current-payout-root"></div>
+            <div class="panel-spacer"></div>
+            <div class="panel-head">
+              <div>
+                <h2>Все выплаты</h2>
+                <p class="panel-note">История выплат.</p>
+              </div>
+            </div>
+            <div id="mobile-payouts" class="list-root"></div>
+          </section>
+        </section>
+
+        <section class="mobile-view" data-mobile-panel="recipients">
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Получатели</h2>
+                <p class="panel-note">Статусы получателей.</p>
+              </div>
+            </div>
+            <div id="mobile-recipients" class="list-root"></div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <div id="payment-modal" class="sheet-backdrop hidden" aria-hidden="true">
+      <section class="payment-sheet" role="dialog" aria-modal="true" aria-labelledby="payment-modal-title">
+        <header class="sheet-header">
+          <div>
+            <div class="eyebrow">Платёжные данные</div>
+            <h2 id="payment-modal-title"></h2>
+            <p id="payment-modal-subtitle" class="panel-note"></p>
+          </div>
+          <button id="close-payment-modal" class="icon-button secondary-button" type="button" aria-label="Закрыть">×</button>
+        </header>
+        <pre id="payment-modal-body" class="raw-details-modal"></pre>
+        <footer class="sheet-actions">
+          <button id="copy-payment-details" type="button">Скопировать</button>
+          <button id="close-payment-modal-secondary" class="secondary-button" type="button">Закрыть</button>
+        </footer>
+      </section>
+    </div>
+
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="/miniapp/app.js"></script>
+  </body>
+</html>

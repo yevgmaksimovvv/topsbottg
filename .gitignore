@@ -149,6 +149,8 @@ activemq-data/
 
 # Environments
 .env
+.env.*
+!.env.example
 .envrc
 .venv
 env/
@@ -206,6 +208,10 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# Local TLS certificates
+certs/*
+!certs/.gitkeep
+
 # PyPI configuration file
 .pypirc
 
@@ -216,3 +222,4 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+.DS_Store

@@ -1,0 +1,302 @@
+from __future__ import annotations
+
+import logging
+
+from aiogram import F, Router
+from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    WebAppInfo,
+)
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from topsbottg.models import PayoutRecipient
+from topsbottg.services import (
+    confirm_saved_profile,
+    get_latest_active_recipient,
+    get_or_create_user,
+    get_payment_profile,
+    save_profile_and_snapshot,
+    start_user,
+    upsert_full_name,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class RegistrationFSM(StatesGroup):
+    registration_full_name = State()
+    change_full_name = State()
+    payment_decision = State()
+    payment_details = State()
+
+
+YES_BUTTON_TEXT = "Да"
+PAYMENT_LATER_BUTTON_TEXT = "Заполнить позже"
+MY_DATA_BUTTON_TEXT = "Мои данные"
+CHANGE_NAME_BUTTON_TEXT = "Изменить ФИО"
+PAYMENT_DETAILS_BUTTON_TEXT = "Платёжные данные"
+PAYMENT_DETAILS_BUTTON_TEXT_ALT = "Платежные данные"
+CHANGE_PAYMENT_DETAILS_BUTTON_TEXT = "Изменить платёжные данные"
+
+
+def _is_admin(settings, telegram_id: int) -> bool:
+    return telegram_id in settings.admin_ids_set
+
+
+def main_keyboard(*, is_admin: bool = False, mini_app_url: str | None = None) -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton(text=MY_DATA_BUTTON_TEXT), KeyboardButton(text=CHANGE_NAME_BUTTON_TEXT)],
+        [KeyboardButton(text=CHANGE_PAYMENT_DETAILS_BUTTON_TEXT)],
+    ]
+    if is_admin and mini_app_url:
+        keyboard.append([KeyboardButton(text="Админка", web_app=WebAppInfo(url=mini_app_url))])
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
+
+
+def _main_keyboard_for(message: Message, settings) -> ReplyKeyboardMarkup:
+    return main_keyboard(is_admin=_is_admin(settings, message.from_user.id), mini_app_url=settings.mini_app_url)
+
+
+def payment_decision_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=YES_BUTTON_TEXT), KeyboardButton(text=PAYMENT_LATER_BUTTON_TEXT)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def payment_details_message() -> str:
+    return (
+        "Отправьте платёжные данные одним сообщением в свободной форме.\n\n"
+        "Например:\n"
+        "СБП +7 999 999-99-99, Т-Банк, Иван Иванович И.\n"
+        "или\n"
+        "карта 1111 1111 1111 1111, Сбер, Иван Иванович И."
+    )
+
+
+def recipient_actions_keyboard(recipient_id: int, *, has_profile: bool) -> InlineKeyboardMarkup:
+    buttons = [[InlineKeyboardButton(text="Заполнить / изменить данные", callback_data=f"fill_payment:{recipient_id}")]]
+    if has_profile:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="Подтвердить сохраненные данные", callback_data=f"confirm_profile:{recipient_id}"
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def _start_payment_details_flow(
+    message: Message,
+    state: FSMContext,
+    session_factory: async_sessionmaker,
+    *,
+    active_recipient_id: int | None = None,
+) -> None:
+    if active_recipient_id is None:
+        async with session_factory() as session:
+            user = await get_or_create_user(session, message.from_user.id)
+            active_recipient = await get_latest_active_recipient(session, user.id)
+        active_recipient_id = active_recipient.id if active_recipient is not None else None
+    await state.clear()
+    await state.set_state(RegistrationFSM.payment_details)
+    await state.update_data(active_recipient_id=active_recipient_id)
+    await message.answer(payment_details_message(), reply_markup=ReplyKeyboardRemove())
+
+
+async def _save_payment_details(
+    message: Message,
+    state: FSMContext,
+    session_factory: async_sessionmaker,
+    settings,
+) -> None:
+    raw_text = (message.text or "").strip()
+    if not raw_text:
+        await message.answer(
+            "Отправьте непустые платёжные данные одним сообщением.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+    data = await state.get_data()
+    active_recipient_id = data.get("active_recipient_id")
+    async with session_factory() as session:
+        user = await get_or_create_user(session, message.from_user.id)
+        active_recipient = None
+        if active_recipient_id is not None:
+            active_recipient = await session.get(PayoutRecipient, active_recipient_id)
+            if active_recipient is not None and active_recipient.user_id != user.id:
+                active_recipient = None
+        if active_recipient is None:
+            active_recipient = await get_latest_active_recipient(session, user.id)
+        await save_profile_and_snapshot(
+            session,
+            user=user,
+            payload=raw_text,
+            active_recipient=active_recipient,
+        )
+        await session.commit()
+    await state.clear()
+    await message.answer("Платёжные данные сохранены.", reply_markup=_main_keyboard_for(message, settings))
+
+
+def build_router(session_factory: async_sessionmaker, _settings) -> Router:
+    router = Router()
+
+    @router.message(CommandStart())
+    async def start(message: Message, state: FSMContext):
+        async with session_factory() as session:
+            _user, needs_name = await start_user(session, message.from_user.id)
+            await session.commit()
+        await state.clear()
+        if needs_name:
+            await state.set_state(RegistrationFSM.registration_full_name)
+            await message.answer("Здравствуйте. Для регистрации укажите ФИО.")
+            return
+        main_markup = _main_keyboard_for(message, _settings)
+        await message.answer("Вы уже зарегистрированы. Что хотите изменить?", reply_markup=main_markup)
+
+    @router.message(RegistrationFSM.registration_full_name)
+    async def save_registration_name(message: Message, state: FSMContext):
+        full_name = (message.text or "").strip()
+        if not full_name:
+            await message.answer("Введите ФИО.")
+            return
+        async with session_factory() as session:
+            user = await upsert_full_name(session, message.from_user.id, full_name)
+            active_recipient = await get_latest_active_recipient(session, user.id)
+            await session.commit()
+        await state.clear()
+        await state.set_state(RegistrationFSM.payment_decision)
+        await state.update_data(active_recipient_id=active_recipient.id if active_recipient is not None else None)
+        await message.answer(
+            "ФИО сохранено. Хотите добавить платёжные данные сейчас?",
+            reply_markup=payment_decision_keyboard(),
+        )
+
+    @router.message(RegistrationFSM.change_full_name)
+    async def save_changed_name(message: Message, state: FSMContext):
+        full_name = (message.text or "").strip()
+        if not full_name:
+            await message.answer("Введите новое ФИО.")
+            return
+        async with session_factory() as session:
+            await upsert_full_name(session, message.from_user.id, full_name)
+            await session.commit()
+        await state.clear()
+        await message.answer("ФИО обновлено.", reply_markup=_main_keyboard_for(message, _settings))
+
+    @router.message(RegistrationFSM.payment_decision, F.text == YES_BUTTON_TEXT)
+    async def yes_fill_payment(message: Message, state: FSMContext):
+        data = await state.get_data()
+        await _start_payment_details_flow(
+            message,
+            state,
+            session_factory,
+            active_recipient_id=data.get("active_recipient_id"),
+        )
+
+    @router.message(RegistrationFSM.payment_decision, F.text == PAYMENT_LATER_BUTTON_TEXT)
+    async def maybe_later(message: Message, state: FSMContext):
+        await state.clear()
+        main_markup = _main_keyboard_for(message, _settings)
+        await message.answer(
+            "Готово, вы зарегистрированы. Платёжные данные можно добавить позже через меню.",
+            reply_markup=main_markup,
+        )
+
+    @router.message(RegistrationFSM.payment_decision, F.text)
+    async def payment_decision_invalid(message: Message):
+        await message.answer("Выберите одну из кнопок.", reply_markup=payment_decision_keyboard())
+
+    @router.message(F.text == MY_DATA_BUTTON_TEXT)
+    async def my_data(message: Message):
+        async with session_factory() as session:
+            user = await get_or_create_user(session, message.from_user.id)
+            profile = await get_payment_profile(session, user.id)
+            has_payment_details = bool(profile and profile.raw_payment_details)
+            text = (
+                "Ваши данные\n\n"
+                f"ФИО: {user.full_name}\n"
+                f"Платёжные данные: {'есть' if has_payment_details else 'не заполнены'}"
+            )
+            if not has_payment_details:
+                text += "\nИх можно добавить через «Изменить платёжные данные»."
+        await message.answer(text, reply_markup=_main_keyboard_for(message, _settings))
+
+    @router.message(F.text == CHANGE_NAME_BUTTON_TEXT)
+    async def change_name(message: Message, state: FSMContext):
+        await state.clear()
+        await state.set_state(RegistrationFSM.change_full_name)
+        await message.answer("Введите новое ФИО.")
+
+    @router.message(F.text.in_([PAYMENT_DETAILS_BUTTON_TEXT, PAYMENT_DETAILS_BUTTON_TEXT_ALT]))
+    async def payment_start(message: Message, state: FSMContext):
+        await _start_payment_details_flow(message, state, session_factory)
+
+    @router.message(F.text == CHANGE_PAYMENT_DETAILS_BUTTON_TEXT)
+    async def change_payment_details(message: Message, state: FSMContext):
+        await _start_payment_details_flow(message, state, session_factory)
+
+    @router.message(RegistrationFSM.payment_details, F.text)
+    async def payment_details(message: Message, state: FSMContext):
+        await _save_payment_details(message, state, session_factory, _settings)
+
+    @router.callback_query(F.data.startswith("fill_payment:"))
+    async def fill_payment(callback: CallbackQuery, state: FSMContext):
+        recipient_id = int(callback.data.split(":", 1)[1])
+        async with session_factory() as session:
+            user = await get_or_create_user(session, callback.from_user.id)
+            recipient = await session.scalar(
+                select(PayoutRecipient).where(PayoutRecipient.id == recipient_id, PayoutRecipient.user_id == user.id)
+            )
+            if recipient is None:
+                logger.warning(
+                    "fill_payment rejected for telegram_id=%s recipient_id=%s", callback.from_user.id, recipient_id
+                )
+                await callback.answer("Не удалось открыть данные.", show_alert=False)
+                return
+        if callback.message is None:
+            await callback.answer("Не удалось открыть данные.", show_alert=False)
+            return
+        await _start_payment_details_flow(
+            callback.message,
+            state,
+            session_factory,
+            active_recipient_id=recipient_id,
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("confirm_profile:"))
+    async def confirm_saved_data(callback: CallbackQuery):
+        recipient_id = int(callback.data.split(":", 1)[1])
+        async with session_factory() as session:
+            user = await get_or_create_user(session, callback.from_user.id)
+            recipient = await confirm_saved_profile(session, recipient_id=recipient_id, user_id=user.id)
+            if recipient is None:
+                raw_recipient = await session.scalar(select(PayoutRecipient).where(PayoutRecipient.id == recipient_id))
+                if raw_recipient is not None and raw_recipient.user_id != user.id:
+                    logger.warning(
+                        "confirm_profile IDOR blocked: telegram_id=%s recipient_id=%s owner_user_id=%s",
+                        callback.from_user.id,
+                        recipient_id,
+                        raw_recipient.user_id,
+                    )
+                await session.rollback()
+                await callback.answer("Не удалось подтвердить данные.", show_alert=False)
+                return
+            await session.commit()
+        await callback.answer("Ваше сообщение сохранено.", show_alert=False)
+
+    return router

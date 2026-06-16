@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "topsbottg"
+version = "0.1.0"
+description = "Telegram bot, admin mini app and payout workflow for topsbottg"
+requires-python = ">=3.12"
+dependencies = [
+  "aiogram>=3.13,<4",
+  "alembic>=1.13,<2",
+  "asyncpg>=0.29,<1",
+  "fastapi>=0.115,<1",
+  "pydantic-settings>=2.4,<3",
+  "sqlalchemy[asyncio]>=2.0,<3",
+  "uvicorn>=0.30,<1",
+  "python-dotenv>=1.0,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "aiosqlite>=0.20,<1",
+  "httpx>=0.27,<1",
+  "mypy>=1.11,<2",
+  "pytest>=8.2,<9",
+  "pytest-asyncio>=0.23,<1",
+  "ruff>=0.6,<1",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["B008"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+disallow_untyped_defs = false
+check_untyped_defs = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+disable_error_code = ["union-attr", "arg-type"]
+plugins = ["pydantic.mypy"]

@@ -1,0 +1,63 @@
+server {
+    listen 80;
+    server_name ${APP_DOMAIN};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name ${APP_DOMAIN};
+
+    ssl_certificate /etc/letsencrypt/live/${APP_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${APP_DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy no-referrer always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self';" always;
+
+    location = /miniapp {
+        return 301 /miniapp/;
+    }
+
+    location /api/ {
+        proxy_pass http://app:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        add_header Cache-Control "no-store" always;
+        add_header Pragma "no-cache" always;
+    }
+
+    location = /healthz {
+        proxy_pass http://app:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /miniapp/ {
+        alias /usr/share/nginx/html/miniapp/;
+        try_files $uri $uri/ /miniapp/index.html;
+        add_header Cache-Control "no-store" always;
+    }
+
+    location / {
+        return 404;
+    }
+}
