@@ -874,3 +874,111 @@ h1 {
     border-radius: 24px 24px 0 0;
   }
 }
+
+@media (max-width: 430px) {
+  .app-shell {
+    width: min(100% - 12px, 1320px);
+    padding: 12px 0 92px;
+  }
+
+  .mobile-nav {
+    gap: 4px;
+    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mobile-nav-button {
+    min-width: 0;
+    padding: 8px 6px;
+    font-size: 13px;
+    line-height: 1.1;
+    white-space: normal;
+    text-align: center;
+  }
+
+  .selected-counter,
+  .auth-pill,
+  .badge {
+    min-width: 0;
+  }
+
+  .selected-counter {
+    width: 100%;
+    white-space: normal;
+  }
+
+  .auth-pill {
+    max-width: 100%;
+    white-space: normal;
+  }
+
+  .badge {
+    white-space: normal;
+  }
+
+  .controls-users,
+  .controls-composer {
+    gap: 10px;
+  }
+
+  .panel,
+  .app-header,
+  .auth-banner,
+  .toast,
+  .error-banner {
+    border-radius: 16px;
+  }
+}
+
+@media (max-width: 390px) {
+  .app-shell {
+    width: min(100% - 8px, 1320px);
+    padding: 10px 0 88px;
+  }
+
+  .app-header,
+  .panel,
+  .auth-banner {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .mobile-nav {
+    gap: 3px;
+    padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
+  }
+
+  .mobile-nav-button {
+    padding: 7px 5px;
+    font-size: 12px;
+  }
+
+  .users-toolbar,
+  .panel-head,
+  .sheet-header {
+    gap: 10px;
+  }
+
+  .selected-counter,
+  .auth-pill,
+  .badge {
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 360px) {
+  .app-shell {
+    width: min(100% - 6px, 1320px);
+  }
+
+  .mobile-nav-button {
+    padding: 7px 4px;
+    font-size: 11px;
+  }
+
+  .app-header,
+  .panel,
+  .auth-banner {
+    border-radius: 14px;
+  }
+}

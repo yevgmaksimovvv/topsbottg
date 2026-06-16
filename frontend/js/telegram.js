@@ -1,4 +1,4 @@
-import { canUseApi } from "./store.js";
+import { canUseApi, state } from "./store.js";
 
 export function telegramWebApp() {
   return window.Telegram?.WebApp || null;
@@ -33,6 +33,12 @@ export function renderAuthState() {
     pill.classList.remove("hidden");
     banner.classList.add("hidden");
     banner.textContent = "";
+  } else if (state.authStatus === "telegram_missing_init_data") {
+    pill.textContent = "Telegram открыт";
+    pill.className = "auth-pill auth-warn";
+    pill.classList.remove("hidden");
+    banner.textContent = "Telegram открыт, но не передал данные авторизации. Откройте мини-приложение через кнопку бота.";
+    banner.classList.remove("hidden");
   } else {
     pill.textContent = "";
     pill.className = "auth-pill hidden";

@@ -1,7 +1,9 @@
 import { COMPOSER_IDS, MOBILE_QUERY, USERS_LIMIT } from "./constants.js";
 
 export const state = {
-  initData: window.Telegram?.WebApp?.initData || "",
+  isTelegramEnvironment: Boolean(window.Telegram?.WebApp),
+  initData: "",
+  authStatus: window.Telegram?.WebApp ? "telegram_missing_init_data" : "browser",
   activeMobileView: "users",
   users: [],
   payouts: [],
@@ -45,6 +47,21 @@ export const state = {
 };
 
 export const $ = (id) => document.getElementById(id);
+
+function readTelegramWebApp() {
+  return window.Telegram?.WebApp || null;
+}
+
+export function refreshTelegramAuthState() {
+  const webApp = readTelegramWebApp();
+  state.isTelegramEnvironment = Boolean(webApp);
+  state.initData = webApp?.initData || "";
+  if (!webApp) {
+    state.authStatus = "browser";
+    return;
+  }
+  state.authStatus = state.initData ? "ready" : "telegram_missing_init_data";
+}
 
 export function canUseApi() {
   return Boolean(state.initData);

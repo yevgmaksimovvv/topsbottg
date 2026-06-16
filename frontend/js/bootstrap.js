@@ -1,7 +1,7 @@
 import { SEARCH_DEBOUNCE_MS } from "./constants.js";
 import { renderApp } from "./render-app.js";
 import { setThemeVariables, telegramWebApp } from "./telegram.js";
-import { state, setMobileView, syncComposerFields, syncFilterInputs } from "./store.js";
+import { refreshTelegramAuthState, state, setMobileView, syncComposerFields, syncFilterInputs } from "./store.js";
 import {
   attachSelected,
   closePaymentModal,
@@ -155,6 +155,7 @@ export async function bootstrap() {
     webApp.ready();
     webApp.expand();
   }
+  refreshTelegramAuthState();
 
   state.composer.messageTemplate =
     "Всем привет!\n" +
