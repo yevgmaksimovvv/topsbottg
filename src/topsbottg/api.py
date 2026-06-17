@@ -188,55 +188,14 @@ async def _admin_events_stream(*, token_hash: str | None = None):
     broadcaster = get_admin_events_broadcaster()
     queue = broadcaster.subscribe()
     try:
-        log_event(
-            logger,
-            "INFO",
-            "admin_events_stream_started",
-            "Admin events stream started",
-            pid=os.getpid(),
-            broadcaster_id=id(broadcaster),
-            queue_id=id(queue),
-        )
         yield _sse_frame(ADMIN_EVENT_PING, {})
         while True:
             try:
                 message = await asyncio.wait_for(queue.get(), timeout=ADMIN_EVENTS_KEEPALIVE_SECONDS)
-                log_event(
-                    logger,
-                    "INFO",
-                    "admin_events_stream_yield",
-                    "Admin events stream yielded business event",
-                    pid=os.getpid(),
-                    broadcaster_id=id(broadcaster),
-                    queue_id=id(queue),
-                    token_hash=token_hash,
-                    event_type=message["event"],
-                    payload=message["payload"],
-                )
                 yield _sse_frame(message["event"], message["payload"])
             except asyncio.TimeoutError:
-                log_event(
-                    logger,
-                    "INFO",
-                    "admin_events_stream_ping",
-                    "Admin events stream keepalive ping",
-                    pid=os.getpid(),
-                    broadcaster_id=id(broadcaster),
-                    queue_id=id(queue),
-                    token_hash=token_hash,
-                )
                 yield _sse_frame(ADMIN_EVENT_PING, {})
     finally:
-        log_event(
-            logger,
-            "INFO",
-            "admin_events_stream_finished",
-            "Admin events stream finished",
-            pid=os.getpid(),
-            broadcaster_id=id(broadcaster),
-            queue_id=id(queue),
-            token_hash=token_hash,
-        )
         broadcaster.unsubscribe(queue)
 
 

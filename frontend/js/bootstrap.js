@@ -1,6 +1,6 @@
 import { SEARCH_DEBOUNCE_MS } from "./constants.js";
 import { renderApp } from "./render-app.js";
-import { bindTelegramViewportEvents, setThemeVariables, telegramWebApp } from "./telegram.js";
+import { bindTelegramViewportEvents, setThemeVariables, syncViewportVariables, telegramWebApp } from "./telegram.js";
 import { clearNotification, canUseApi, refreshTelegramAuthState, state, setMobileView, syncComposerFields, syncFilterInputs } from "./store.js";
 import {
   loadPayouts,
@@ -14,6 +14,20 @@ import {
 import { createPayout, sendPayout } from "./render-payouts.js";
 
 let adminRecoveryTimer = null;
+
+function syncTelegramSafeAreaVariables() {
+  const webApp = telegramWebApp();
+  const root = document.documentElement.style;
+  const safeAreaBottom = Math.max(0, Math.round(webApp?.safeAreaInset?.bottom || 0));
+  const contentSafeAreaBottom = Math.max(0, Math.round(webApp?.contentSafeAreaInset?.bottom || 0));
+  root.setProperty("--tg-safe-area-inset-bottom", `${safeAreaBottom}px`);
+  root.setProperty("--tg-content-safe-area-inset-bottom", `${contentSafeAreaBottom}px`);
+}
+
+function syncLayoutMetrics() {
+  syncViewportVariables();
+  syncTelegramSafeAreaVariables();
+}
 
 function scheduleAdminRecoveryRefresh() {
   if (!canUseApi()) return;
@@ -159,7 +173,8 @@ export async function bootstrap() {
   bindFilterInputs();
   bindDelegatedEvents();
   renderApp();
-  bindTelegramViewportEvents();
+  syncLayoutMetrics();
+  bindTelegramViewportEvents(syncLayoutMetrics);
   window.addEventListener("pagehide", stopAdminEvents);
   window.addEventListener("beforeunload", stopAdminEvents);
   document.addEventListener("visibilitychange", () => {

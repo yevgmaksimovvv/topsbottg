@@ -201,27 +201,10 @@ export function upsertPayoutInList(payout) {
 
 async function refreshSelectedPayout({ silent = false } = {}) {
   const hasInitData = canUseApi();
-  console.info("[admin-events] refresh-start", {
-    selectedPayoutId: state.selectedPayoutId,
-    silent,
-    hasInitData,
-  });
   if (!state.selectedPayoutId) {
-    console.info("[admin-events] refresh-skip", {
-      selectedPayoutId: state.selectedPayoutId,
-      silent,
-      hasInitData,
-      reason: "missing_selectedPayoutId",
-    });
     return;
   }
   if (!hasInitData) {
-    console.info("[admin-events] refresh-skip", {
-      selectedPayoutId: state.selectedPayoutId,
-      silent,
-      hasInitData,
-      reason: "missing_initData",
-    });
     return;
   }
   const requestId = ++state.selectedPayoutRequestId;
@@ -234,19 +217,8 @@ async function refreshSelectedPayout({ silent = false } = {}) {
     state.recipients = recipients;
     upsertPayoutInList(detail?.payout);
     renderApp();
-    console.info("[admin-events] refresh-success", {
-      selectedPayoutId: state.selectedPayoutId,
-      recipientsCount: Array.isArray(recipients) ? recipients.length : null,
-      payoutStatus: detail?.payout?.status ?? null,
-    });
   } catch (error) {
     logLoadError("refreshSelectedPayout", error);
-    console.warn("[admin-events] refresh-error", {
-      selectedPayoutId: state.selectedPayoutId,
-      silent,
-      errorName: error?.name || "Error",
-      errorMessage: error?.message || String(error || ""),
-    });
     if (!silent) setErrorAndRender(error.message || "Не удалось обновить выплату");
   } finally {
     if (!silent) setLoadingAndRender("recipients", false);
@@ -299,10 +271,6 @@ export async function createEventsToken() {
 }
 
 export function stopAdminEvents({ resetRecovery = true } = {}) {
-  console.info("[admin-events] stop", {
-    readyState: adminEventsSource?.readyState ?? null,
-    recoverAttempted: adminEventsRecoveryUsed,
-  });
   if (adminEventsSource) {
     adminEventsSource.close();
     adminEventsSource = null;
@@ -312,16 +280,6 @@ export function stopAdminEvents({ resetRecovery = true } = {}) {
 }
 
 export function handleAdminEvent(type, payload = {}) {
-  const payloadPayoutId = payload?.payout_id ?? null;
-  const selectedPayoutId = state.selectedPayoutId;
-  const idsMatch = payloadPayoutId != null && Number(payloadPayoutId) === Number(selectedPayoutId);
-  console.info("[admin-events] handle", {
-    eventType: type,
-    payloadPayoutId,
-    selectedPayoutId,
-    idsMatch,
-    eventSourceReadyState: adminEventsSource?.readyState ?? null,
-  });
   if (type === "ping") return;
   if (type === "users_changed") {
     if (state.initData) void loadUsers({ reset: true, silent: true });
@@ -334,11 +292,6 @@ export function handleAdminEvent(type, payload = {}) {
   if (type === "payout_changed") {
     if (state.initData) {
       if (payload.payout_id && Number(payload.payout_id) === Number(state.selectedPayoutId)) {
-        console.info("[admin-events] refresh-triggered", {
-          eventType: type,
-          payloadPayoutId,
-          selectedPayoutId,
-        });
         void scheduleAdminStateRefresh({ selected: true, payouts: true, silent: true });
       } else {
         void schedulePayoutsRefresh({ silent: true });
@@ -348,11 +301,6 @@ export function handleAdminEvent(type, payload = {}) {
   }
   if (type === "payout_recipients_changed") {
     if (state.initData && payload.payout_id && Number(payload.payout_id) === Number(state.selectedPayoutId)) {
-      console.info("[admin-events] refresh-triggered", {
-        eventType: type,
-        payloadPayoutId,
-        selectedPayoutId,
-      });
       void scheduleAdminStateRefresh({ selected: true, payouts: true, silent: true });
     } else if (state.initData) {
       void schedulePayoutsRefresh({ silent: true });
@@ -377,10 +325,6 @@ function handleAdminEventsError(source, retryTokenRefresh) {
 }
 
 export async function startAdminEvents(retryTokenRefresh = false) {
-  console.info("[admin-events] start", {
-    readyState: adminEventsSource?.readyState ?? null,
-    recoverAttempted: retryTokenRefresh,
-  });
   if (!state.initData || !canUseApi()) return null;
   if (adminEventsSource && adminEventsSource.readyState !== EventSource.CLOSED) return adminEventsSource;
   if (adminEventsStartPromise) return adminEventsStartPromise;
@@ -394,12 +338,7 @@ export async function startAdminEvents(retryTokenRefresh = false) {
       adminEventsSource = source;
       adminEventsWarningShown = false;
       source.addEventListener("open", () => {
-        const recoverAttempted = adminEventsRecoveryUsed;
         adminEventsRecoveryUsed = false;
-        console.info("[admin-events] open", {
-          readyState: source.readyState,
-          recoverAttempted,
-        });
       });
       source.addEventListener("ping", () => handleAdminEvent("ping", {}));
       source.addEventListener("users_changed", (event) => handleAdminEvent("users_changed", parseEventPayload(event.data)));
@@ -409,10 +348,6 @@ export async function startAdminEvents(retryTokenRefresh = false) {
         handleAdminEvent("payout_recipients_changed", parseEventPayload(event.data))
       );
       source.onerror = () => {
-        console.warn("[admin-events] error", {
-          readyState: source.readyState,
-          recoverAttempted: adminEventsRecoveryUsed,
-        });
         handleAdminEventsError(source, true);
       };
       return source;

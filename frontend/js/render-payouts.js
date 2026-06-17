@@ -237,8 +237,8 @@ export async function sendPayout() {
     try {
       await fetchSelectedPayoutSnapshot(payoutId);
       await schedulePayoutsRefresh({ silent: true });
-    } catch (refreshError) {
-      console.warn("[topsbottg] sendPayout refresh:", refreshError?.message || refreshError);
+    } catch {
+      // Refresh is best-effort here.
     }
   } catch (error) {
     const message =

@@ -16,6 +16,11 @@
   --shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
   --app-viewport-height: 100vh;
   --mobile-nav-height: 64px;
+  --safe-area-bottom: max(
+    env(safe-area-inset-bottom, 0px),
+    var(--tg-safe-area-inset-bottom, 0px),
+    var(--tg-content-safe-area-inset-bottom, 0px)
+  );
 }
 
 * {
@@ -817,7 +822,9 @@ code {
 @media (max-width: 759px) {
   .app-shell {
     width: min(100% - 16px, 1320px);
-    padding: 14px 0 calc(var(--mobile-nav-height) + 24px + env(safe-area-inset-bottom));
+    min-height: 100vh;
+    min-height: 100dvh;
+    padding: 14px 0 calc(var(--mobile-nav-height) + 24px + var(--safe-area-bottom));
   }
 
   .toast {
@@ -866,7 +873,9 @@ code {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: 6px;
-    padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+    box-sizing: border-box;
+    min-height: calc(var(--mobile-nav-height) + var(--safe-area-bottom));
+    padding: 8px 10px calc(8px + var(--safe-area-bottom));
     background: rgba(14, 22, 33, 0.94);
     border-top: 1px solid var(--border);
     backdrop-filter: blur(14px);
@@ -936,12 +945,12 @@ code {
 @media (max-width: 430px) {
   .app-shell {
     width: min(100% - 12px, 1320px);
-    padding: 12px 0 calc(var(--mobile-nav-height) + 22px + env(safe-area-inset-bottom));
+    padding: 12px 0 calc(var(--mobile-nav-height) + 22px + var(--safe-area-bottom));
   }
 
   .mobile-nav {
     gap: 4px;
-    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+    padding: 6px 8px calc(6px + var(--safe-area-bottom));
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -989,7 +998,7 @@ code {
 @media (max-width: 390px) {
   .app-shell {
     width: min(100% - 8px, 1320px);
-    padding: 10px 0 calc(var(--mobile-nav-height) + 20px + env(safe-area-inset-bottom));
+    padding: 10px 0 calc(var(--mobile-nav-height) + 20px + var(--safe-area-bottom));
   }
 
   .app-header,
@@ -1001,7 +1010,7 @@ code {
 
   .mobile-nav {
     gap: 3px;
-    padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
+    padding: 6px 6px calc(6px + var(--safe-area-bottom));
   }
 
   .toast {
