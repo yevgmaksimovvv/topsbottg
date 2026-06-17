@@ -1,9 +1,28 @@
 import { SEARCH_DEBOUNCE_MS } from "./constants.js";
 import { renderApp } from "./render-app.js";
 import { bindTelegramViewportEvents, setThemeVariables, telegramWebApp } from "./telegram.js";
-import { clearNotification, refreshTelegramAuthState, state, setMobileView, syncComposerFields, syncFilterInputs } from "./store.js";
-import { loadPayouts, loadUsers, markPaid, selectPayout, startAdminEvents, stopAdminEvents } from "./api.js";
+import { clearNotification, canUseApi, refreshTelegramAuthState, state, setMobileView, syncComposerFields, syncFilterInputs } from "./store.js";
+import { loadPayouts, loadUsers, markPaid, refreshSelectedPayout, selectPayout, startAdminEvents, stopAdminEvents } from "./api.js";
 import { createPayout, sendPayout } from "./render-payouts.js";
+
+let adminRecoveryTimer = null;
+
+function scheduleAdminRecoveryRefresh() {
+  if (!canUseApi()) return;
+  if (adminRecoveryTimer) {
+    clearTimeout(adminRecoveryTimer);
+  }
+  adminRecoveryTimer = window.setTimeout(() => {
+    adminRecoveryTimer = null;
+    void (async () => {
+      await startAdminEvents();
+      if (state.selectedPayoutId) {
+        await refreshSelectedPayout({ silent: true });
+      }
+      await loadPayouts({ silent: true });
+    })();
+  }, 700);
+}
 
 function bindComposerInputs() {
   const ids = [
@@ -138,6 +157,12 @@ export async function bootstrap() {
   bindTelegramViewportEvents();
   window.addEventListener("pagehide", stopAdminEvents);
   window.addEventListener("beforeunload", stopAdminEvents);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      scheduleAdminRecoveryRefresh();
+    }
+  });
+  window.addEventListener("focus", scheduleAdminRecoveryRefresh);
 
   if (!state.initData) return;
   void startAdminEvents();

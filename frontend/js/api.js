@@ -163,7 +163,7 @@ async function loadUsers({ reset = true, silent = false } = {}) {
 
 async function loadPayouts({ silent = false } = {}) {
   if (!canUseApi()) return;
-  const requestId = ++state.payoutRequestId;
+  const requestId = ++state.payoutsRequestId;
   if (!silent) {
     setLoadingAndRender("payouts", true);
     clearError();
@@ -171,16 +171,16 @@ async function loadPayouts({ silent = false } = {}) {
   }
   try {
     const payouts = await api("/admin/payouts");
-    if (requestId !== state.payoutRequestId) return;
+    if (requestId !== state.payoutsRequestId) return;
     state.payouts = payouts;
     if (silent) renderApp();
   } catch (error) {
-    if (requestId === state.payoutRequestId) {
+    if (requestId === state.payoutsRequestId) {
       logLoadError("loadPayouts", error);
       if (!silent) setErrorAndRender(error.message || "Не удалось загрузить выплаты");
     }
   } finally {
-    if (requestId === state.payoutRequestId) {
+    if (requestId === state.payoutsRequestId) {
       if (!silent) setLoadingAndRender("payouts", false);
     }
   }
@@ -211,12 +211,12 @@ async function refreshSelectedPayout({ silent = false } = {}) {
     });
     return;
   }
-  const requestId = ++state.payoutRequestId;
+  const requestId = ++state.selectedPayoutRequestId;
   if (!silent) setLoadingAndRender("recipients", true);
   try {
     const detail = await api(`/admin/payouts/${state.selectedPayoutId}`);
     const recipients = await api(`/admin/payouts/${state.selectedPayoutId}/recipients`);
-    if (requestId !== state.payoutRequestId) return;
+    if (requestId !== state.selectedPayoutRequestId) return;
     state.selectedPayoutDetail = detail;
     state.recipients = recipients;
     console.info("[admin-events] refresh-success", {
@@ -278,14 +278,18 @@ export function handleAdminEvent(type, payload = {}) {
   }
   if (type === "payout_changed") {
     if (state.initData) {
-      void loadPayouts({ silent: true });
       if (payload.payout_id && Number(payload.payout_id) === Number(state.selectedPayoutId)) {
         console.info("[admin-events] refresh-triggered", {
           eventType: type,
           payloadPayoutId,
           selectedPayoutId,
         });
-        void refreshSelectedPayout({ silent: true });
+        void (async () => {
+          await refreshSelectedPayout({ silent: true });
+          await loadPayouts({ silent: true });
+        })();
+      } else {
+        void loadPayouts({ silent: true });
       }
     }
     return;

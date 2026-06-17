@@ -161,10 +161,18 @@ function recipientUserId(recipient) {
 export async function sendPayout() {
   if (!canUseApi() || !state.selectedPayoutId) return;
   await refreshSelectedPayout({ silent: true });
-  const payout = state.selectedPayoutDetail?.payout;
+  let payout = state.selectedPayoutDetail?.payout;
   if (!payout || payout.id !== state.selectedPayoutId) {
     setErrorAndRender("Не удалось обновить выплату.");
     return;
+  }
+  if (payout.status !== "draft") {
+    await refreshSelectedPayout({ silent: true });
+    payout = state.selectedPayoutDetail?.payout;
+    if (!payout || payout.id !== state.selectedPayoutId) {
+      setErrorAndRender("Не удалось обновить выплату.");
+      return;
+    }
   }
   if (payout.status !== "draft") {
     setErrorAndRender(DRAFT_SEND_MESSAGE);
@@ -202,9 +210,10 @@ export async function sendPayout() {
   try {
     await api(`/admin/payouts/${state.selectedPayoutId}/send`, { method: "POST" });
     state.selectedUsers.clear();
+    clearError();
     setToastAndRender("Рассылка запущена.");
-    await refreshSelectedPayout();
-    await loadPayouts();
+    await refreshSelectedPayout({ silent: true });
+    await loadPayouts({ silent: true });
   } catch (error) {
     const message =
       error?.message && error.message.includes("payout can only be sent from draft")

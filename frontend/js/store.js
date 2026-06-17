@@ -35,6 +35,8 @@ export const state = {
   notification: null,
   usersRequestId: 0,
   payoutRequestId: 0,
+  payoutsRequestId: 0,
+  selectedPayoutRequestId: 0,
   toastTimer: null,
   searchTimer: null,
 };
