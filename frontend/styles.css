@@ -15,7 +15,7 @@
   --radius: 18px;
   --shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
   --app-viewport-height: 100vh;
-  --mobile-nav-height: 64px;
+  --mobile-nav-height: 72px;
   --safe-area-bottom: max(
     env(safe-area-inset-bottom, 0px),
     var(--tg-safe-area-inset-bottom, 0px),
@@ -824,7 +824,7 @@ code {
     width: min(100% - 16px, 1320px);
     min-height: 100vh;
     min-height: 100dvh;
-    padding: 14px 0 calc(var(--mobile-nav-height) + 24px + var(--safe-area-bottom));
+    padding: 14px 0 calc(var(--mobile-nav-height) + var(--safe-area-bottom) + 12px);
   }
 
   .toast {
@@ -871,14 +871,36 @@ code {
     bottom: 0;
     z-index: 50;
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 6px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    align-items: stretch;
+    gap: 8px;
+    height: calc(var(--mobile-nav-height) + var(--safe-area-bottom));
+    min-height: 0;
+    max-height: calc(var(--mobile-nav-height) + 44px);
+    padding: 8px 12px calc(8px + var(--safe-area-bottom));
     box-sizing: border-box;
-    min-height: calc(var(--mobile-nav-height) + var(--safe-area-bottom));
-    padding: 8px 10px calc(8px + var(--safe-area-bottom));
-    background: rgba(14, 22, 33, 0.94);
+    overflow: hidden;
     border-top: 1px solid var(--border);
-    backdrop-filter: blur(14px);
+    background: var(--surface);
+  }
+
+  .mobile-nav-button {
+    min-width: 0;
+    width: 100%;
+    height: 48px;
+    min-height: 48px;
+    max-height: 48px;
+    padding: 0 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
+    text-align: center;
+    line-height: 1.1;
+    white-space: normal;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    font-size: 13px;
   }
 
   .panel {
@@ -945,24 +967,17 @@ code {
 @media (max-width: 430px) {
   .app-shell {
     width: min(100% - 12px, 1320px);
-    padding: 12px 0 calc(var(--mobile-nav-height) + 22px + var(--safe-area-bottom));
+    padding: 12px 0 calc(var(--mobile-nav-height) + var(--safe-area-bottom) + 12px);
   }
 
   .mobile-nav {
-    gap: 4px;
-    padding: 6px 8px calc(6px + var(--safe-area-bottom));
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    padding: 6px 8px calc(8px + var(--safe-area-bottom));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .mobile-nav-button {
-    min-width: 0;
-    min-height: 38px;
-    padding: 8px 6px;
-    font-size: 13px;
-    line-height: 1.1;
-    white-space: normal;
-    text-align: center;
-    overflow-wrap: anywhere;
+    font-size: 12px;
   }
 
   .selected-counter,
@@ -998,7 +1013,7 @@ code {
 @media (max-width: 390px) {
   .app-shell {
     width: min(100% - 8px, 1320px);
-    padding: 10px 0 calc(var(--mobile-nav-height) + 20px + var(--safe-area-bottom));
+    padding: 10px 0 calc(var(--mobile-nav-height) + var(--safe-area-bottom) + 12px);
   }
 
   .app-header,
@@ -1009,8 +1024,8 @@ code {
   }
 
   .mobile-nav {
-    gap: 3px;
-    padding: 6px 6px calc(6px + var(--safe-area-bottom));
+    gap: 4px;
+    padding: 6px 6px calc(8px + var(--safe-area-bottom));
   }
 
   .toast {
@@ -1020,8 +1035,6 @@ code {
   }
 
   .mobile-nav-button {
-    min-height: 36px;
-    padding: 7px 5px;
     font-size: 12px;
   }
 
@@ -1049,8 +1062,6 @@ code {
   }
 
   .mobile-nav-button {
-    min-height: 34px;
-    padding: 7px 4px;
     font-size: 11px;
   }
 
