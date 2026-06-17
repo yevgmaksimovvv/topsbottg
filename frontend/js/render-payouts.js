@@ -6,7 +6,7 @@ import {
   schedulePayoutsRefresh,
   upsertPayoutInList,
 } from "./api.js";
-import { payoutPeriodLabel, state, canUseApi, clearError, setError, setToast } from "./store.js";
+import { payoutPeriodLabel, state, canUseApi, clearError, setError, setLoading, setToast } from "./store.js";
 import { renderApp } from "./render-app.js";
 import { emptyStateMarkup, escapeHtml, loadingStateMarkup, statusLabel } from "./utils.js";
 import { payoutsEmptyMessage, selectedPayoutHintText } from "./render-common.js";
