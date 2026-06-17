@@ -1,6 +1,6 @@
 import { SEARCH_DEBOUNCE_MS } from "./constants.js";
 import { renderApp } from "./render-app.js";
-import { setThemeVariables, telegramWebApp } from "./telegram.js";
+import { bindTelegramViewportEvents, setThemeVariables, telegramWebApp } from "./telegram.js";
 import { refreshTelegramAuthState, state, setMobileView, syncComposerFields, syncFilterInputs } from "./store.js";
 import { loadPayouts, loadUsers, selectPayout } from "./api.js";
 import {
@@ -130,6 +130,7 @@ export async function bootstrap() {
   bindFilterInputs();
   bindDelegatedEvents();
   renderApp();
+  bindTelegramViewportEvents();
 
   if (!state.initData) return;
   await Promise.all([loadUsers({ reset: true }), loadPayouts()]);

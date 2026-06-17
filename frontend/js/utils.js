@@ -48,3 +48,14 @@ export function emptyStateMarkup(title, text) {
       </div>
     </div>`;
 }
+
+export function loadingStateMarkup(title, text = "Загрузка…") {
+  return `
+    <div class="loading-state">
+      <span class="spinner" aria-hidden="true"></span>
+      <div>
+        <strong>${escapeHtml(title)}</strong>
+        <p>${escapeHtml(text)}</p>
+      </div>
+    </div>`;
+}

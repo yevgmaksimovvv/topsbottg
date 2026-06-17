@@ -23,6 +23,31 @@ export function setThemeVariables() {
   root.setProperty("--shadow", "0 12px 28px rgba(0,0,0,.24)");
 }
 
+export function syncViewportVariables() {
+  const root = document.documentElement.style;
+  const webApp = telegramWebApp();
+  const viewportHeight = Math.max(
+    0,
+    Math.round(webApp?.viewportHeight || window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight)
+  );
+  root.setProperty("--app-viewport-height", `${viewportHeight}px`);
+  const mobileNav = document.querySelector(".mobile-nav");
+  if (mobileNav) {
+    root.setProperty("--mobile-nav-height", `${Math.ceil(mobileNav.getBoundingClientRect().height)}px`);
+  }
+}
+
+export function bindTelegramViewportEvents(onChange = syncViewportVariables) {
+  const webApp = telegramWebApp();
+  const sync = () => onChange();
+  sync();
+  webApp?.onEvent?.("viewportChanged", sync);
+  window.addEventListener("resize", sync, { passive: true });
+  window.addEventListener("orientationchange", sync, { passive: true });
+  window.visualViewport?.addEventListener("resize", sync, { passive: true });
+  window.visualViewport?.addEventListener("scroll", sync, { passive: true });
+}
+
 export function renderAuthState() {
   const pill = document.getElementById("auth-state");
   const banner = document.getElementById("auth-banner");

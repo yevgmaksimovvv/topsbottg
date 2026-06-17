@@ -1,5 +1,5 @@
 import { renderAuthState } from "./telegram.js";
-import { renderActionState, renderCurrentPayout, renderModal, renderMobileView, renderNotifications, renderPreview } from "./render-common.js";
+import { renderActionState, renderCurrentPayout, renderMobileView, renderNotifications, renderPreview } from "./render-common.js";
 import { renderPayouts } from "./render-payouts.js";
 import { renderRecipients } from "./render-recipients.js";
 import { renderUsers } from "./render-users.js";
@@ -13,6 +13,5 @@ export function renderApp() {
   renderPayouts();
   renderRecipients();
   renderActionState();
-  renderModal();
   renderMobileView();
 }

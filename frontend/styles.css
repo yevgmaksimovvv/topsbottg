@@ -14,6 +14,7 @@
   --border: rgba(255, 255, 255, 0.08);
   --radius: 18px;
   --shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+  --app-viewport-height: 100vh;
   --mobile-nav-height: 64px;
 }
 
@@ -28,16 +29,14 @@ body {
 }
 
 body {
+  min-height: var(--app-viewport-height);
   font-family:
     Inter, "SF Pro Text", "Segoe UI", "Noto Sans", system-ui, -apple-system, sans-serif;
   font-size: 16px;
   line-height: 1.45;
   color: var(--text);
   background: var(--bg);
-}
-
-body.modal-open {
-  overflow: hidden;
+  overflow-x: clip;
 }
 
 h1,
@@ -149,6 +148,10 @@ code {
   padding: 24px 0 32px;
 }
 
+.app-shell > * {
+  min-width: 0;
+}
+
 .app-header,
 .panel,
 .auth-banner {
@@ -164,6 +167,18 @@ code {
   gap: 18px;
   align-items: center;
   padding: 18px 20px;
+}
+
+.app-header > div,
+.panel-head > div,
+.users-toolbar,
+.current-payout-head,
+.selection-bar-copy,
+.selected-summary,
+.field,
+.user-main,
+.payout-main {
+  min-width: 0;
 }
 
 .eyebrow {
@@ -189,8 +204,9 @@ h1 {
   padding: 8px 12px;
   border-radius: 999px;
   border: 1px solid var(--border);
-  white-space: nowrap;
   font-size: 13px;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
 }
 
 .auth-pill.auth-ok {
@@ -269,8 +285,10 @@ h1 {
 .selected-summary span,
 .empty-state p,
 .status-note,
-.telegram-time {
+.telegram-time,
+.telegram-bubble {
   color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 .panel-actions {
@@ -293,16 +311,18 @@ h1 {
   align-items: center;
   gap: 8px;
   flex: 0 0 auto;
-  min-width: max-content;
+  min-width: 0;
   padding: 8px 10px;
   border-radius: 12px;
   background: var(--surface-2);
   border: 1px solid var(--border);
+  overflow-wrap: anywhere;
 }
 
 .selected-counter span {
   color: var(--muted);
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .selected-counter strong {
@@ -456,7 +476,7 @@ h1 {
 
 .selection-bar {
   position: sticky;
-  bottom: 12px;
+  bottom: calc(var(--mobile-nav-height) + 12px + env(safe-area-inset-bottom));
   z-index: 2;
   display: flex;
   justify-content: space-between;
@@ -472,6 +492,7 @@ h1 {
 .selection-bar-copy {
   display: grid;
   gap: 4px;
+  overflow-wrap: anywhere;
 }
 
 .selection-bar-copy strong {
@@ -490,6 +511,22 @@ h1 {
   border: 1px solid var(--border);
   background: #0f1f2e;
   padding: 14px;
+}
+
+.loading-state {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  align-items: start;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px dashed var(--border);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.loading-state strong {
+  display: block;
+  margin-bottom: 4px;
 }
 
 .preview-empty {
@@ -658,70 +695,6 @@ h1 {
   color: #ffd6dd;
 }
 
-.sheet-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: grid;
-  align-items: center;
-  justify-items: center;
-  background: rgba(6, 11, 16, 0.72);
-  backdrop-filter: blur(8px);
-}
-
-.sheet-backdrop.hidden {
-  display: none !important;
-}
-
-.payment-sheet {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  width: min(680px, calc(100vw - 40px));
-  max-height: calc(100vh - 40px);
-  transform: translate(-50%, -50%);
-  overflow: auto;
-  padding: 18px;
-  border-radius: 24px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.4);
-}
-
-.sheet-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 14px;
-  align-items: flex-start;
-}
-
-.icon-button {
-  min-width: 44px;
-  padding: 0 14px;
-  border-radius: 14px;
-  font-size: 22px;
-  line-height: 1;
-}
-
-.raw-details-modal {
-  margin: 14px 0 0;
-  padding: 14px;
-  border-radius: 16px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: min(52vh, 480px);
-  overflow: auto;
-}
-
-.sheet-actions {
-  display: flex;
-  gap: 10px;
-  margin-top: 16px;
-  flex-wrap: wrap;
-}
-
 .spinner {
   display: inline-block;
   width: 14px;
@@ -754,7 +727,7 @@ h1 {
 @media (max-width: 759px) {
   .app-shell {
     width: min(100% - 16px, 1320px);
-    padding: 14px 0 100px;
+    padding: 14px 0 calc(var(--mobile-nav-height) + 24px + env(safe-area-inset-bottom));
   }
 
   .app-header,
@@ -782,6 +755,7 @@ h1 {
     padding-bottom: 12px;
   }
 
+  .mobile-view[hidden],
   .mobile-view.hidden {
     display: none !important;
   }
@@ -844,10 +818,6 @@ h1 {
     grid-template-columns: 1fr;
   }
 
-  .selection-bar {
-    bottom: calc(var(--mobile-nav-height) + 12px);
-  }
-
   .user-card {
     grid-template-columns: auto 1fr;
     align-items: start;
@@ -878,7 +848,7 @@ h1 {
 @media (max-width: 430px) {
   .app-shell {
     width: min(100% - 12px, 1320px);
-    padding: 12px 0 92px;
+    padding: 12px 0 calc(var(--mobile-nav-height) + 22px + env(safe-area-inset-bottom));
   }
 
   .mobile-nav {
@@ -889,11 +859,13 @@ h1 {
 
   .mobile-nav-button {
     min-width: 0;
+    min-height: 38px;
     padding: 8px 6px;
     font-size: 13px;
     line-height: 1.1;
     white-space: normal;
     text-align: center;
+    overflow-wrap: anywhere;
   }
 
   .selected-counter,
@@ -904,12 +876,10 @@ h1 {
 
   .selected-counter {
     width: 100%;
-    white-space: normal;
   }
 
   .auth-pill {
     max-width: 100%;
-    white-space: normal;
   }
 
   .badge {
@@ -933,7 +903,7 @@ h1 {
 @media (max-width: 390px) {
   .app-shell {
     width: min(100% - 8px, 1320px);
-    padding: 10px 0 88px;
+    padding: 10px 0 calc(var(--mobile-nav-height) + 20px + env(safe-area-inset-bottom));
   }
 
   .app-header,
@@ -949,6 +919,7 @@ h1 {
   }
 
   .mobile-nav-button {
+    min-height: 36px;
     padding: 7px 5px;
     font-size: 12px;
   }
@@ -972,6 +943,7 @@ h1 {
   }
 
   .mobile-nav-button {
+    min-height: 34px;
     padding: 7px 4px;
     font-size: 11px;
   }

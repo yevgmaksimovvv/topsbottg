@@ -1,8 +1,6 @@
 import { state, canUseApi } from "./store.js";
-import { emptyStateMarkup, escapeHtml, initials } from "./utils.js";
-import { renderSelectedCount } from "./render-common.js";
-
-import { usersEmptyMessage } from "./render-common.js";
+import { emptyStateMarkup, escapeHtml, initials, loadingStateMarkup } from "./utils.js";
+import { renderSelectedCount, usersEmptyMessage } from "./render-common.js";
 
 function renderSelectionBarInto(rootId) {
   const root = document.getElementById(rootId);
@@ -32,6 +30,10 @@ export function renderSelectionBars() {
 export function renderUsersInto(rootId) {
   const root = document.getElementById(rootId);
   if (!root) return;
+  if (state.loading.users && !state.users.length) {
+    root.innerHTML = loadingStateMarkup("Пользователи", "Загрузка…");
+    return;
+  }
   const empty = usersEmptyMessage();
   if (empty) {
     root.innerHTML = emptyStateMarkup("Пользователи", empty);

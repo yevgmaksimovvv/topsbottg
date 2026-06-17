@@ -1,11 +1,19 @@
 import { RECIPIENT_STATUS_LABELS } from "./constants.js";
 import { state } from "./store.js";
-import { badgeClassForStatus, emptyStateMarkup, escapeHtml, statusLabel } from "./utils.js";
+import { badgeClassForStatus, emptyStateMarkup, escapeHtml, loadingStateMarkup, statusLabel } from "./utils.js";
 import { recipientsEmptyMessage, selectedPayoutSummaryText } from "./render-common.js";
 
 export function renderRecipientsInto(rootId) {
   const root = document.getElementById(rootId);
   if (!root) return;
+  if (state.loading.recipients && !state.recipients.length) {
+    root.innerHTML = `
+      <div class="recipient-summary">
+        <div class="selected-summary">${escapeHtml(selectedPayoutSummaryText())}</div>
+        ${loadingStateMarkup("Получатели", "Загрузка…")}
+      </div>`;
+    return;
+  }
   const empty = recipientsEmptyMessage();
   const summary = selectedPayoutSummaryText();
   if (empty) {

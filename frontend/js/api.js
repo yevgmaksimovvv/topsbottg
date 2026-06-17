@@ -168,55 +168,14 @@ async function markPaid(recipientId) {
   }
 }
 
-function openPaymentModal(details) {
-  state.modalPaymentDetails = details;
-  renderApp();
-}
-
-function closePaymentModal() {
-  state.modalPaymentDetails = null;
-  renderApp();
-}
-
-async function revealPaymentDetails(userId) {
-  if (!canUseApi()) return;
-  setLoadingAndRender("revealPaymentDetails", true);
-  state.loadingUserId = userId;
-  renderApp();
-  try {
-    const details = await api(`/admin/users/${userId}/payment-details`);
-    openPaymentModal(details);
-  } catch (error) {
-    setErrorAndRender(error.message || "Не удалось открыть платёжные данные");
-  } finally {
-    state.loadingUserId = null;
-    setLoadingAndRender("revealPaymentDetails", false);
-    renderApp();
-  }
-}
-
-async function copyPaymentDetails() {
-  if (!state.modalPaymentDetails) return;
-  try {
-    await navigator.clipboard.writeText(state.modalPaymentDetails.raw_payment_details);
-    setToastAndRender("Платёжные данные скопированы.");
-  } catch {
-    setErrorAndRender("Не удалось скопировать платёжные данные.");
-  }
-}
-
 export {
   api,
   attachSelected,
-  closePaymentModal,
-  copyPaymentDetails,
   createPayout,
   loadPayouts,
   loadUsers,
   markPaid,
-  openPaymentModal,
   refreshSelectedPayout,
-  revealPaymentDetails,
   selectPayout,
   sendPayout,
   startPollingSelectedPayout,

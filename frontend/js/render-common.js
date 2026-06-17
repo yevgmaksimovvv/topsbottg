@@ -53,7 +53,11 @@ export function renderMobileView() {
   });
 
   document.querySelectorAll("[data-mobile-panel]").forEach((panel) => {
-    panel.classList.toggle("hidden", panel.dataset.mobilePanel !== state.activeMobileView);
+    const active = panel.dataset.mobilePanel === state.activeMobileView;
+    panel.hidden = !active;
+    panel.classList.toggle("hidden", !active);
+    panel.setAttribute("aria-hidden", String(!active));
+    if ("inert" in panel) panel.inert = !active;
   });
 }
 
@@ -112,21 +116,18 @@ export function renderPreview() {
 
 export function usersEmptyMessage() {
   if (!canUseApi()) return "Пользователи появятся после открытия через Telegram.";
-  if (state.loading.users) return "Загрузка пользователей...";
   if (!state.users.length) return "Пользователи не найдены.";
   return "";
 }
 
 export function payoutsEmptyMessage() {
   if (!canUseApi()) return "Выплаты появятся после открытия через Telegram.";
-  if (state.loading.payouts) return "Загрузка выплат...";
   if (!state.payouts.length) return "Выплат пока нет.";
   return "";
 }
 
 export function recipientsEmptyMessage() {
   if (!canUseApi()) return "Выберите выплату, чтобы увидеть получателей.";
-  if (state.loading.recipients) return "Загрузка получателей...";
   if (!state.selectedPayoutId) return "Выберите выплату.";
   if (!state.recipients.length) return "У этой выплаты пока нет получателей.";
   return "";
@@ -228,44 +229,4 @@ export function renderActionState() {
   document.querySelectorAll('[data-action="attach-selected"]').forEach((button) => {
     button.classList.toggle("hidden", !canUseApi() || !state.selectedUsers.size || !state.selectedPayoutId);
   });
-  setButtonState("copy-payment-details", {
-    label: "Скопировать",
-    disabled: !state.modalPaymentDetails || !canUseApi(),
-    hint: state.modalPaymentDetails ? "Скопировать данные." : "Нет данных для копирования.",
-  });
-  setButtonState("close-payment-modal", {
-    label: "×",
-    disabled: false,
-    hint: "Закрыть окно платёжных данных.",
-  });
-  setButtonState("close-payment-modal-secondary", {
-    label: "Закрыть",
-    disabled: false,
-    hint: "Закрыть окно платёжных данных.",
-  });
-}
-
-export function renderModal() {
-  const modal = $("payment-modal");
-  const title = $("payment-modal-title");
-  const subtitle = $("payment-modal-subtitle");
-  const body = $("payment-modal-body");
-  const closeButton = $("close-payment-modal");
-  if (!modal || !title || !subtitle || !body || !closeButton) return;
-  if (!state.modalPaymentDetails) {
-    modal.classList.add("hidden");
-    modal.setAttribute("aria-hidden", "true");
-    title.textContent = "";
-    subtitle.textContent = "";
-    body.textContent = "";
-    document.body.classList.remove("modal-open");
-    return;
-  }
-  modal.classList.remove("hidden");
-  modal.setAttribute("aria-hidden", "false");
-  title.textContent = state.modalPaymentDetails.full_name || "Платёжные данные";
-  subtitle.textContent = `Telegram ID: ${state.modalPaymentDetails.telegram_user_id || state.modalPaymentDetails.telegram_id || "—"}`;
-  body.textContent = state.modalPaymentDetails.raw_payment_details || "";
-  document.body.classList.add("modal-open");
-  window.requestAnimationFrame(() => closeButton.focus());
 }

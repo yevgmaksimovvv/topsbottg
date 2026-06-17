@@ -2,7 +2,7 @@ import { PAYOUT_STATUS_LABELS } from "./constants.js";
 import { api, loadPayouts, refreshSelectedPayout } from "./api.js";
 import { payoutPeriodLabel, state, canUseApi, clearError, setError, setLoading, setToast } from "./store.js";
 import { renderApp } from "./render-app.js";
-import { emptyStateMarkup, escapeHtml, statusLabel } from "./utils.js";
+import { emptyStateMarkup, escapeHtml, loadingStateMarkup, statusLabel } from "./utils.js";
 import { payoutsEmptyMessage } from "./render-common.js";
 
 const DRAFT_SEND_MESSAGE = "Выплату можно разослать только из черновика. Обновите список выплат.";
@@ -10,6 +10,10 @@ const DRAFT_SEND_MESSAGE = "Выплату можно разослать тол�
 export function renderPayoutsInto(rootId) {
   const root = document.getElementById(rootId);
   if (!root) return;
+  if (state.loading.payouts && !state.payouts.length) {
+    root.innerHTML = loadingStateMarkup("Выплаты", "Загрузка…");
+    return;
+  }
   const empty = payoutsEmptyMessage();
   if (empty) {
     root.innerHTML = emptyStateMarkup("Выплаты", empty);
