@@ -14,6 +14,7 @@ import {
 import { createPayout, sendPayout } from "./render-payouts.js";
 
 let adminRecoveryTimer = null;
+let adminRecoveryReason = null;
 
 function syncTelegramSafeAreaVariables() {
   const webApp = telegramWebApp();
@@ -29,13 +30,21 @@ function syncLayoutMetrics() {
   syncTelegramSafeAreaVariables();
 }
 
-function scheduleAdminRecoveryRefresh() {
+function scheduleAdminRecoveryRefresh(reason = "visibilitychange") {
   if (!canUseApi()) return;
+  adminRecoveryReason = reason;
   if (adminRecoveryTimer) {
     clearTimeout(adminRecoveryTimer);
   }
   adminRecoveryTimer = window.setTimeout(() => {
     adminRecoveryTimer = null;
+    const currentReason = adminRecoveryReason;
+    adminRecoveryReason = null;
+    console.info("[topsbottg] recovery refresh", {
+      build: window.__TOPSBOTTG_FRONTEND_BUILD__ || null,
+      reason: currentReason,
+      visibilityState: document.visibilityState,
+    });
     void (async () => {
       await startAdminEvents();
       await scheduleAdminStateRefresh({ selected: true, payouts: true, silent: true });
@@ -149,6 +158,12 @@ function bindDelegatedEvents() {
 
 export async function bootstrap() {
   setThemeVariables();
+  console.info("[topsbottg] startup", {
+    build: window.__TOPSBOTTG_FRONTEND_BUILD__ || null,
+    userAgent: navigator.userAgent,
+    telegramWebApp: Boolean(window.Telegram?.WebApp),
+    visibilityState: document.visibilityState,
+  });
   const webApp = telegramWebApp();
   if (webApp) {
     webApp.ready();
@@ -179,11 +194,11 @@ export async function bootstrap() {
   window.addEventListener("beforeunload", stopAdminEvents);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") {
-      scheduleAdminRecoveryRefresh();
+      scheduleAdminRecoveryRefresh("visibilitychange");
     }
   });
-  window.addEventListener("focus", scheduleAdminRecoveryRefresh);
-  window.addEventListener("pageshow", scheduleAdminRecoveryRefresh);
+  window.addEventListener("focus", () => scheduleAdminRecoveryRefresh("focus"));
+  window.addEventListener("pageshow", () => scheduleAdminRecoveryRefresh("pageshow"));
 
   if (!state.initData) return;
   void startAdminEvents();
