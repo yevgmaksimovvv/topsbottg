@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import logging
 import secrets
 from collections.abc import Sequence
@@ -80,17 +81,63 @@ class AdminEventsBroadcaster:
     def subscribe(self) -> asyncio.Queue[dict[str, object]]:
         queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=self._queue_maxsize)
         self._subscribers.add(queue)
+        log_event(
+            logger,
+            "INFO",
+            "admin_events_subscribed",
+            "Подписчик admin events добавлен",
+            pid=os.getpid(),
+            broadcaster_id=id(self),
+            queue_id=id(queue),
+            subscribers_count_after=len(self._subscribers),
+        )
         return queue
 
     def unsubscribe(self, queue: asyncio.Queue[dict[str, object]]) -> None:
         self._subscribers.discard(queue)
+        log_event(
+            logger,
+            "INFO",
+            "admin_events_unsubscribed",
+            "Подписчик admin events удалён",
+            pid=os.getpid(),
+            broadcaster_id=id(self),
+            queue_id=id(queue),
+            subscribers_count_after=len(self._subscribers),
+        )
 
     def publish(self, event_type: str, payload: dict[str, object] | None = None) -> None:
         message = {"event": event_type, "payload": payload or {}}
-        for queue in list(self._subscribers):
+        queues = list(self._subscribers)
+        log_event(
+            logger,
+            "INFO",
+            "admin_event_publish_start",
+            "Публикация admin event началась",
+            pid=os.getpid(),
+            broadcaster_id=id(self),
+            event_type=event_type,
+            payload=payload or {},
+            subscribers_count=len(queues),
+            queue_ids=[id(queue) for queue in queues],
+            queue_sizes_before=[queue.qsize() for queue in queues],
+        )
+        queue_sizes_after: list[int] = []
+        for queue in queues:
             try:
                 queue.put_nowait(message)
             except asyncio.QueueFull:
+                log_event(
+                    logger,
+                    "WARNING",
+                    "admin_event_publish_queue_full",
+                    "Очередь admin event переполнена",
+                    pid=os.getpid(),
+                    broadcaster_id=id(self),
+                    event_type=event_type,
+                    queue_id=id(queue),
+                    queue_size=queue.qsize(),
+                )
                 try:
                     queue.get_nowait()
                 except asyncio.QueueEmpty:
@@ -99,6 +146,18 @@ class AdminEventsBroadcaster:
                     queue.put_nowait(message)
                 except asyncio.QueueFull:
                     pass
+            queue_sizes_after.append(queue.qsize())
+        log_event(
+            logger,
+            "INFO",
+            "admin_event_publish_done",
+            "Публикация admin event завершена",
+            pid=os.getpid(),
+            broadcaster_id=id(self),
+            event_type=event_type,
+            subscribers_count=len(queues),
+            queue_sizes_after=queue_sizes_after,
+        )
 
 
 _admin_events_broadcaster = AdminEventsBroadcaster()
@@ -138,6 +197,18 @@ def publish_admin_event(event_type: str, payload: dict[str, object] | None = Non
 def queue_admin_event(session: AsyncSession, event_type: str, payload: dict[str, object] | None = None) -> None:
     queued = session.info.setdefault(_ADMIN_EVENT_QUEUE_KEY, [])
     queued.append({"event_type": event_type, "payload": payload or {}})
+    log_event(
+        logger,
+        "INFO",
+        "admin_event_queued",
+        "Admin event поставлен в очередь session.info",
+        pid=os.getpid(),
+        broadcaster_id=id(get_admin_events_broadcaster()),
+        session_id=id(session.sync_session),
+        event_type=event_type,
+        payload=payload or {},
+        queue_len_after=len(queued),
+    )
 
 
 def queue_admin_events(session: AsyncSession, events: Sequence[tuple[str, dict[str, object] | None]]) -> None:
@@ -147,12 +218,41 @@ def queue_admin_events(session: AsyncSession, events: Sequence[tuple[str, dict[s
 
 def _flush_admin_events(sync_session: Session) -> None:
     queued = sync_session.info.pop(_ADMIN_EVENT_QUEUE_KEY, [])
+    log_event(
+        logger,
+        "INFO",
+        "admin_event_flushing",
+        "Admin events flush started",
+        pid=os.getpid(),
+        session_id=id(sync_session),
+        events_count=len(queued),
+    )
     for event in queued:
+        log_event(
+            logger,
+            "INFO",
+            "admin_event_flush_item",
+            "Admin event извлекается из очереди session.info",
+            pid=os.getpid(),
+            session_id=id(sync_session),
+            event_type=event["event_type"],
+            payload=event["payload"],
+        )
         publish_admin_event(event["event_type"], event["payload"])
 
 
 @event.listens_for(Session, "after_commit")
 def _after_commit(sync_session: Session) -> None:
+    queued = sync_session.info.get(_ADMIN_EVENT_QUEUE_KEY, [])
+    log_event(
+        logger,
+        "INFO",
+        "admin_event_after_commit",
+        "after_commit для admin events",
+        pid=os.getpid(),
+        session_id=id(sync_session),
+        events_count=len(queued),
+    )
     _flush_admin_events(sync_session)
 
 
