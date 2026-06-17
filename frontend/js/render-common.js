@@ -20,24 +20,22 @@ function composerPeriodLabel() {
 
 export function renderNotifications() {
   const toast = $("toast");
-  const errorBanner = $("error-banner");
   if (toast) {
-    if (state.toast) {
-      toast.textContent = state.toast;
-      toast.classList.remove("hidden");
-    } else {
+    const notification = state.notification;
+    if (!notification) {
       toast.textContent = "";
-      toast.classList.add("hidden");
+      toast.className = "toast hidden";
+      return;
     }
-  }
-  if (errorBanner) {
-    if (state.error) {
-      errorBanner.textContent = state.error;
-      errorBanner.classList.remove("hidden");
-    } else {
-      errorBanner.textContent = "";
-      errorBanner.classList.add("hidden");
-    }
+    const label = notification.kind === "error" ? "Ошибка" : notification.kind === "warning" ? "Предупреждение" : "Сообщение";
+    toast.className = `toast toast-${notification.kind}`;
+    toast.setAttribute("role", notification.kind === "error" ? "alert" : "status");
+    toast.innerHTML = `
+      <div class="toast-copy">
+        <strong>${escapeHtml(label)}</strong>
+        <span>${escapeHtml(notification.message)}</span>
+      </div>
+      <button type="button" class="toast-close" data-action="dismiss-toast" aria-label="Закрыть уведомление">×</button>`;
   }
 }
 
@@ -133,11 +131,36 @@ export function recipientsEmptyMessage() {
   return "";
 }
 
+export function selectedPayoutHintText(payout) {
+  switch (payout?.status) {
+    case "draft":
+      return "Черновик выбран. Добавьте получателей во вкладке «Пользователи».";
+    case "sent":
+      return "Разослана. Статусы доступны во вкладке «Получатели».";
+    case "partially_failed":
+      return "Разослана с ошибками. Проверьте вкладку «Получатели».";
+    case "completed":
+    case "paid":
+      return "Выплата завершена. Детали во вкладке «Получатели».";
+    case "cancelled":
+      return "Выплата отменена.";
+    default:
+      return "Выплата выбрана.";
+  }
+}
+
 export function selectedPayoutSummaryText() {
-  if (!state.selectedPayoutDetail) return "Выплата не выбрана";
+  if (!state.selectedPayoutDetail) return "Выберите выплату в списке.";
   const { payout } = state.selectedPayoutDetail;
   const periodLabel = payoutPeriodLabel(payout) || "Период не задан";
-  return `Для выплаты #${payout.id} · ${periodLabel} · ${statusLabel(PAYOUT_STATUS_LABELS, payout.status)} · ${state.recipients.length} получ.`;
+  const recipientsCount = state.recipients.length;
+  const recipientsLabel =
+    recipientsCount === 1
+      ? "1 получатель"
+      : recipientsCount % 10 >= 2 && recipientsCount % 10 <= 4 && (recipientsCount % 100 < 10 || recipientsCount % 100 >= 20)
+        ? `${recipientsCount} получателя`
+        : `${recipientsCount} получателей`;
+  return `Выплата #${payout.id}\n${periodLabel} · ${statusLabel(PAYOUT_STATUS_LABELS, payout.status)} · ${recipientsLabel}`;
 }
 
 export function renderCurrentPayoutInto(rootId) {
@@ -221,5 +244,8 @@ export function renderActionState() {
     loading: state.loading.createPayout,
     disabled: state.loading.createPayout || !canUseApi(),
     hint: canUseApi() ? "Создать новую выплату." : "Нужен доступ к данным.",
+  });
+  document.querySelectorAll('[data-action="dismiss-toast"]').forEach((button) => {
+    button.classList.toggle("hidden", !state.notification);
   });
 }

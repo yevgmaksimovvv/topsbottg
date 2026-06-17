@@ -1,4 +1,4 @@
-import { POLL_INTERVAL_MS } from "./constants.js";
+import { API_TIMEOUT_MS, POLL_INTERVAL_MS } from "./constants.js";
 import { state, canUseApi, clearError, setError, setLoading, setToast } from "./store.js";
 import { renderApp } from "./render-app.js";
 import {
@@ -65,20 +65,32 @@ async function api(path, options = {}) {
   if (!canUseApi()) {
     throw new Error("Нет доступа к данным");
   }
-  const response = await fetch(`/api${path}`, {
-    ...options,
-    headers: {
-      ...(options.headers || {}),
-      "Content-Type": "application/json",
-      "X-Telegram-Init-Data": state.initData,
-    },
-  });
-  if (!response.ok) {
-    throw new Error(await readErrorMessage(response));
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort("timeout"), API_TIMEOUT_MS);
+  try {
+    const response = await fetch(`/api${path}`, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        ...(options.headers || {}),
+        "Content-Type": "application/json",
+        "X-Telegram-Init-Data": state.initData,
+      },
+    });
+    if (!response.ok) {
+      throw new Error(await readErrorMessage(response));
+    }
+    if (response.status === 204) return null;
+    if (isJsonResponse(response)) return response.json();
+    return response.text();
+  } catch (error) {
+    if (error?.name === "AbortError" || error === "timeout") {
+      throw new Error("Запрос превысил время ожидания.");
+    }
+    throw new Error(error?.message || "Не удалось выполнить запрос.");
+  } finally {
+    clearTimeout(timeoutId);
   }
-  if (response.status === 204) return null;
-  if (isJsonResponse(response)) return response.json();
-  return response.text();
 }
 
 function setLoadingAndRender(key, value) {
@@ -92,8 +104,12 @@ function setErrorAndRender(message) {
 }
 
 function setToastAndRender(message) {
-  setToast(message);
+  setToast(message, "success");
   renderApp();
+}
+
+function logLoadError(scope, error) {
+  console.error(`[topsbottg] ${scope}:`, error?.message || error);
 }
 
 function stopPolling() {
@@ -136,6 +152,7 @@ async function loadUsers({ reset = true } = {}) {
     state.usersOffset = page.offset + page.items.length;
   } catch (error) {
     if (requestId === state.usersRequestId) {
+      logLoadError("loadUsers", error);
       setErrorAndRender(error.message || "Не удалось загрузить пользователей");
     }
   } finally {
@@ -157,6 +174,7 @@ async function loadPayouts() {
     state.payouts = payouts;
   } catch (error) {
     if (requestId === state.payoutRequestId) {
+      logLoadError("loadPayouts", error);
       setErrorAndRender(error.message || "Не удалось загрузить выплаты");
     }
   } finally {
@@ -179,7 +197,9 @@ async function refreshSelectedPayout({ silent = false } = {}) {
     renderApp();
     startPollingSelectedPayout();
   } catch (error) {
-    if (!silent) setErrorAndRender(error.message || "Не удалось обновить выплату");
+    logLoadError("refreshSelectedPayout", error);
+    if (silent) stopPolling();
+    setErrorAndRender(error.message || "Не удалось обновить выплату");
   } finally {
     if (!silent) setLoadingAndRender("recipients", false);
   }

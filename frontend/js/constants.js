@@ -19,6 +19,7 @@ export const RECIPIENT_STATUS_LABELS = {
 };
 
 export const AUTO_HIDE_TOAST_MS = 3200;
+export const API_TIMEOUT_MS = 15000;
 export const USERS_LIMIT = 50;
 export const SEARCH_DEBOUNCE_MS = 300;
 export const POLL_INTERVAL_MS = 4000;

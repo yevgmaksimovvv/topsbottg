@@ -15,12 +15,11 @@
 
       <div id="auth-banner" class="auth-banner hidden" role="status"></div>
       <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-      <div id="error-banner" class="error-banner hidden" role="alert"></div>
 
       <nav class="mobile-nav" aria-label="Разделы">
-        <button type="button" data-mobile-view="users" class="mobile-nav-button">Пользователи</button>
         <button type="button" data-mobile-view="composer" class="mobile-nav-button">Выплата</button>
         <button type="button" data-mobile-view="payouts" class="mobile-nav-button">Список</button>
+        <button type="button" data-mobile-view="users" class="mobile-nav-button">Пользователи</button>
         <button type="button" data-mobile-view="recipients" class="mobile-nav-button">Получатели</button>
       </nav>
 
@@ -57,7 +56,6 @@
           </div>
 
           <div id="desktop-users" class="list-root"></div>
-          <div id="desktop-selection-bar" class="selection-bar hidden"></div>
         </section>
 
         <section class="panel composer-panel">
@@ -127,7 +125,6 @@
             <div class="panel-head">
               <div>
                 <h2>Получатели</h2>
-                <p class="panel-note">Статусы получателей.</p>
               </div>
             </div>
             <div id="desktop-recipients" class="list-root"></div>
@@ -169,7 +166,6 @@
             </div>
 
             <div id="mobile-users" class="list-root"></div>
-            <div id="mobile-selection-bar" class="selection-bar hidden"></div>
           </section>
         </section>
 
@@ -242,7 +238,6 @@
             <div class="panel-head">
               <div>
                 <h2>Получатели</h2>
-                <p class="panel-note">Статусы получателей.</p>
               </div>
             </div>
             <div id="mobile-recipients" class="list-root"></div>

@@ -1,7 +1,7 @@
 import { SEARCH_DEBOUNCE_MS } from "./constants.js";
 import { renderApp } from "./render-app.js";
 import { bindTelegramViewportEvents, setThemeVariables, telegramWebApp } from "./telegram.js";
-import { refreshTelegramAuthState, state, setMobileView, syncComposerFields, syncFilterInputs } from "./store.js";
+import { clearNotification, refreshTelegramAuthState, state, setMobileView, syncComposerFields, syncFilterInputs } from "./store.js";
 import { loadPayouts, loadUsers, markPaid, selectPayout } from "./api.js";
 import { createPayout, sendPayout } from "./render-payouts.js";
 
@@ -63,6 +63,12 @@ function bindDelegatedEvents() {
       return;
     }
 
+    if (action?.dataset.action === "dismiss-toast") {
+      clearNotification();
+      renderApp();
+      return;
+    }
+
     if (action) {
       const { action: name, recipientId } = action.dataset;
       if (name === "reload-users") {
@@ -113,6 +119,7 @@ export async function bootstrap() {
     webApp.expand();
   }
   refreshTelegramAuthState();
+  setMobileView("composer");
 
   state.composer.messageTemplate =
     "Всем привет!\n" +
@@ -133,5 +140,5 @@ export async function bootstrap() {
   bindTelegramViewportEvents();
 
   if (!state.initData) return;
-  await Promise.all([loadUsers({ reset: true }), loadPayouts()]);
+  await Promise.allSettled([loadUsers({ reset: true }), loadPayouts()]);
 }

@@ -42,35 +42,6 @@ function renderUsersContextInto(rootId) {
     </div>`;
 }
 
-export function renderSelectionBars() {
-  const renderSelectionBarInto = (rootId) => {
-    const root = document.getElementById(rootId);
-    if (!root) return;
-    if (!state.selectedUsers.size) {
-      root.classList.add("hidden");
-      root.innerHTML = "";
-      return;
-    }
-    root.classList.remove("hidden");
-    const payout = state.selectedPayoutDetail?.payout || null;
-    const note = !payout
-      ? "Сначала выберите выплату в списке."
-      : payout.status !== "draft"
-        ? "Для этой выплаты добавление закрыто."
-        : "Выбор готов к отправке сверху.";
-    root.innerHTML = `
-      <div class="selection-bar-copy">
-        <div class="selected-counter">
-          <span>Выбрано</span>
-          <strong>${state.selectedUsers.size}</strong>
-        </div>
-        <span>${note}</span>
-      </div>`;
-  };
-  renderSelectionBarInto("desktop-selection-bar");
-  renderSelectionBarInto("mobile-selection-bar");
-}
-
 export function renderUsersInto(rootId) {
   const root = document.getElementById(rootId);
   if (!root) return;
@@ -88,14 +59,10 @@ export function renderUsersInto(rootId) {
       const locked = !canUseApi() || !state.selectedPayoutDetail || state.selectedPayoutDetail.payout.status !== "draft";
       return `
         <article class="user-card">
-          <div class="user-main">
-            <strong>${escapeHtml(user.full_name)}</strong>
-          </div>
-          <div class="user-actions">
-            <label class="checkbox-cell" aria-label="Выбрать пользователя">
-              <input type="checkbox" data-user-id="${user.id}" ${state.selectedUsers.has(user.id) ? "checked" : ""} ${locked ? "disabled" : ""} />
-            </label>
-          </div>
+          <label class="user-row" aria-label="Выбрать пользователя">
+            <strong class="user-name">${escapeHtml(user.full_name)}</strong>
+            <input type="checkbox" data-user-id="${user.id}" ${state.selectedUsers.has(user.id) ? "checked" : ""} ${locked ? "disabled" : ""} />
+          </label>
         </article>`;
     })
     .join("");
@@ -107,5 +74,4 @@ export function renderUsers() {
   renderUsersInto("desktop-users");
   renderUsersInto("mobile-users");
   renderSelectedCount();
-  renderSelectionBars();
 }

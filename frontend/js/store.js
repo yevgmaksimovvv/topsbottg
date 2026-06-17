@@ -1,10 +1,10 @@
-import { COMPOSER_IDS, MOBILE_QUERY, USERS_LIMIT } from "./constants.js";
+import { AUTO_HIDE_TOAST_MS, COMPOSER_IDS, MOBILE_QUERY, USERS_LIMIT } from "./constants.js";
 
 export const state = {
   isTelegramEnvironment: Boolean(window.Telegram?.WebApp),
   initData: "",
   authStatus: window.Telegram?.WebApp ? "telegram_missing_init_data" : "browser",
-  activeMobileView: "users",
+  activeMobileView: "composer",
   users: [],
   payouts: [],
   recipients: [],
@@ -32,7 +32,7 @@ export const state = {
   },
   loadingRecipientId: null,
   error: null,
-  toast: null,
+  notification: null,
   pollingTimer: null,
   usersRequestId: 0,
   payoutRequestId: 0,
@@ -93,15 +93,55 @@ export function setLoading(key, value) {
 }
 
 export function setError(message) {
-  state.error = message || null;
+  const text = String(message || "").trim();
+  state.error = text || null;
+  setToast(text, "error");
 }
 
 export function clearError() {
   state.error = null;
+  clearNotification();
 }
 
-export function setToast(message) {
-  state.toast = message || null;
+function hideNotificationDom() {
+  const toast = $("toast");
+  if (toast) {
+    toast.textContent = "";
+    toast.className = "toast hidden";
+  }
+}
+
+function clearNotificationTimer() {
+  if (state.toastTimer) {
+    clearTimeout(state.toastTimer);
+    state.toastTimer = null;
+  }
+}
+
+export function clearNotification() {
+  clearNotificationTimer();
+  state.notification = null;
+  hideNotificationDom();
+}
+
+function notificationDuration(kind) {
+  if (kind === "warning" || kind === "error") return 5000;
+  return AUTO_HIDE_TOAST_MS;
+}
+
+export function setToast(message, kind = "info") {
+  const text = String(message || "").trim();
+  clearNotificationTimer();
+  state.notification = text ? { kind, message: text } : null;
+  if (!text) {
+    hideNotificationDom();
+    return;
+  }
+  state.toastTimer = window.setTimeout(() => {
+    state.notification = null;
+    state.toastTimer = null;
+    hideNotificationDom();
+  }, notificationDuration(kind));
 }
 
 export function setMobileView(view) {

@@ -3,7 +3,7 @@ import { api, loadPayouts, refreshSelectedPayout } from "./api.js";
 import { payoutPeriodLabel, state, canUseApi, clearError, setError, setLoading, setToast } from "./store.js";
 import { renderApp } from "./render-app.js";
 import { emptyStateMarkup, escapeHtml, loadingStateMarkup, statusLabel } from "./utils.js";
-import { payoutsEmptyMessage } from "./render-common.js";
+import { payoutsEmptyMessage, selectedPayoutHintText } from "./render-common.js";
 
 const DRAFT_SEND_MESSAGE = "Выплату можно разослать только из черновика. Обновите список выплат.";
 
@@ -30,7 +30,7 @@ export function renderPayoutsInto(rootId) {
           <div class="payout-main">
             <strong>#${payout.id} · ${escapeHtml(periodLabel)}</strong>
             <span class="meta">${escapeHtml(statusLabel(PAYOUT_STATUS_LABELS, payout.status))}</span>
-            ${selected ? '<span class="meta">Выбрана. Перейдите в «Пользователи».</span>' : ""}
+            ${selected ? `<span class="meta">${escapeHtml(selectedPayoutHintText(payout))}</span>` : ""}
           </div>
           <span class="badge ${selected ? "badge-success" : "badge-muted"}">${selected ? "Выбрана" : "Открыть"}</span>
         </button>`;
@@ -119,7 +119,7 @@ function setErrorAndRender(message) {
 }
 
 function setToastAndRender(message) {
-  setToast(message);
+  setToast(message, "success");
   renderApp();
 }
 
