@@ -2,13 +2,8 @@ import { SEARCH_DEBOUNCE_MS } from "./constants.js";
 import { renderApp } from "./render-app.js";
 import { bindTelegramViewportEvents, setThemeVariables, telegramWebApp } from "./telegram.js";
 import { refreshTelegramAuthState, state, setMobileView, syncComposerFields, syncFilterInputs } from "./store.js";
-import { loadPayouts, loadUsers, selectPayout } from "./api.js";
-import {
-  attachSelected,
-  createPayout,
-  markPaid,
-  sendPayout,
-} from "./render-payouts.js";
+import { loadPayouts, loadUsers, markPaid, selectPayout } from "./api.js";
+import { attachSelected, createPayout, sendPayout } from "./render-payouts.js";
 
 function bindComposerInputs() {
   const ids = [
