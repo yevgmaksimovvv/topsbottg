@@ -42,7 +42,34 @@ async def test_worker_sends_only_sending_claimed_recipient(session_factory, sett
     await process_recipient(bot, session_factory, settings, recipient.id)
     assert len(bot.sent) == 1
     assert "01.02 — 28.02" in bot.sent[0][1]
+    assert "Платёжные данные:" not in bot.sent[0][1]
     assert isinstance(bot.sent[0][2], InlineKeyboardMarkup)
+    assert [[button.text for button in row] for row in bot.sent[0][2].inline_keyboard] == [["Заполнить данные"]]
+
+
+@pytest.mark.asyncio
+async def test_worker_sends_profile_block_and_two_buttons(session_factory, settings):
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 111, "Иван Иванов")
+        await upsert_payment_profile(session, user, "Иван Иванов\n+79990000000\nT-Bank")
+        payout = await create_payout(
+            session,
+            actor_telegram_id=123,
+            payload=_payout_payload(),
+        )
+        [recipient] = await add_recipients(session, payout, [user.id])
+        recipient.status = RecipientStatus.sending.value
+        await session.commit()
+    bot = FakeBot()
+    await process_recipient(bot, session_factory, settings, recipient.id)
+    assert len(bot.sent) == 1
+    text = bot.sent[0][1]
+    assert "Платёжные данные:" in text
+    assert "Иван Иванов\n+79990000000\nT-Bank" in text
+    assert isinstance(bot.sent[0][2], InlineKeyboardMarkup)
+    assert [[button.text for button in row] for row in bot.sent[0][2].inline_keyboard] == [
+        ["Подтвердить данные", "Изменить данные"]
+    ]
 
 
 @pytest.mark.asyncio
@@ -51,8 +78,8 @@ async def test_worker_keyboard_has_no_url(session_factory, settings):
     buttons = keyboard.inline_keyboard
     assert all(button.url is None for row in buttons for button in row)
     assert {button.callback_data for row in buttons for button in row} == {
-        "fill_payment:10",
         "confirm_profile:10",
+        "fill_payment:10",
     }
 
 

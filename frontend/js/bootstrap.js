@@ -3,7 +3,7 @@ import { renderApp } from "./render-app.js";
 import { bindTelegramViewportEvents, setThemeVariables, telegramWebApp } from "./telegram.js";
 import { refreshTelegramAuthState, state, setMobileView, syncComposerFields, syncFilterInputs } from "./store.js";
 import { loadPayouts, loadUsers, markPaid, selectPayout } from "./api.js";
-import { attachSelected, createPayout, sendPayout } from "./render-payouts.js";
+import { createPayout, sendPayout } from "./render-payouts.js";
 
 function bindComposerInputs() {
   const ids = [
@@ -73,9 +73,7 @@ function bindDelegatedEvents() {
         state.selectedUsers.clear();
         renderApp();
       } else if (name === "create-payout") {
-        await createPayout();
-      } else if (name === "attach-selected") {
-        await attachSelected();
+        return;
       } else if (name === "send-payout") {
         await sendPayout();
       } else if (name === "mark-paid") {
@@ -84,6 +82,13 @@ function bindDelegatedEvents() {
       renderApp();
       return;
     }
+  });
+
+  document.addEventListener("submit", async (event) => {
+    const form = event.target;
+    if (!form?.matches?.('[data-action-form="create-payout"]')) return;
+    event.preventDefault();
+    await createPayout();
   });
 
   document.addEventListener("change", (event) => {

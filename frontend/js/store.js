@@ -27,7 +27,6 @@ export const state = {
     payouts: false,
     recipients: false,
     createPayout: false,
-    attachSelected: false,
     sendPayout: false,
     markPaid: false,
   },

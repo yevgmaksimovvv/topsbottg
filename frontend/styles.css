@@ -358,10 +358,10 @@ code {
 
 .user-card {
   display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 12px;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
   align-items: center;
-  padding: 14px;
+  padding: 10px 12px;
 }
 
 .avatar,
@@ -385,6 +385,11 @@ code {
   min-width: 0;
 }
 
+.user-main {
+  align-content: center;
+  gap: 2px;
+}
+
 .user-line {
   display: flex;
   flex-wrap: wrap;
@@ -399,6 +404,30 @@ code {
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;
+}
+
+.users-context {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  margin: 0 0 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(46, 166, 255, 0.18);
+  background: rgba(46, 166, 255, 0.08);
+}
+
+.users-context-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.users-context-warning {
+  border-color: rgba(242, 184, 75, 0.22);
+  background: rgba(242, 184, 75, 0.08);
+  color: #ffe6ad;
 }
 
 .checkbox-cell {
@@ -456,7 +485,6 @@ code {
   bottom: calc(var(--mobile-nav-height) + 12px + env(safe-area-inset-bottom));
   z-index: 2;
   display: flex;
-  justify-content: space-between;
   gap: 12px;
   align-items: center;
   margin-top: 12px;
@@ -618,19 +646,22 @@ code {
   padding: 14px;
 }
 
-.reply-details {
+.recipient-payment {
+  display: grid;
+  gap: 6px;
   border-radius: 14px;
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(255, 255, 255, 0.03);
   padding: 10px 12px;
 }
 
-.reply-details summary {
-  cursor: pointer;
+.recipient-payment-label {
+  color: var(--muted);
+  font-size: 12px;
 }
 
-.reply-details pre {
-  margin: 10px 0 0;
+.recipient-payment-value {
+  margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
   color: #dbe8f3;
@@ -662,6 +693,15 @@ code {
 
 .status-note {
   font-size: 12px;
+  line-height: 1.4;
+}
+
+.status-note-warning {
+  color: #ffe6ad;
+}
+
+.status-note-danger {
+  color: #ffd0d8;
 }
 
 .form-hint {

@@ -2,7 +2,6 @@ import { POLL_INTERVAL_MS } from "./constants.js";
 import { state, canUseApi, clearError, setError, setLoading, setToast } from "./store.js";
 import { renderApp } from "./render-app.js";
 import {
-  attachSelected as renderAttachSelected,
   createPayout as renderCreatePayout,
   sendPayout as renderSendPayout,
 } from "./render-payouts.js";
@@ -188,6 +187,12 @@ async function refreshSelectedPayout({ silent = false } = {}) {
 
 async function selectPayout(id) {
   if (!canUseApi()) return;
+  const changed = state.selectedPayoutId !== id;
+  if (changed) {
+    state.selectedUsers.clear();
+    state.selectedPayoutDetail = null;
+    state.recipients = [];
+  }
   state.selectedPayoutId = id;
   stopPolling();
   await refreshSelectedPayout();
@@ -220,7 +225,6 @@ async function markPaid(recipientId) {
 
 export {
   api,
-  renderAttachSelected as attachSelected,
   renderCreatePayout as createPayout,
   loadPayouts,
   loadUsers,

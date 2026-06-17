@@ -7,13 +7,13 @@ export function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
-export function statusLabel(map, value) {
-  return map[value] || value;
+export function statusLabel(map, value, fallback = "Неизвестный статус") {
+  return map[value] || fallback;
 }
 
 export function badgeClassForStatus(status) {
-  if (["paid", "sent"].includes(status)) return "badge-success";
-  if (["sending", "payment_received"].includes(status)) return "badge-warning";
+  if (["paid", "payment_received"].includes(status)) return "badge-success";
+  if (["sent", "sending", "payment_required", "pending"].includes(status)) return "badge-warning";
   if (["failed", "cancelled", "partially_failed"].includes(status)) return "badge-danger";
   return "badge-muted";
 }

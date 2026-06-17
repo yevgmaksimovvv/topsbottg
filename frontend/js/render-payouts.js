@@ -20,6 +20,8 @@ export function renderPayoutsInto(rootId) {
     return;
   }
   root.innerHTML = state.payouts
+    .slice()
+    .sort((a, b) => Number(b.id) - Number(a.id))
     .map((payout) => {
       const selected = state.selectedPayoutId === payout.id;
       const periodLabel = payoutPeriodLabel(payout) || "Период не задан";
@@ -28,6 +30,7 @@ export function renderPayoutsInto(rootId) {
           <div class="payout-main">
             <strong>#${payout.id} · ${escapeHtml(periodLabel)}</strong>
             <span class="meta">${escapeHtml(statusLabel(PAYOUT_STATUS_LABELS, payout.status))}</span>
+            ${selected ? '<span class="meta">Выбрана. Перейдите в «Пользователи».</span>' : ""}
           </div>
           <span class="badge ${selected ? "badge-success" : "badge-muted"}">${selected ? "Выбрана" : "Открыть"}</span>
         </button>`;
@@ -124,10 +127,6 @@ export async function createPayout() {
   if (!canUseApi()) return;
   const payload = validatePayoutForm();
   if (!payload) return;
-  if (!state.selectedUsers.size) {
-    const confirmed = window.confirm("Создать выплату без получателей?");
-    if (!confirmed) return;
-  }
   setLoadingAndRender("createPayout", true);
   clearError();
   try {
@@ -141,16 +140,13 @@ export async function createPayout() {
         message_template: payload.messageTemplate.trim() || null,
       }),
     });
-    if (state.selectedUsers.size) {
-      await api(`/admin/payouts/${payout.id}/recipients`, {
-        method: "POST",
-        body: JSON.stringify({ user_ids: [...state.selectedUsers] }),
-      });
-    }
+    state.selectedUsers.clear();
+    state.selectedPayoutId = payout.id;
+    state.selectedPayoutDetail = { payout };
+    state.recipients = [];
     setToastAndRender(`Выплата #${payout.id} создана.`);
     await loadPayouts();
-    state.selectedPayoutId = payout.id;
-    await refreshSelectedPayout();
+    await refreshSelectedPayout({ silent: true });
   } catch (error) {
     setErrorAndRender(error.message || "Не удалось создать выплату");
   } finally {
@@ -158,22 +154,8 @@ export async function createPayout() {
   }
 }
 
-export async function attachSelected() {
-  if (!canUseApi() || !state.selectedPayoutId || !state.selectedUsers.size) return;
-  setLoadingAndRender("attachSelected", true);
-  try {
-    await api(`/admin/payouts/${state.selectedPayoutId}/recipients`, {
-      method: "POST",
-      body: JSON.stringify({ user_ids: [...state.selectedUsers] }),
-    });
-    setToastAndRender("Выбранные пользователи добавлены к выплате.");
-    await refreshSelectedPayout();
-    await loadPayouts();
-  } catch (error) {
-    setErrorAndRender(error.message || "Не удалось добавить пользователей");
-  } finally {
-    setLoadingAndRender("attachSelected", false);
-  }
+function recipientUserId(recipient) {
+  return recipient?.user_id ?? recipient?.user?.id ?? null;
 }
 
 export async function sendPayout() {
@@ -188,7 +170,29 @@ export async function sendPayout() {
     setErrorAndRender(DRAFT_SEND_MESSAGE);
     return;
   }
+  const existingRecipientIds = new Set(
+    state.recipients.map(recipientUserId).filter((id) => Number.isInteger(id))
+  );
+  const selectedUserIds = [...state.selectedUsers];
+  const missingUserIds = selectedUserIds.filter((id) => !existingRecipientIds.has(id));
+  if (missingUserIds.length) {
+    clearError();
+    try {
+      await api(`/admin/payouts/${state.selectedPayoutId}/recipients`, {
+        method: "POST",
+        body: JSON.stringify({ user_ids: missingUserIds }),
+      });
+      await refreshSelectedPayout({ silent: true });
+    } catch (error) {
+      setErrorAndRender(error.message || "Не удалось добавить пользователей");
+      return;
+    }
+  }
   const count = state.recipients.length;
+  if (!count) {
+    setErrorAndRender("Нельзя отправить пустую выплату.");
+    return;
+  }
   const confirmed = window.confirm(
     `Запустить рассылку выплаты "${payoutPeriodLabel(payout) || state.selectedPayoutId}" для ${count} получателей?`
   );
@@ -197,6 +201,7 @@ export async function sendPayout() {
   clearError();
   try {
     await api(`/admin/payouts/${state.selectedPayoutId}/send`, { method: "POST" });
+    state.selectedUsers.clear();
     setToastAndRender("Рассылка запущена.");
     await refreshSelectedPayout();
     await loadPayouts();

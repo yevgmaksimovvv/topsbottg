@@ -29,7 +29,7 @@
           <div class="panel-head">
             <div>
               <h2>Пользователи</h2>
-              <p class="panel-note">Выберите людей для выплаты.</p>
+              <p class="panel-note">Сначала выберите выплату в списке.</p>
             </div>
           </div>
 
@@ -43,17 +43,18 @@
               <button type="button" class="secondary-button" data-action="reload-users">Обновить</button>
             </div>
           </div>
+          <div id="desktop-users-context" class="users-context hidden"></div>
 
-            <div class="controls controls-users">
-              <label class="field">
-                <span>Поиск</span>
-                <input id="desktop-search" autocomplete="off" placeholder="Поиск по ФИО" />
-              </label>
-              <div class="field field-button">
-                <span>&nbsp;</span>
-                <button type="button" class="secondary-button" data-action="load-more-users">Загрузить ещё</button>
-              </div>
+          <div class="controls controls-users">
+            <label class="field">
+              <span>Поиск</span>
+              <input id="desktop-search" autocomplete="off" placeholder="Поиск по ФИО" />
+            </label>
+            <div class="field field-button">
+              <span>&nbsp;</span>
+              <button type="button" class="secondary-button" data-action="load-more-users">Загрузить ещё</button>
             </div>
+          </div>
 
           <div id="desktop-users" class="list-root"></div>
           <div id="desktop-selection-bar" class="selection-bar hidden"></div>
@@ -63,29 +64,29 @@
           <div class="panel-head">
             <div>
               <h2>Новая выплата</h2>
-              <p class="panel-note">Создайте сообщение и проверьте предпросмотр.</p>
+              <p class="panel-note">Создайте черновик выплаты без получателей.</p>
             </div>
           </div>
 
-            <div class="composer-form">
-              <div class="controls controls-composer">
-                <label class="field">
-                  <span>День начала</span>
-                  <input id="desktop-period-start-day" type="number" min="1" max="31" inputmode="numeric" placeholder="ДД" />
-                </label>
-                <label class="field">
-                  <span>Месяц начала</span>
-                  <input id="desktop-period-start-month" type="number" min="1" max="12" inputmode="numeric" placeholder="ММ" />
-                </label>
-                <label class="field">
-                  <span>День окончания</span>
-                  <input id="desktop-period-end-day" type="number" min="1" max="31" inputmode="numeric" placeholder="ДД" />
-                </label>
-                <label class="field">
-                  <span>Месяц окончания</span>
-                  <input id="desktop-period-end-month" type="number" min="1" max="12" inputmode="numeric" placeholder="ММ" />
-                </label>
-              </div>
+          <form class="composer-form" data-action-form="create-payout">
+            <div class="controls controls-composer">
+              <label class="field">
+                <span>День начала</span>
+                <input id="desktop-period-start-day" type="number" min="1" max="31" inputmode="numeric" placeholder="ДД" />
+              </label>
+              <label class="field">
+                <span>Месяц начала</span>
+                <input id="desktop-period-start-month" type="number" min="1" max="12" inputmode="numeric" placeholder="ММ" />
+              </label>
+              <label class="field">
+                <span>День окончания</span>
+                <input id="desktop-period-end-day" type="number" min="1" max="31" inputmode="numeric" placeholder="ДД" />
+              </label>
+              <label class="field">
+                <span>Месяц окончания</span>
+                <input id="desktop-period-end-month" type="number" min="1" max="12" inputmode="numeric" placeholder="ММ" />
+              </label>
+            </div>
 
             <label class="field">
               <span>Шаблон сообщения</span>
@@ -96,9 +97,9 @@
             <div id="desktop-preview" class="preview-root"></div>
 
             <div class="action-row">
-              <button type="button" data-action="create-payout">Создать выплату</button>
+              <button type="submit" data-action="create-payout">Создать выплату</button>
             </div>
-          </div>
+          </form>
         </section>
 
         <section class="side-stack">
@@ -116,7 +117,7 @@
             <div class="panel-head">
               <div>
                 <h2>Все выплаты</h2>
-                <p class="panel-note">История выплат.</p>
+                <p class="panel-note">Последняя сверху. Выберите нужную выплату.</p>
               </div>
             </div>
             <div id="desktop-payouts" class="list-root"></div>
@@ -140,7 +141,7 @@
             <div class="panel-head">
               <div>
                 <h2>Пользователи</h2>
-                <p class="panel-note">Выберите людей для выплаты.</p>
+                <p class="panel-note">Сначала выберите выплату в списке.</p>
               </div>
             </div>
 
@@ -154,6 +155,7 @@
                 <button type="button" class="secondary-button" data-action="reload-users">Обновить</button>
               </div>
             </div>
+            <div id="mobile-users-context" class="users-context hidden"></div>
 
             <div class="controls controls-users">
               <label class="field">
@@ -176,11 +178,11 @@
             <div class="panel-head">
               <div>
                 <h2>Новая выплата</h2>
-                <p class="panel-note">Создайте сообщение и проверьте предпросмотр.</p>
+                <p class="panel-note">Создайте черновик выплаты без получателей.</p>
               </div>
             </div>
 
-            <div class="composer-form">
+            <form class="composer-form" data-action-form="create-payout">
               <div class="controls controls-composer">
                 <label class="field">
                   <span>День начала</span>
@@ -209,9 +211,9 @@
               <div id="mobile-preview" class="preview-root"></div>
 
               <div class="action-row">
-                <button type="button" data-action="create-payout">Создать выплату</button>
+                <button type="submit" data-action="create-payout">Создать выплату</button>
               </div>
-            </div>
+            </form>
           </section>
         </section>
 
@@ -228,7 +230,7 @@
             <div class="panel-head">
               <div>
                 <h2>Все выплаты</h2>
-                <p class="panel-note">История выплат.</p>
+                <p class="panel-note">Последняя сверху. Выберите нужную выплату.</p>
               </div>
             </div>
             <div id="mobile-payouts" class="list-root"></div>

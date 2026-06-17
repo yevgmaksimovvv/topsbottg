@@ -8,14 +8,14 @@ export const PAYOUT_STATUS_LABELS = {
 };
 
 export const RECIPIENT_STATUS_LABELS = {
-  pending: "ожидает отправки",
-  sending: "отправляется",
-  sent: "сообщение отправлено",
-  failed: "ошибка отправки",
-  payment_required: "нужны данные",
-  payment_received: "данные получены",
-  paid: "выплачено",
-  cancelled: "исключен из выплаты",
+  pending: "Ожидает рассылки",
+  sending: "Отправляется",
+  sent: "Ожидает подтверждения данных",
+  payment_required: "Ожидает заполнения данных",
+  payment_received: "Данные подтверждены",
+  paid: "Выплачено",
+  failed: "Ошибка отправки",
+  cancelled: "Отменено",
 };
 
 export const AUTO_HIDE_TOAST_MS = 3200;

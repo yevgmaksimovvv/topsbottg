@@ -30,15 +30,15 @@ class MessageSender(Protocol):
 
 
 def _recipient_keyboard(recipient_id: int, *, has_profile: bool) -> InlineKeyboardMarkup:
-    buttons = [[InlineKeyboardButton(text="Заполнить / изменить данные", callback_data=f"fill_payment:{recipient_id}")]]
     if has_profile:
-        buttons.append(
+        buttons = [
             [
-                InlineKeyboardButton(
-                    text="Подтвердить сохраненные данные", callback_data=f"confirm_profile:{recipient_id}"
-                )
+                InlineKeyboardButton(text="Подтвердить данные", callback_data=f"confirm_profile:{recipient_id}"),
+                InlineKeyboardButton(text="Изменить данные", callback_data=f"fill_payment:{recipient_id}"),
             ]
-        )
+        ]
+    else:
+        buttons = [[InlineKeyboardButton(text="Заполнить данные", callback_data=f"fill_payment:{recipient_id}")]]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -62,6 +62,8 @@ async def process_recipient(
         profile = await get_payment_profile(session, recipient.user_id)
         has_profile = profile is not None and profile.deleted_at is None
         text = render_message_template(payout)
+        if has_profile:
+            text = f"{text}\n\nПлатёжные данные:\n{profile.raw_payment_details}"
         keyboard = _recipient_keyboard(recipient.id, has_profile=has_profile)
         try:
             await bot.send_message(user.telegram_id, text, reply_markup=keyboard)

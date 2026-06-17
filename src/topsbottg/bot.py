@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
@@ -20,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from topsbottg.logging_utils import log_event
-from topsbottg.models import PayoutRecipient
+from topsbottg.models import PayoutRecipient, RecipientStatus
 from topsbottg.services import (
     confirm_saved_profile,
     get_latest_active_recipient,
@@ -48,6 +49,9 @@ CHANGE_NAME_BUTTON_TEXT = "Изменить ФИО"
 PAYMENT_DETAILS_BUTTON_TEXT = "Платёжные данные"
 PAYMENT_DETAILS_BUTTON_TEXT_ALT = "Платежные данные"
 CHANGE_PAYMENT_DETAILS_BUTTON_TEXT = "Изменить платёжные данные"
+PAYMENT_DETAILS_EDIT_PROMPT = "Введите платёжные данные одним сообщением."
+PAYMENT_DETAILS_CONFIRM_TEXT = "Данные подтверждены."
+PAYMENT_DETAILS_ALREADY_CONFIRMED_TEXT = "Данные уже подтверждены."
 ADMIN_ENTRYPOINT_TEXT = "Админка"
 ADMIN_INLINE_BUTTON_TEXT = "Открыть админку"
 
@@ -162,61 +166,86 @@ def payment_details_message() -> str:
     )
 
 
+def _recipient_message_text(main_text: str, profile) -> str:
+    if profile is None:
+        return main_text
+    return f"{main_text}\n\nПлатёжные данные:\n{profile.raw_payment_details}"
+
+
 def recipient_actions_keyboard(recipient_id: int, *, has_profile: bool) -> InlineKeyboardMarkup:
-    buttons = [[InlineKeyboardButton(text="Заполнить / изменить данные", callback_data=f"fill_payment:{recipient_id}")]]
     if has_profile:
-        buttons.append(
+        buttons = [
             [
-                InlineKeyboardButton(
-                    text="Подтвердить сохраненные данные", callback_data=f"confirm_profile:{recipient_id}"
-                )
+                InlineKeyboardButton(text="Подтвердить данные", callback_data=f"confirm_profile:{recipient_id}"),
+                InlineKeyboardButton(text="Изменить данные", callback_data=f"fill_payment:{recipient_id}"),
             ]
-        )
+        ]
+    else:
+        buttons = [[InlineKeyboardButton(text="Заполнить данные", callback_data=f"fill_payment:{recipient_id}")]]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 async def _start_payment_details_flow(
-    message: Message,
+    message: Message | None,
     state: FSMContext,
     session_factory: async_sessionmaker,
     *,
+    actor_telegram_id: int,
     active_recipient_id: int | None = None,
+    prompt_text: str | None = None,
+    edit_message: bool = False,
+    log_edit_failure: bool = False,
 ) -> None:
     if active_recipient_id is None:
         async with session_factory() as session:
-            user = await get_or_create_user(session, message.from_user.id)
+            user = await get_or_create_user(session, actor_telegram_id)
             active_recipient = await get_latest_active_recipient(session, user.id)
             log_event(
                 logger,
                 "INFO",
                 "bot_payment_details_update_started",
                 "Пользователь начал изменение платежных данных",
-                telegram_user_id=message.from_user.id,
+                telegram_user_id=actor_telegram_id,
                 user_id=user.id,
                 active_recipient_id=getattr(active_recipient, "id", None),
             )
         active_recipient_id = active_recipient.id if active_recipient is not None else None
     else:
         async with session_factory() as session:
-            user = await get_or_create_user(session, message.from_user.id)
+            user = await get_or_create_user(session, actor_telegram_id)
             log_event(
                 logger,
                 "INFO",
                 "bot_payment_details_update_started",
                 "Пользователь начал изменение платежных данных",
-                telegram_user_id=message.from_user.id,
+                telegram_user_id=actor_telegram_id,
                 user_id=user.id,
                 active_recipient_id=active_recipient_id,
             )
     await state.clear()
     await state.set_state(RegistrationFSM.payment_details)
     await state.update_data(active_recipient_id=active_recipient_id)
-    await _safe_message_answer(
-        message,
-        message.from_user.id,
-        payment_details_message(),
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    text = prompt_text or payment_details_message()
+    if edit_message:
+        if message is None:
+            return
+        try:
+            await message.edit_text(text, reply_markup=None)
+        except Exception as exc:  # noqa: BLE001
+            if log_edit_failure:
+                log_event(
+                    logger,
+                    "WARNING",
+                    "telegram_api_call_failed",
+                    "Ошибка вызова Telegram API",
+                    telegram_user_id=actor_telegram_id,
+                    operation="message.edit_text",
+                    error_type=type(exc).__name__,
+                )
+        return
+    if message is None:
+        return
+    await _safe_message_answer(message, actor_telegram_id, text, reply_markup=ReplyKeyboardRemove())
 
 
 async def _save_payment_details(
@@ -375,6 +404,7 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
             message,
             state,
             session_factory,
+            actor_telegram_id=message.from_user.id,
             active_recipient_id=data.get("active_recipient_id"),
         )
 
@@ -403,14 +433,11 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
         async with session_factory() as session:
             user = await get_or_create_user(session, message.from_user.id)
             profile = await get_payment_profile(session, user.id)
-            has_payment_details = bool(profile and profile.raw_payment_details)
             text = (
-                "Ваши данные\n\n"
-                f"ФИО: {user.full_name}\n"
-                f"Платёжные данные: {'есть' if has_payment_details else 'не заполнены'}"
+                f"ФИО: {user.full_name}\nПлатёжные данные: не заполнены"
+                if profile is None
+                else f"ФИО: {user.full_name}\nПлатёжные данные:\n{profile.raw_payment_details}"
             )
-            if not has_payment_details:
-                text += "\nИх можно добавить через «Изменить платёжные данные»."
         await _safe_message_answer(
             message,
             message.from_user.id,
@@ -426,11 +453,11 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
 
     @router.message(F.text.in_([PAYMENT_DETAILS_BUTTON_TEXT, PAYMENT_DETAILS_BUTTON_TEXT_ALT]))
     async def payment_start(message: Message, state: FSMContext):
-        await _start_payment_details_flow(message, state, session_factory)
+        await _start_payment_details_flow(message, state, session_factory, actor_telegram_id=message.from_user.id)
 
     @router.message(F.text == CHANGE_PAYMENT_DETAILS_BUTTON_TEXT)
     async def change_payment_details(message: Message, state: FSMContext):
-        await _start_payment_details_flow(message, state, session_factory)
+        await _start_payment_details_flow(message, state, session_factory, actor_telegram_id=message.from_user.id)
 
     @router.message(RegistrationFSM.payment_details, F.text)
     async def payment_details(message: Message, state: FSMContext):
@@ -461,37 +488,25 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
                     show_alert=False,
                 )
                 return
-        if callback.message is None:
-            log_event(
-                logger,
-                "WARNING",
-                "bot_callback_rejected",
-                "Callback отклонён",
-                telegram_user_id=callback.from_user.id,
-                callback_type="fill_payment",
-                reason="missing_message",
-            )
-            await _safe_callback_answer(
-                callback,
-                callback.from_user.id,
-                "Не удалось открыть данные.",
-                show_alert=False,
-            )
-            return
         await _start_payment_details_flow(
             callback.message,
             state,
             session_factory,
+            actor_telegram_id=callback.from_user.id,
             active_recipient_id=recipient_id,
+            prompt_text=PAYMENT_DETAILS_EDIT_PROMPT,
+            edit_message=True,
         )
-        await _safe_callback_answer(callback, callback.from_user.id)
+        await _safe_callback_answer(callback, callback.from_user.id, "Введите платёжные данные.", show_alert=False)
 
     @router.callback_query(F.data.startswith("confirm_profile:"))
     async def confirm_saved_data(callback: CallbackQuery):
         recipient_id = int(callback.data.split(":", 1)[1])
         async with session_factory() as session:
             user = await get_or_create_user(session, callback.from_user.id)
-            recipient = await confirm_saved_profile(session, recipient_id=recipient_id, user_id=user.id)
+            recipient = await session.scalar(
+                select(PayoutRecipient).where(PayoutRecipient.id == recipient_id, PayoutRecipient.user_id == user.id)
+            )
             if recipient is None:
                 raw_recipient = await session.scalar(select(PayoutRecipient).where(PayoutRecipient.id == recipient_id))
                 if raw_recipient is not None and raw_recipient.user_id != user.id:
@@ -522,6 +537,37 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
                     show_alert=False,
                 )
                 return
+            if recipient.status == RecipientStatus.payment_received.value:
+                await session.rollback()
+                if callback.message is not None:
+                    with suppress(Exception):
+                        await callback.message.edit_reply_markup(reply_markup=None)
+                await _safe_callback_answer(
+                    callback,
+                    callback.from_user.id,
+                    PAYMENT_DETAILS_ALREADY_CONFIRMED_TEXT,
+                    show_alert=False,
+                )
+                return
+            recipient = await confirm_saved_profile(session, recipient_id=recipient_id, user_id=user.id)
+            if recipient is None:
+                log_event(
+                    logger,
+                    "WARNING",
+                    "bot_callback_rejected",
+                    "Callback отклонён",
+                    telegram_user_id=callback.from_user.id,
+                    callback_type="confirm_profile",
+                    reason="recipient_not_found_or_invalid_status",
+                )
+                await session.rollback()
+                await _safe_callback_answer(
+                    callback,
+                    callback.from_user.id,
+                    "Не удалось подтвердить данные.",
+                    show_alert=False,
+                )
+                return
             await session.commit()
         log_event(
             logger,
@@ -531,6 +577,24 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
             telegram_user_id=callback.from_user.id,
             user_id=user.id,
         )
-        await _safe_callback_answer(callback, callback.from_user.id, "Ваше сообщение сохранено.", show_alert=False)
+        if callback.message is not None:
+            try:
+                await callback.message.edit_text(PAYMENT_DETAILS_CONFIRM_TEXT, reply_markup=None)
+            except Exception as exc:  # noqa: BLE001
+                log_event(
+                    logger,
+                    "WARNING",
+                    "telegram_api_call_failed",
+                    "Ошибка вызова Telegram API",
+                    telegram_user_id=callback.from_user.id,
+                    operation="message.edit_text",
+                    error_type=type(exc).__name__,
+                )
+        await _safe_callback_answer(
+            callback,
+            callback.from_user.id,
+            PAYMENT_DETAILS_CONFIRM_TEXT,
+            show_alert=False,
+        )
 
     return router

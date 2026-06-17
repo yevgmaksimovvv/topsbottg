@@ -8,13 +8,20 @@ from pathlib import Path
 import pytest
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.base import BaseSession
+from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, WebAppInfo
 from sqlalchemy import select
 
 from topsbottg.bot import build_router, main_keyboard
-from topsbottg.models import PaymentProfile, PayoutStatus, RecipientStatus
-from topsbottg.services import add_recipients, create_payout, get_or_create_user, get_payment_profile
+from topsbottg.models import PaymentProfile, PayoutStatus, RecipientStatus, User
+from topsbottg.services import (
+    add_recipients,
+    create_payout,
+    get_or_create_user,
+    get_payment_profile,
+    upsert_payment_profile,
+)
 
 
 class RecordingSession(BaseSession):
@@ -24,6 +31,8 @@ class RecordingSession(BaseSession):
 
     async def make_request(self, bot: Bot, method, timeout=None):  # noqa: ANN001
         self.methods.append(method)
+        if method.__class__.__name__ == "AnswerCallbackQuery":
+            return True
         return Message.model_validate(
             {
                 "message_id": 100 + len(self.methods),
@@ -80,9 +89,46 @@ def _make_update(bot: Bot, user_id: int, text: str, update_id: int) -> Update:
     )
 
 
+def _make_callback_update(
+    bot: Bot,
+    *,
+    callback_user_id: int,
+    message_from_user_id: int,
+    chat_id: int,
+    data: str,
+    update_id: int,
+) -> Update:
+    return Update.model_validate(
+        {
+            "update_id": update_id,
+            "callback_query": {
+                "id": f"callback-{update_id}",
+                "from": {"id": callback_user_id, "is_bot": False, "first_name": "Test"},
+                "chat_instance": "test-instance",
+                "message": {
+                    "message_id": 900 + update_id,
+                    "date": int(datetime.now(UTC).timestamp()),
+                    "chat": {"id": chat_id, "type": "private"},
+                    "from": {"id": message_from_user_id, "is_bot": True, "first_name": "Bot"},
+                    "text": "Заполнить данные",
+                },
+                "data": data,
+            },
+        },
+        context={"bot": bot},
+    )
+
+
 def _last_method(session: RecordingSession):
     assert session.methods, "bot did not send any message"
     return session.methods[-1]
+
+
+def _last_message_method(session: RecordingSession):
+    for method in reversed(session.methods):
+        if method.__class__.__name__ == "SendMessage":
+            return method
+    raise AssertionError("bot did not send a message")
 
 
 def _keyboard_texts(reply_markup):
@@ -151,7 +197,7 @@ async def test_start_for_registered_user_shows_main_keyboard(session_factory, se
 
     await dispatcher.feed_update(bot, _make_update(bot, 111, "/start", 1))
 
-    method = _last_method(recording_session)
+    method = _last_message_method(recording_session)
     assert method.text == "Вы уже зарегистрированы. Что хотите изменить?"
     assert _keyboard_texts(method.reply_markup) == [
         ["Мои данные", "Изменить ФИО"],
@@ -170,7 +216,7 @@ async def test_start_registered_admin_has_no_admin_button_in_reply_keyboard(sess
 
     await dispatcher.feed_update(bot, _make_update(bot, 123, "/start", 1))
 
-    method = _last_method(recording_session)
+    method = _last_message_method(recording_session)
     assert method.text == "Вы уже зарегистрированы. Что хотите изменить?"
     assert _keyboard_texts(method.reply_markup) == [
         ["Мои данные", "Изменить ФИО"],
@@ -341,7 +387,7 @@ async def test_payment_details_saved_returns_main_keyboard(
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Иван Иванов", 2))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Да", 3))
 
-    method = _last_method(recording_session)
+    method = _last_message_method(recording_session)
     assert method.text == _expected_payment_prompt()
     assert isinstance(method.reply_markup, ReplyKeyboardRemove)
 
@@ -368,6 +414,168 @@ async def test_payment_details_saved_returns_main_keyboard(
     assert any(event.get("event") == "bot_payment_details_update_started" for event in events)
     assert any(event.get("event") == "bot_payment_details_update_completed" for event in events)
     assert "Сбер" not in json.dumps(events, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_fill_payment_callback_uses_callback_user_identity(session_factory, settings, caplog):
+    caplog.set_level(logging.INFO)
+    actor_telegram_id = 1823119058
+    bot_message_telegram_id = 8841263494
+    async with session_factory() as session:
+        user = await get_or_create_user(session, actor_telegram_id, "Без ФИО")
+        payout = await create_payout(
+            session,
+            actor_telegram_id=123,
+            payload=_payout_payload(),
+        )
+        payout.status = PayoutStatus.sending.value
+        [recipient] = await add_recipients(session, payout, [user.id])
+        recipient.status = RecipientStatus.sent.value
+        await session.commit()
+
+    bot, recording_session = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+
+    await dispatcher.feed_update(
+        bot,
+        _make_callback_update(
+            bot,
+            callback_user_id=actor_telegram_id,
+            message_from_user_id=bot_message_telegram_id,
+            chat_id=actor_telegram_id,
+            data=f"fill_payment:{recipient.id}",
+            update_id=1,
+        ),
+    )
+
+    method = recording_session.methods[-1]
+    assert method.__class__.__name__ == "AnswerCallbackQuery"
+    edit_method = recording_session.methods[-2]
+    assert edit_method.__class__.__name__ == "EditMessageText"
+    assert edit_method.text == "Введите платёжные данные одним сообщением."
+    assert edit_method.reply_markup is None
+    assert method.text == "Введите платёжные данные."
+
+    key = StorageKey(bot_id=bot.id, chat_id=actor_telegram_id, user_id=actor_telegram_id)
+    assert await dispatcher.storage.get_state(key) == "RegistrationFSM:payment_details"
+    assert (await dispatcher.storage.get_data(key)) == {"active_recipient_id": recipient.id}
+
+    async with session_factory() as session:
+        db_actor_user = await session.scalar(select(User).where(User.telegram_id == actor_telegram_id))
+        db_bot_user = await session.scalar(select(User).where(User.telegram_id == bot_message_telegram_id))
+        assert db_actor_user is not None
+        assert db_actor_user.id == user.id
+        assert db_bot_user is None
+
+    events = _events(caplog)
+    started = [event for event in events if event.get("event") == "bot_payment_details_update_started"]
+    assert started
+    assert started[-1].get("telegram_user_id") == actor_telegram_id
+    assert started[-1].get("user_id") == user.id
+    assert started[-1].get("active_recipient_id") == recipient.id
+
+
+@pytest.mark.asyncio
+async def test_confirm_profile_callback_updates_message_and_uses_actor_identity(
+    session_factory, settings, caplog: pytest.LogCaptureFixture
+):
+    caplog.set_level(logging.INFO)
+    actor_telegram_id = 1823119058
+    bot_message_telegram_id = 8841263494
+    async with session_factory() as session:
+        user = await get_or_create_user(session, actor_telegram_id, "Иван Иванов")
+        await upsert_payment_profile(session, user, "Иван Иванов\n+79990000000\nT-Bank")
+        payout = await create_payout(
+            session,
+            actor_telegram_id=123,
+            payload=_payout_payload(),
+        )
+        payout.status = PayoutStatus.sending.value
+        [recipient] = await add_recipients(session, payout, [user.id])
+        recipient.status = RecipientStatus.sent.value
+        await session.commit()
+
+    bot, recording_session = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+
+    await dispatcher.feed_update(
+        bot,
+        _make_callback_update(
+            bot,
+            callback_user_id=actor_telegram_id,
+            message_from_user_id=bot_message_telegram_id,
+            chat_id=actor_telegram_id,
+            data=f"confirm_profile:{recipient.id}",
+            update_id=2,
+        ),
+    )
+
+    method = recording_session.methods[-1]
+    assert method.__class__.__name__ == "AnswerCallbackQuery"
+    assert method.text == "Данные подтверждены."
+    edit_method = recording_session.methods[-2]
+    assert edit_method.__class__.__name__ == "EditMessageText"
+    assert edit_method.text == "Данные подтверждены."
+    assert edit_method.reply_markup is None
+
+    async with session_factory() as session:
+        db_actor_user = await session.scalar(select(User).where(User.telegram_id == actor_telegram_id))
+        db_bot_user = await session.scalar(select(User).where(User.telegram_id == bot_message_telegram_id))
+        refreshed = await session.get(type(recipient), recipient.id)
+        assert db_actor_user is not None
+        assert db_bot_user is None
+        assert refreshed.status == RecipientStatus.payment_received.value
+        assert refreshed.payment_profile_snapshot["raw_payment_details"] == "Иван Иванов\n+79990000000\nT-Bank"
+
+    events = _events(caplog)
+    assert any(event.get("event") == "bot_profile_confirmed" for event in events)
+    assert not any(event.get("event") == "bot_callback_rejected" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_repeat_confirm_profile_returns_already_confirmed(
+    session_factory,
+    settings,
+    caplog: pytest.LogCaptureFixture,
+):
+    caplog.set_level(logging.INFO)
+    actor_telegram_id = 1823119058
+    async with session_factory() as session:
+        user = await get_or_create_user(session, actor_telegram_id, "Иван Иванов")
+        await upsert_payment_profile(session, user, "Иван Иванов\n+79990000000\nT-Bank")
+        payout = await create_payout(
+            session,
+            actor_telegram_id=123,
+            payload=_payout_payload(),
+        )
+        payout.status = PayoutStatus.sending.value
+        [recipient] = await add_recipients(session, payout, [user.id])
+        recipient.status = RecipientStatus.payment_received.value
+        recipient.payment_profile_snapshot = {"raw_payment_details": "Иван Иванов\n+79990000000\nT-Bank"}
+        await session.commit()
+
+    bot, recording_session = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+
+    await dispatcher.feed_update(
+        bot,
+        _make_callback_update(
+            bot,
+            callback_user_id=actor_telegram_id,
+            message_from_user_id=1234567890,
+            chat_id=actor_telegram_id,
+            data=f"confirm_profile:{recipient.id}",
+            update_id=3,
+        ),
+    )
+
+    method = recording_session.methods[-1]
+    assert method.__class__.__name__ == "AnswerCallbackQuery"
+    assert method.text == "Данные уже подтверждены."
+    assert len([m for m in recording_session.methods if m.__class__.__name__ == "EditMessageText"]) == 0
+
+    events = _events(caplog)
+    assert not any(event.get("event") == "bot_callback_rejected" for event in events)
 
 
 @pytest.mark.asyncio
@@ -551,6 +759,45 @@ async def test_change_payment_details_same_telegram_user(session_factory, settin
 
     method = _last_method(recording_session)
     assert method.text == "Платёжные данные сохранены."
+
+
+@pytest.mark.asyncio
+async def test_my_data_shows_raw_payment_details(session_factory, settings):
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 111, "Иван Иванов")
+        await upsert_payment_profile(session, user, "Иван Иванов\n+79990000000\nT-Bank")
+        await session.commit()
+
+    bot, recording_session = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "Мои данные", 6))
+
+    method = _last_method(recording_session)
+    assert method.text == "ФИО: Иван Иванов\nПлатёжные данные:\nИван Иванов\n+79990000000\nT-Bank"
+    assert _keyboard_texts(method.reply_markup) == [
+        ["Мои данные", "Изменить ФИО"],
+        ["Изменить платёжные данные"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_my_data_without_payment_details(session_factory, settings):
+    async with session_factory() as session:
+        await get_or_create_user(session, 111, "Иван Иванов")
+        await session.commit()
+
+    bot, recording_session = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "Мои данные", 7))
+
+    method = _last_method(recording_session)
+    assert method.text == "ФИО: Иван Иванов\nПлатёжные данные: не заполнены"
+    assert _keyboard_texts(method.reply_markup) == [
+        ["Мои данные", "Изменить ФИО"],
+        ["Изменить платёжные данные"],
+    ]
 
 
 @pytest.mark.asyncio
