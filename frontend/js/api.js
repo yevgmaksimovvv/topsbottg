@@ -471,7 +471,6 @@ async function markPaid(recipientId) {
 export {
   api,
   renderCreatePayout as createPayout,
-  fetchSelectedPayoutSnapshot,
   loadPayouts,
   loadUsers,
   markPaid,
