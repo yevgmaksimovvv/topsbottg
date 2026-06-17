@@ -14,6 +14,8 @@ let adminEventsSource = null;
 let adminEventsStartPromise = null;
 let adminEventsRecoveryUsed = false;
 let adminEventsWarningShown = false;
+let selectedRefreshPromise = null;
+let payoutsRefreshPromise = null;
 
 function isJsonResponse(response) {
   const contentType = response.headers.get("content-type") || "";
@@ -186,6 +188,17 @@ async function loadPayouts({ silent = false } = {}) {
   }
 }
 
+export function upsertPayoutInList(payout) {
+  if (!payout || payout.id == null) return;
+  const payoutId = Number(payout.id);
+  const index = state.payouts.findIndex((item) => Number(item.id) === payoutId);
+  if (index >= 0) {
+    state.payouts[index] = payout;
+  } else {
+    state.payouts.unshift(payout);
+  }
+}
+
 async function refreshSelectedPayout({ silent = false } = {}) {
   const hasInitData = canUseApi();
   console.info("[admin-events] refresh-start", {
@@ -219,12 +232,13 @@ async function refreshSelectedPayout({ silent = false } = {}) {
     if (requestId !== state.selectedPayoutRequestId) return;
     state.selectedPayoutDetail = detail;
     state.recipients = recipients;
+    upsertPayoutInList(detail?.payout);
+    renderApp();
     console.info("[admin-events] refresh-success", {
       selectedPayoutId: state.selectedPayoutId,
       recipientsCount: Array.isArray(recipients) ? recipients.length : null,
       payoutStatus: detail?.payout?.status ?? null,
     });
-    if (silent) renderApp();
   } catch (error) {
     logLoadError("refreshSelectedPayout", error);
     console.warn("[admin-events] refresh-error", {
@@ -237,6 +251,47 @@ async function refreshSelectedPayout({ silent = false } = {}) {
   } finally {
     if (!silent) setLoadingAndRender("recipients", false);
   }
+}
+
+export async function fetchSelectedPayoutSnapshot(payoutId) {
+  const id = Number(payoutId);
+  if (!Number.isInteger(id)) return null;
+  const detail = await api(`/admin/payouts/${id}`);
+  const recipients = await api(`/admin/payouts/${id}/recipients`);
+  if (Number(state.selectedPayoutId) === id) {
+    state.selectedPayoutDetail = detail;
+    state.recipients = recipients;
+    upsertPayoutInList(detail?.payout);
+    renderApp();
+  }
+  return { detail, recipients };
+}
+
+export function scheduleSelectedPayoutRefresh({ silent = true } = {}) {
+  if (!state.initData || !state.selectedPayoutId) return Promise.resolve();
+  if (!selectedRefreshPromise) {
+    selectedRefreshPromise = refreshSelectedPayout({ silent }).finally(() => {
+      selectedRefreshPromise = null;
+    });
+  }
+  return selectedRefreshPromise;
+}
+
+export function schedulePayoutsRefresh({ silent = true } = {}) {
+  if (!state.initData) return Promise.resolve();
+  if (!payoutsRefreshPromise) {
+    payoutsRefreshPromise = loadPayouts({ silent }).finally(() => {
+      payoutsRefreshPromise = null;
+    });
+  }
+  return payoutsRefreshPromise;
+}
+
+export function scheduleAdminStateRefresh({ selected = true, payouts = true, silent = true } = {}) {
+  const tasks = [];
+  if (selected) tasks.push(scheduleSelectedPayoutRefresh({ silent }));
+  if (payouts) tasks.push(schedulePayoutsRefresh({ silent }));
+  return Promise.allSettled(tasks);
 }
 
 export async function createEventsToken() {
@@ -273,7 +328,7 @@ export function handleAdminEvent(type, payload = {}) {
     return;
   }
   if (type === "payouts_changed") {
-    if (state.initData) void loadPayouts({ silent: true });
+    if (state.initData) void schedulePayoutsRefresh({ silent: true });
     return;
   }
   if (type === "payout_changed") {
@@ -284,12 +339,9 @@ export function handleAdminEvent(type, payload = {}) {
           payloadPayoutId,
           selectedPayoutId,
         });
-        void (async () => {
-          await refreshSelectedPayout({ silent: true });
-          await loadPayouts({ silent: true });
-        })();
+        void scheduleAdminStateRefresh({ selected: true, payouts: true, silent: true });
       } else {
-        void loadPayouts({ silent: true });
+        void schedulePayoutsRefresh({ silent: true });
       }
     }
     return;
@@ -301,7 +353,9 @@ export function handleAdminEvent(type, payload = {}) {
         payloadPayoutId,
         selectedPayoutId,
       });
-      void refreshSelectedPayout({ silent: true });
+      void scheduleAdminStateRefresh({ selected: true, payouts: true, silent: true });
+    } else if (state.initData) {
+      void schedulePayoutsRefresh({ silent: true });
     }
   }
 }
@@ -417,10 +471,15 @@ async function markPaid(recipientId) {
 export {
   api,
   renderCreatePayout as createPayout,
+  fetchSelectedPayoutSnapshot,
   loadPayouts,
   loadUsers,
   markPaid,
+  scheduleAdminStateRefresh,
+  schedulePayoutsRefresh,
+  scheduleSelectedPayoutRefresh,
   refreshSelectedPayout,
+  upsertPayoutInList,
   selectPayout,
   renderSendPayout as sendPayout,
 };

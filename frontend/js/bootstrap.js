@@ -2,7 +2,15 @@ import { SEARCH_DEBOUNCE_MS } from "./constants.js";
 import { renderApp } from "./render-app.js";
 import { bindTelegramViewportEvents, setThemeVariables, telegramWebApp } from "./telegram.js";
 import { clearNotification, canUseApi, refreshTelegramAuthState, state, setMobileView, syncComposerFields, syncFilterInputs } from "./store.js";
-import { loadPayouts, loadUsers, markPaid, refreshSelectedPayout, selectPayout, startAdminEvents, stopAdminEvents } from "./api.js";
+import {
+  loadPayouts,
+  loadUsers,
+  markPaid,
+  scheduleAdminStateRefresh,
+  selectPayout,
+  startAdminEvents,
+  stopAdminEvents,
+} from "./api.js";
 import { createPayout, sendPayout } from "./render-payouts.js";
 
 let adminRecoveryTimer = null;
@@ -16,10 +24,7 @@ function scheduleAdminRecoveryRefresh() {
     adminRecoveryTimer = null;
     void (async () => {
       await startAdminEvents();
-      if (state.selectedPayoutId) {
-        await refreshSelectedPayout({ silent: true });
-      }
-      await loadPayouts({ silent: true });
+      await scheduleAdminStateRefresh({ selected: true, payouts: true, silent: true });
     })();
   }, 700);
 }
@@ -163,6 +168,7 @@ export async function bootstrap() {
     }
   });
   window.addEventListener("focus", scheduleAdminRecoveryRefresh);
+  window.addEventListener("pageshow", scheduleAdminRecoveryRefresh);
 
   if (!state.initData) return;
   void startAdminEvents();
