@@ -11,6 +11,7 @@ from urllib.parse import parse_qsl
 from topsbottg.logging_utils import log_event
 
 logger = logging.getLogger(__name__)
+INIT_DATA_FUTURE_SKEW_SECONDS = 60
 
 
 @dataclass(slots=True)
@@ -168,8 +169,8 @@ def validate_telegram_init_data(init_data: str, bot_token: str, *, max_age_secon
         )
         raise InitDataError("invalid user payload") from exc
 
-    age = server_now - parsed_auth_date
-    if age < 0 or age > max_age_seconds:
+    age_seconds = server_now - parsed_auth_date
+    if age_seconds > max_age_seconds:
         log_event(
             logger,
             "WARNING",
@@ -182,10 +183,28 @@ def validate_telegram_init_data(init_data: str, bot_token: str, *, max_age_secon
             has_auth_date=has_auth_date,
             auth_date=parsed_auth_date,
             server_now=server_now,
-            age_seconds=age,
+            age_seconds=age_seconds,
             ttl_seconds=max_age_seconds,
         )
         raise InitDataError("initData auth_date is expired")
+    if age_seconds < -INIT_DATA_FUTURE_SKEW_SECONDS:
+        log_event(
+            logger,
+            "WARNING",
+            "telegram_init_data_validation_failed",
+            "initData из будущего",
+            reason="future_auth_date",
+            has_init_data=has_init_data,
+            has_hash=has_hash,
+            has_user=has_user,
+            has_auth_date=has_auth_date,
+            auth_date=parsed_auth_date,
+            server_now=server_now,
+            age_seconds=age_seconds,
+            ttl_seconds=max_age_seconds,
+            future_skew_seconds=INIT_DATA_FUTURE_SKEW_SECONDS,
+        )
+        raise InitDataError("initData auth_date is from the future")
 
     log_event(
         logger,
@@ -197,8 +216,9 @@ def validate_telegram_init_data(init_data: str, bot_token: str, *, max_age_secon
         has_auth_date=has_auth_date,
         auth_date=parsed_auth_date,
         server_now=server_now,
-        age_seconds=age,
+        age_seconds=age_seconds,
         ttl_seconds=max_age_seconds,
+        future_skew_seconds=INIT_DATA_FUTURE_SKEW_SECONDS,
         telegram_user_id=user_id,
     )
     return TelegramInitData(user_id=user_id, auth_date=parsed_auth_date, raw_user=raw_user)

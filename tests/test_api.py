@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
+from datetime import UTC, datetime
 from typing import Literal
+from urllib.parse import quote, urlencode
 
 import pytest
 from sqlalchemy import select
 
 import topsbottg.api as api_module
+import topsbottg.security as security_module
 from topsbottg.logging_utils import log_event
 from topsbottg.models import AuditLog, RecipientStatus
 from topsbottg.services import add_recipients, create_payout, get_or_create_user, upsert_payment_profile
@@ -53,6 +58,18 @@ def _payout_payload(
         "period_end_month": end_month,
         "message_template": message_template,
     }
+
+
+def _make_init_data(bot_token: str, user_id: int, auth_date: int) -> str:
+    payload = {
+        "auth_date": str(auth_date),
+        "query_id": "AAE",
+        "user": json.dumps({"id": user_id, "first_name": "Test"}, separators=(",", ":")),
+    }
+    data_check_string = "\n".join(f"{key}={value}" for key, value in sorted(payload.items()))
+    secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
+    payload["hash"] = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+    return urlencode(payload, quote_via=quote)
 
 
 def test_log_event_writes_valid_json_and_scrubs_forbidden_keys(caplog: pytest.LogCaptureFixture):
@@ -235,6 +252,67 @@ async def test_expired_init_data_rejected(client, expired_init_data, caplog: pyt
     assert failed["reason"] == "expired_auth_date"
     assert "age_seconds" in failed
     assert "ttl_seconds" in failed
+
+
+@pytest.mark.asyncio
+async def test_init_data_allows_small_future_skew_on_admin_api(client, settings, monkeypatch: pytest.MonkeyPatch):
+    fixed_now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    class _FrozenDateTime:
+        @staticmethod
+        def now(tz=None):  # noqa: ANN001
+            return fixed_now
+
+    monkeypatch.setattr(security_module, "datetime", _FrozenDateTime)
+    init_data = _make_init_data(settings.bot_token, 123, int(fixed_now.timestamp()) + 2)
+
+    response = await client.get("/api/admin/me", headers={"X-Telegram-Init-Data": init_data})
+    assert response.status_code == 200
+    assert response.json()["is_admin"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offset_seconds", [2, 60])
+async def test_validate_telegram_init_data_accepts_allowed_future_skew(
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+    offset_seconds: int,
+):
+    fixed_now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    class _FrozenDateTime:
+        @staticmethod
+        def now(tz=None):  # noqa: ANN001
+            return fixed_now
+
+    monkeypatch.setattr(security_module, "datetime", _FrozenDateTime)
+    init_data = _make_init_data(settings.bot_token, 123, int(fixed_now.timestamp()) + offset_seconds)
+
+    data = security_module.validate_telegram_init_data(init_data, settings.bot_token, max_age_seconds=86400)
+    assert data.user_id == 123
+    assert data.auth_date == int(fixed_now.timestamp()) + offset_seconds
+
+
+@pytest.mark.asyncio
+async def test_validate_telegram_init_data_rejects_too_future_auth_date(
+    settings, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    fixed_now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+
+    class _FrozenDateTime:
+        @staticmethod
+        def now(tz=None):  # noqa: ANN001
+            return fixed_now
+
+    monkeypatch.setattr(security_module, "datetime", _FrozenDateTime)
+    init_data = _make_init_data(settings.bot_token, 123, int(fixed_now.timestamp()) + 61)
+
+    caplog.set_level(logging.INFO)
+    with pytest.raises(security_module.InitDataError):
+        security_module.validate_telegram_init_data(init_data, settings.bot_token, max_age_seconds=86400)
+    failed = next(event for event in _events(caplog) if event.get("event") == "telegram_init_data_validation_failed")
+    assert failed["reason"] == "future_auth_date"
+    assert failed["age_seconds"] == -61
 
 
 @pytest.mark.asyncio
