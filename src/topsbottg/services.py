@@ -754,6 +754,56 @@ async def complete_payout(session: AsyncSession, payout: Payout, *, actor_telegr
     return payout
 
 
+async def send_selected_payout(
+    session: AsyncSession,
+    payout: Payout,
+    *,
+    actor_telegram_id: int,
+    user_ids: Sequence[int],
+) -> tuple[Payout, list[PayoutRecipient]]:
+    normalized_user_ids = list(dict.fromkeys(user_ids))
+    _log_payout_action(
+        "payout_action_requested",
+        "Запрошена отправка выплаты с выбранными получателями",
+        action="send_selected_payout",
+        payout_id=payout.id,
+        actor_telegram_id=actor_telegram_id,
+        recipients_count=len(normalized_user_ids),
+    )
+    try:
+        if payout.status != PayoutStatus.draft.value:
+            raise ValueError("payout can only be sent from draft")
+        if normalized_user_ids:
+            await add_recipients(session, payout, normalized_user_ids)
+        recipients = await get_payout_recipients(session, payout.id)
+        if not recipients:
+            raise ValueError("Нельзя отправить пустую выплату.")
+        payout = await set_payout_sending(session, payout, actor_telegram_id=actor_telegram_id)
+    except Exception as exc:
+        _log_payout_action(
+            "payout_action_failed",
+            "Не удалось отправить выплату с выбранными получателями",
+            action="send_selected_payout",
+            payout_id=payout.id,
+            actor_telegram_id=actor_telegram_id,
+            recipients_count=len(normalized_user_ids),
+            reason="validation_or_db_error",
+            error_type=type(exc).__name__,
+        )
+        raise
+    recipients = await get_payout_recipients(session, payout.id)
+    _log_payout_action(
+        "payout_action_completed",
+        "Выплата отправлена с выбранными получателями",
+        action="send_selected_payout",
+        payout_id=payout.id,
+        actor_telegram_id=actor_telegram_id,
+        result_status=payout.status,
+        result_count=len(recipients),
+    )
+    return payout, recipients
+
+
 async def cancel_payout(session: AsyncSession, payout: Payout, *, actor_telegram_id: int) -> Payout:
     _log_payout_action(
         "payout_action_requested",

@@ -1,9 +1,7 @@
 import { PAYOUT_STATUS_LABELS } from "./constants.js";
 import {
   api,
-  fetchSelectedPayoutSnapshot,
   scheduleAdminStateRefresh,
-  schedulePayoutsRefresh,
   upsertPayoutInList,
 } from "./api.js";
 import { payoutPeriodLabel, state, canUseApi, clearError, setError, setLoading, setToast } from "./store.js";
@@ -13,7 +11,6 @@ import { payoutsEmptyMessage, selectedPayoutHintText } from "./render-common.js"
 
 const DRAFT_SEND_MESSAGE = "Выплату можно разослать только из черновика. Обновите список выплат.";
 let sendPayoutInFlight = false;
-let markPaidInFlightRecipientId = null;
 
 export function renderPayoutsInto(rootId) {
   const root = document.getElementById(rootId);
@@ -167,85 +164,40 @@ export async function createPayout() {
   }
 }
 
-function recipientUserId(recipient) {
-  return recipient?.user_id ?? recipient?.user?.id ?? null;
-}
-
 export async function sendPayout() {
   if (sendPayoutInFlight || state.loading?.sendPayout) return;
   sendPayoutInFlight = true;
   try {
     if (!canUseApi() || !state.selectedPayoutId) return;
     const payoutId = Number(state.selectedPayoutId);
-    let snapshot;
-    snapshot = await fetchSelectedPayoutSnapshot(payoutId);
-    let payout = snapshot?.detail?.payout || state.selectedPayoutDetail?.payout;
-    if (!payout || Number(payout.id) !== payoutId) {
-      setErrorAndRender("Не удалось обновить выплату.");
-      return;
-    }
-    if (payout.status !== "draft") {
-      try {
-        snapshot = await fetchSelectedPayoutSnapshot(payoutId);
-      } catch (error) {
-        setErrorAndRender(error.message || "Не удалось обновить выплату.");
-        return;
-      }
-      payout = snapshot?.detail?.payout || state.selectedPayoutDetail?.payout;
-      if (!payout || Number(payout.id) !== payoutId) {
-        setErrorAndRender("Не удалось обновить выплату.");
-        return;
-      }
-      if (payout.status !== "draft") {
-        setErrorAndRender(DRAFT_SEND_MESSAGE);
-        return;
-      }
-    }
-    let recipientsForSend = snapshot?.recipients || state.recipients;
-    const existingRecipientIds = new Set(recipientsForSend.map(recipientUserId).filter((id) => Number.isInteger(id)));
-    const selectedUserIds = [...state.selectedUsers];
-    const missingUserIds = selectedUserIds.filter((id) => !existingRecipientIds.has(id));
-    if (missingUserIds.length) {
-      clearError();
-      try {
-        await api(`/admin/payouts/${state.selectedPayoutId}/recipients`, {
-          method: "POST",
-          body: JSON.stringify({ user_ids: missingUserIds }),
-        });
-        snapshot = await fetchSelectedPayoutSnapshot(payoutId);
-        recipientsForSend = snapshot?.recipients || state.recipients;
-      } catch (error) {
-        setErrorAndRender(error.message || "Не удалось добавить пользователей");
-        return;
-      }
-    }
-    const count = recipientsForSend.length;
-    if (!count) {
-      setErrorAndRender("Нельзя отправить пустую выплату.");
-      return;
-    }
+    const selectedUserIds = Array.from(state.selectedUsers);
     const confirmed = window.confirm(
-      `Запустить рассылку выплаты "${payoutPeriodLabel(payout) || payoutId}" для ${count} получателей?`
+      `Запустить рассылку выплаты "${payoutPeriodLabel(state.selectedPayoutDetail?.payout) || payoutId}"?`
     );
     if (!confirmed) return;
     setLoadingAndRender("sendPayout", true);
     clearError();
     try {
-      await api(`/admin/payouts/${payoutId}/send`, { method: "POST" });
+      const snapshot = await api(`/admin/payouts/${payoutId}/send-selected`, {
+        method: "POST",
+        body: JSON.stringify({ user_ids: selectedUserIds }),
+      });
+      const payout = snapshot?.detail?.payout || snapshot?.payout || null;
+      const recipients = snapshot?.recipients || [];
+      if (payout) {
+        state.selectedPayoutDetail = { payout };
+        upsertPayoutInList(payout);
+      }
+      state.recipients = recipients;
       state.selectedUsers.clear();
       clearError();
       setToastAndRender("Рассылка запущена.");
-      try {
-        await fetchSelectedPayoutSnapshot(payoutId);
-        await schedulePayoutsRefresh({ silent: true });
-      } catch {
-        // Refresh is best-effort here.
-      }
+      void scheduleAdminStateRefresh({ selected: true, payouts: true, silent: true });
     } catch (error) {
       const message =
         error?.message && error.message.includes("payout can only be sent from draft")
           ? DRAFT_SEND_MESSAGE
-          : "Не удалось разослать выплату.";
+          : error?.message || "Не удалось разослать выплату.";
       setErrorAndRender(message);
     } finally {
       setLoadingAndRender("sendPayout", false);

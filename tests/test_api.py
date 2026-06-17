@@ -528,6 +528,56 @@ async def test_send_marks_payout_sending(client, session_factory, admin_init_dat
 
 
 @pytest.mark.asyncio
+async def test_send_selected_adds_missing_recipients_and_marks_sending(
+    client,
+    session_factory,
+    admin_init_data,
+):
+    async with session_factory() as session:
+        first_user = await get_or_create_user(session, 111, "Иван Иванов")
+        second_user = await get_or_create_user(session, 222, "Пётр Петров")
+        payout = await create_payout(
+            session,
+            actor_telegram_id=123,
+            payload=_payout_payload(),
+        )
+        await add_recipients(session, payout, [first_user.id])
+        await session.commit()
+
+    response = await client.post(
+        f"/api/admin/payouts/{payout.id}/send-selected",
+        headers={"X-Telegram-Init-Data": admin_init_data},
+        json={"user_ids": [first_user.id, second_user.id]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["detail"]["payout"]["id"] == payout.id
+    assert payload["detail"]["payout"]["status"] == "sending"
+    assert len(payload["recipients"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_send_selected_rejects_empty_payout(client, session_factory, admin_init_data):
+    async with session_factory() as session:
+        payout = await create_payout(
+            session,
+            actor_telegram_id=123,
+            payload=_payout_payload(),
+        )
+        await session.commit()
+
+    response = await client.post(
+        f"/api/admin/payouts/{payout.id}/send-selected",
+        headers={"X-Telegram-Init-Data": admin_init_data},
+        json={"user_ids": []},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Нельзя отправить пустую выплату."
+
+
+@pytest.mark.asyncio
 async def test_payout_status_cannot_be_patched_arbitrarily(client, session_factory, admin_init_data):
     async with session_factory() as session:
         payout = await create_payout(

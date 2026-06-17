@@ -47,6 +47,7 @@ from topsbottg.services import (
     log_audit,
     mark_paid,
     retry_failed_recipient,
+    send_selected_payout,
     set_payout_sending,
     ADMIN_EVENT_PING,
     ADMIN_EVENTS_KEEPALIVE_SECONDS,
@@ -149,6 +150,15 @@ def serialize_payout(payout: Payout) -> PayoutOut:
         created_at=payout.created_at,
         updated_at=payout.updated_at,
     )
+
+
+def serialize_payout_snapshot(payout: Payout, recipients: list[PayoutRecipient]) -> dict[str, object]:
+    payout_out = serialize_payout(payout)
+    return {
+        "detail": {"payout": payout_out},
+        "payout": payout_out,
+        "recipients": [serialize_recipient(recipient) for recipient in recipients],
+    }
 
 
 def serialize_recipient(recipient: PayoutRecipient) -> RecipientOut:
@@ -682,6 +692,52 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             result_status=payout.status,
         )
         return serialize_payout(payout)
+
+    @app.post("/api/admin/payouts/{payout_id}/send-selected")
+    async def admin_send_selected_payout(
+        payout_id: int,
+        payload: AddRecipientsIn,
+        session: AsyncSession = Depends(get_session),
+        x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict[str, object]:
+        telegram_id = _require_admin(x_telegram_init_data, settings)
+        log_event(
+            logger,
+            "INFO",
+            "payout_send_selected_requested",
+            "Админ запросил отправку выплаты с выбранными получателями",
+            actor_telegram_id=telegram_id,
+            payout_id=payout_id,
+            recipients_count=len(payload.user_ids),
+        )
+        # TODO: add persistence-backed Idempotency-Key handling if safe retry support is required.
+        payout = await get_payout(session, payout_id)
+        if payout is None:
+            raise HTTPException(status_code=404, detail="payout not found")
+        try:
+            payout, recipients = await send_selected_payout(
+                session,
+                payout,
+                actor_telegram_id=telegram_id,
+                user_ids=payload.user_ids,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.commit()
+        await session.refresh(payout)
+        recipients = await get_payout_recipients(session, payout_id)
+        log_event(
+            logger,
+            "INFO",
+            "payout_send_selected_completed",
+            "Выплата отправлена с выбранными получателями",
+            actor_telegram_id=telegram_id,
+            payout_id=payout.id,
+            result_status=payout.status,
+            result_count=len(recipients),
+        )
+        return serialize_payout_snapshot(payout, recipients)
 
     @app.post("/api/admin/payouts/{payout_id}/close")
     async def admin_close_payout(
