@@ -1,7 +1,16 @@
 import { SEARCH_DEBOUNCE_MS } from "./constants.js";
 import { renderApp } from "./render-app.js";
 import { bindTelegramViewportEvents, setThemeVariables, syncViewportVariables, telegramWebApp } from "./telegram.js";
-import { clearNotification, canUseApi, refreshTelegramAuthState, state, setMobileView, syncComposerFields, syncFilterInputs } from "./store.js";
+import {
+  clearNotification,
+  canUseApi,
+  refreshTelegramAuthState,
+  setError,
+  state,
+  setMobileView,
+  syncComposerFields,
+  syncFilterInputs,
+} from "./store.js";
 import {
   loadPayouts,
   loadUsers,
@@ -15,7 +24,6 @@ import { createPayout, sendPayout } from "./render-payouts.js";
 
 let adminRecoveryTimer = null;
 let adminRecoveryReason = null;
-const markPaidInFlightRecipientIds = new Set();
 
 function syncTelegramSafeAreaVariables() {
   const webApp = telegramWebApp();
@@ -90,12 +98,24 @@ function bindFilterInputs() {
   });
 }
 
+function getActionElement(event) {
+  const target = event.target;
+  if (!(target instanceof Element)) return null;
+  return target.closest("[data-action]");
+}
+
+function isDisabledAction(action) {
+  return Boolean(
+    action.disabled || action.getAttribute("aria-disabled") === "true" || action.classList.contains("disabled")
+  );
+}
+
 function bindDelegatedEvents() {
   document.addEventListener("click", async (event) => {
-    const action = event.target.closest("[data-action]");
     const mobileView = event.target.closest("[data-mobile-view]");
     const userCheckbox = event.target.closest('input[type="checkbox"][data-user-id]');
     const payoutButton = event.target.closest("[data-payout-id]");
+    const action = getActionElement(event);
 
     if (mobileView) {
       setMobileView(mobileView.dataset.mobileView);
@@ -112,57 +132,62 @@ function bindDelegatedEvents() {
       return;
     }
 
-    if (action?.dataset.action === "dismiss-toast") {
-      event.preventDefault();
-      clearNotification();
-      renderApp();
-      return;
-    }
+    if (!action) return;
 
-    if (action) {
-      const { action: name, recipientId } = action.dataset;
-      if (action.disabled) {
-        event.preventDefault();
-        return;
-      }
-      event.preventDefault();
-      if (name === "load-more-users") {
-        await loadUsers({ reset: false });
-      } else if (name === "clear-selection") {
-        state.selectedUsers.clear();
-        renderApp();
-      } else if (name === "create-payout") {
-        await createPayout();
-        return;
-      } else if (name === "send-payout") {
-        await sendPayout();
-      } else if (name === "mark-paid") {
-        const normalizedRecipientId = Number(recipientId);
-        if (markPaidInFlightRecipientIds.has(normalizedRecipientId)) return;
-        if (state.loading.markPaid && state.loadingRecipientId === normalizedRecipientId) return;
-        markPaidInFlightRecipientIds.add(normalizedRecipientId);
-        try {
-          await markPaid(normalizedRecipientId);
-        } finally {
-          markPaidInFlightRecipientIds.delete(normalizedRecipientId);
+    const name = action.dataset.action;
+    if (!name) return;
+    event.preventDefault();
+    if (isDisabledAction(action)) return;
+
+    try {
+      switch (name) {
+        case "dismiss-toast":
+          clearNotification();
+          renderApp();
+          return;
+        case "create-payout":
+          await createPayout();
+          return;
+        case "send-payout":
+          await sendPayout();
+          return;
+        case "mark-paid": {
+          const recipientId = action.dataset.recipientId;
+          if (!recipientId) return;
+          await markPaid(Number(recipientId));
+          return;
         }
+        case "load-more-users":
+          await loadUsers({ reset: false });
+          return;
+        case "clear-selection":
+          state.selectedUsers.clear();
+          renderApp();
+          return;
+        default:
+          return;
       }
+    } catch (error) {
+      console.error("[topsbottg] action failed", {
+        action: name,
+        error,
+      });
+      setError(error?.message || "Действие не выполнено.");
       renderApp();
-      return;
     }
   });
 
   document.addEventListener("submit", async (event) => {
     const form = event.target;
-    if (!form?.matches?.('[data-action-form="create-payout"]')) return;
+    if (!(form instanceof HTMLFormElement)) return;
+    if (!form.matches('[data-action-form="create-payout"]')) return;
     event.preventDefault();
     await createPayout();
   });
 
   document.addEventListener("change", (event) => {
     const target = event.target;
-    const checkbox =
-      target?.matches?.('input[type="checkbox"][data-user-id]') ? target : target?.closest?.('input[type="checkbox"][data-user-id]');
+    const checkbox = target?.closest?.('input[type="checkbox"][data-user-id]');
     if (!checkbox) return;
     const id = Number(checkbox.dataset.userId);
     if (checkbox.checked) state.selectedUsers.add(id);
