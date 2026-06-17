@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import secrets
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from string import Formatter
 
-from sqlalchemy import exists, func, select, update
+from sqlalchemy import event, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 from sqlalchemy.orm import selectinload
 
 from topsbottg.logging_utils import log_event
@@ -22,6 +26,139 @@ from topsbottg.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+ADMIN_EVENTS_TOKEN_TTL_SECONDS = 300
+ADMIN_EVENTS_KEEPALIVE_SECONDS = 20
+ADMIN_EVENTS_QUEUE_MAXSIZE = 128
+
+ADMIN_EVENT_USERS_CHANGED = "users_changed"
+ADMIN_EVENT_PAYOUTS_CHANGED = "payouts_changed"
+ADMIN_EVENT_PAYOUT_CHANGED = "payout_changed"
+ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED = "payout_recipients_changed"
+ADMIN_EVENT_PING = "ping"
+
+_ADMIN_EVENT_QUEUE_KEY = "_topsbottg_admin_events"
+
+
+@dataclass(slots=True)
+class AdminEventsToken:
+    token: str
+    expires_at: datetime
+
+
+class AdminEventsTokenStore:
+    def __init__(self, ttl_seconds: int = ADMIN_EVENTS_TOKEN_TTL_SECONDS) -> None:
+        self._ttl_seconds = ttl_seconds
+        self._tokens: dict[str, datetime] = {}
+
+    def issue(self) -> AdminEventsToken:
+        self._purge_expired()
+        token = secrets.token_urlsafe(32)
+        expires_at = utcnow() + timedelta(seconds=self._ttl_seconds)
+        self._tokens[token] = expires_at
+        return AdminEventsToken(token=token, expires_at=expires_at)
+
+    def consume(self, token: str) -> AdminEventsToken | None:
+        self._purge_expired()
+        expires_at = self._tokens.pop(token, None)
+        if expires_at is None:
+            return None
+        return AdminEventsToken(token=token, expires_at=expires_at)
+
+    def _purge_expired(self) -> None:
+        now = utcnow()
+        for token, expires_at in list(self._tokens.items()):
+            if expires_at <= now:
+                self._tokens.pop(token, None)
+
+
+class AdminEventsBroadcaster:
+    def __init__(self, queue_maxsize: int = ADMIN_EVENTS_QUEUE_MAXSIZE) -> None:
+        self._queue_maxsize = queue_maxsize
+        self._subscribers: set[asyncio.Queue[dict[str, object]]] = set()
+
+    def subscribe(self) -> asyncio.Queue[dict[str, object]]:
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=self._queue_maxsize)
+        self._subscribers.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[dict[str, object]]) -> None:
+        self._subscribers.discard(queue)
+
+    def publish(self, event_type: str, payload: dict[str, object] | None = None) -> None:
+        message = {"event": event_type, "payload": payload or {}}
+        for queue in list(self._subscribers):
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    queue.put_nowait(message)
+                except asyncio.QueueFull:
+                    pass
+
+
+_admin_events_broadcaster = AdminEventsBroadcaster()
+_admin_events_token_store = AdminEventsTokenStore()
+
+
+def configure_admin_events(
+    broadcaster: AdminEventsBroadcaster | None = None,
+    token_store: AdminEventsTokenStore | None = None,
+) -> tuple[AdminEventsBroadcaster, AdminEventsTokenStore]:
+    global _admin_events_broadcaster, _admin_events_token_store
+    _admin_events_broadcaster = broadcaster or AdminEventsBroadcaster()
+    _admin_events_token_store = token_store or AdminEventsTokenStore()
+    return _admin_events_broadcaster, _admin_events_token_store
+
+
+def get_admin_events_broadcaster() -> AdminEventsBroadcaster:
+    return _admin_events_broadcaster
+
+
+def get_admin_events_token_store() -> AdminEventsTokenStore:
+    return _admin_events_token_store
+
+
+def issue_admin_events_token() -> AdminEventsToken:
+    return _admin_events_token_store.issue()
+
+
+def consume_admin_events_token(token: str) -> AdminEventsToken | None:
+    return _admin_events_token_store.consume(token)
+
+
+def publish_admin_event(event_type: str, payload: dict[str, object] | None = None) -> None:
+    _admin_events_broadcaster.publish(event_type, payload)
+
+
+def queue_admin_event(session: AsyncSession, event_type: str, payload: dict[str, object] | None = None) -> None:
+    queued = session.info.setdefault(_ADMIN_EVENT_QUEUE_KEY, [])
+    queued.append({"event_type": event_type, "payload": payload or {}})
+
+
+def queue_admin_events(session: AsyncSession, events: Sequence[tuple[str, dict[str, object] | None]]) -> None:
+    for event_type, payload in events:
+        queue_admin_event(session, event_type, payload)
+
+
+def _flush_admin_events(sync_session: Session) -> None:
+    queued = sync_session.info.pop(_ADMIN_EVENT_QUEUE_KEY, [])
+    for event in queued:
+        publish_admin_event(event["event_type"], event["payload"])
+
+
+@event.listens_for(Session, "after_commit")
+def _after_commit(sync_session: Session) -> None:
+    _flush_admin_events(sync_session)
+
+
+@event.listens_for(Session, "after_rollback")
+def _after_rollback(sync_session: Session) -> None:
+    sync_session.info.pop(_ADMIN_EVENT_QUEUE_KEY, None)
 
 DEFAULT_MESSAGE_TEMPLATE = """Всем привет!
 Выплачиваем ЗАРПЛАТУ за работу в период {period_label}.
@@ -286,6 +423,7 @@ async def upsert_full_name(session: AsyncSession, telegram_id: int, full_name: s
         telegram_user_id=telegram_id,
         user_id=user.id,
     )
+    queue_admin_event(session, ADMIN_EVENT_USERS_CHANGED, {"user_id": user.id, "telegram_user_id": telegram_id})
     return user
 
 
@@ -327,6 +465,7 @@ async def upsert_payment_profile(session: AsyncSession, user: User, payload: dic
         telegram_user_id=user.telegram_id,
         user_id=user.id,
     )
+    queue_admin_event(session, ADMIN_EVENT_USERS_CHANGED, {"user_id": user.id, "telegram_user_id": user.telegram_id})
     return profile
 
 
@@ -335,6 +474,7 @@ async def soft_delete_payment_profile(session: AsyncSession, user: User) -> None
     if profile:
         profile.deleted_at = utcnow()
         await session.flush()
+        queue_admin_event(session, ADMIN_EVENT_USERS_CHANGED, {"user_id": user.id, "telegram_user_id": user.telegram_id})
 
 
 async def list_users(
@@ -436,6 +576,7 @@ async def create_payout(session: AsyncSession, *, actor_telegram_id: int, payloa
         payout_id=payout.id,
         actor_telegram_id=actor_telegram_id,
     )
+    queue_admin_event(session, ADMIN_EVENT_PAYOUTS_CHANGED, {"payout_id": payout.id, "reason": "create_payout"})
     return payout
 
 
@@ -539,6 +680,13 @@ async def set_payout_sending(session: AsyncSession, payout: Payout, *, actor_tel
         actor_telegram_id=actor_telegram_id,
         result_status=payout.status,
     )
+    queue_admin_events(
+        session,
+        [
+            (ADMIN_EVENT_PAYOUT_CHANGED, {"payout_id": payout.id, "reason": "set_payout_sending"}),
+            (ADMIN_EVENT_PAYOUTS_CHANGED, {"payout_id": payout.id, "reason": "set_payout_sending"}),
+        ],
+    )
     return payout
 
 
@@ -585,6 +733,13 @@ async def complete_payout(session: AsyncSession, payout: Payout, *, actor_telegr
         actor_telegram_id=actor_telegram_id,
         result_status=payout.status,
     )
+    queue_admin_events(
+        session,
+        [
+            (ADMIN_EVENT_PAYOUT_CHANGED, {"payout_id": payout.id, "reason": "complete_payout"}),
+            (ADMIN_EVENT_PAYOUTS_CHANGED, {"payout_id": payout.id, "reason": "complete_payout"}),
+        ],
+    )
     return payout
 
 
@@ -628,6 +783,13 @@ async def cancel_payout(session: AsyncSession, payout: Payout, *, actor_telegram
         payout_id=payout.id,
         actor_telegram_id=actor_telegram_id,
         result_status=payout.status,
+    )
+    queue_admin_events(
+        session,
+        [
+            (ADMIN_EVENT_PAYOUT_CHANGED, {"payout_id": payout.id, "reason": "cancel_payout"}),
+            (ADMIN_EVENT_PAYOUTS_CHANGED, {"payout_id": payout.id, "reason": "cancel_payout"}),
+        ],
     )
     return payout
 
@@ -674,6 +836,17 @@ async def add_recipients(session: AsyncSession, payout: Payout, user_ids: Sequen
         recipients_count=len(created),
         result_count=len(created),
     )
+    if created:
+        queue_admin_events(
+            session,
+            [
+                (
+                    ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
+                    {"payout_id": payout.id, "reason": "add_recipients"},
+                ),
+                (ADMIN_EVENT_PAYOUTS_CHANGED, {"payout_id": payout.id, "reason": "add_recipients"}),
+            ],
+        )
     return created
 
 
@@ -718,6 +891,11 @@ async def cancel_recipient(
         payout_id=recipient.payout_id,
         actor_telegram_id=actor_telegram_id,
         result_status=recipient.status,
+    )
+    queue_admin_event(
+        session,
+        ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
+        {"payout_id": recipient.payout_id, "reason": "cancel_recipient"},
     )
     return recipient
 
@@ -764,6 +942,11 @@ async def retry_failed_recipient(
         payout_id=recipient.payout_id,
         actor_telegram_id=actor_telegram_id,
         result_status=recipient.status,
+    )
+    queue_admin_event(
+        session,
+        ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
+        {"payout_id": recipient.payout_id, "reason": "retry_failed_recipient"},
     )
     return recipient
 
@@ -816,6 +999,11 @@ async def mark_paid(
         payout_id=recipient.payout_id,
         actor_telegram_id=actor_telegram_id,
         result_status=recipient.status,
+    )
+    queue_admin_event(
+        session,
+        ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
+        {"payout_id": recipient.payout_id, "reason": "mark_paid"},
     )
     return recipient
 
@@ -883,6 +1071,16 @@ async def save_profile_and_snapshot(
         active_recipient.status = RecipientStatus.payment_received.value
         active_recipient.replied_at = utcnow()
     await session.flush()
+    queue_admin_events(
+        session,
+        [
+            (ADMIN_EVENT_USERS_CHANGED, {"user_id": user.id, "telegram_user_id": user.telegram_id}),
+            (
+                ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
+                {"payout_id": getattr(active_recipient, "payout_id", None), "reason": "save_profile_and_snapshot"},
+            ),
+        ],
+    )
     return profile
 
 
@@ -907,11 +1105,26 @@ async def confirm_saved_profile(
     recipient.status = RecipientStatus.payment_received.value
     recipient.replied_at = utcnow()
     await session.flush()
+    queue_admin_event(
+        session,
+        ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
+        {"payout_id": recipient.payout_id, "reason": "confirm_saved_profile"},
+    )
     return recipient
 
 
 async def recover_stale_sending(session: AsyncSession, *, stale_after_minutes: int = 10) -> int:
     threshold = utcnow() - timedelta(minutes=stale_after_minutes)
+    impacted_payout_ids = list(
+        await session.scalars(
+            select(PayoutRecipient.payout_id)
+            .where(
+                PayoutRecipient.status == RecipientStatus.sending.value,
+                PayoutRecipient.updated_at < threshold,
+            )
+            .distinct()
+        )
+    )
     result = await session.execute(
         update(PayoutRecipient)
         .where(
@@ -920,6 +1133,12 @@ async def recover_stale_sending(session: AsyncSession, *, stale_after_minutes: i
         )
         .values(status=RecipientStatus.pending.value, failure_reason=None)
     )
+    for payout_id in impacted_payout_ids:
+        queue_admin_event(
+            session,
+            ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
+            {"payout_id": payout_id, "reason": "recover_stale_sending"},
+        )
     return int(getattr(result, "rowcount", 0) or 0)
 
 
@@ -978,4 +1197,11 @@ async def finalize_payout_after_worker(session: AsyncSession, payout: Payout) ->
     if payout.status != next_status:
         payout.status = next_status
         await session.flush()
+        queue_admin_events(
+            session,
+            [
+                (ADMIN_EVENT_PAYOUT_CHANGED, {"payout_id": payout.id, "reason": "finalize_payout_after_worker"}),
+                (ADMIN_EVENT_PAYOUTS_CHANGED, {"payout_id": payout.id, "reason": "finalize_payout_after_worker"}),
+            ],
+        )
     return payout

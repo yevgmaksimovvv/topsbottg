@@ -12,9 +12,11 @@ from sqlalchemy.orm import selectinload
 
 from topsbottg.models import Payout, PayoutRecipient, PayoutStatus, RecipientStatus
 from topsbottg.services import (
+    ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
     claim_pending_recipients,
     finalize_payout_after_worker,
     get_payment_profile,
+    queue_admin_event,
     recover_stale_sending,
     render_message_template,
 )
@@ -74,6 +76,11 @@ async def process_recipient(
                     fail_recipient.status = RecipientStatus.failed.value
                     fail_recipient.failed_at = datetime.now(UTC)
                     fail_recipient.failure_reason = str(exc)[:250]
+                    queue_admin_event(
+                        fail_session,
+                        ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
+                        {"payout_id": fail_recipient.payout_id, "reason": "worker_failed"},
+                    )
                 await fail_session.commit()
             return
         next_status = RecipientStatus.sent.value if has_profile else RecipientStatus.payment_required.value
@@ -82,6 +89,14 @@ async def process_recipient(
             if ok_recipient is not None and ok_recipient.status == RecipientStatus.sending.value:
                 ok_recipient.status = next_status
                 ok_recipient.sent_at = datetime.now(UTC)
+                queue_admin_event(
+                    ok_session,
+                    ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
+                    {
+                        "payout_id": ok_recipient.payout_id,
+                        "reason": "worker_sent" if has_profile else "worker_payment_required",
+                    },
+                )
                 await ok_session.commit()
 
 

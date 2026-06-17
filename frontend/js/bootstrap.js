@@ -2,7 +2,7 @@ import { SEARCH_DEBOUNCE_MS } from "./constants.js";
 import { renderApp } from "./render-app.js";
 import { bindTelegramViewportEvents, setThemeVariables, telegramWebApp } from "./telegram.js";
 import { clearNotification, refreshTelegramAuthState, state, setMobileView, syncComposerFields, syncFilterInputs } from "./store.js";
-import { loadPayouts, loadUsers, markPaid, selectPayout } from "./api.js";
+import { loadPayouts, loadUsers, markPaid, selectPayout, startAdminEvents, stopAdminEvents } from "./api.js";
 import { createPayout, sendPayout } from "./render-payouts.js";
 
 function bindComposerInputs() {
@@ -71,9 +71,7 @@ function bindDelegatedEvents() {
 
     if (action) {
       const { action: name, recipientId } = action.dataset;
-      if (name === "reload-users") {
-        await loadUsers({ reset: true });
-      } else if (name === "load-more-users") {
+      if (name === "load-more-users") {
         await loadUsers({ reset: false });
       } else if (name === "clear-selection") {
         state.selectedUsers.clear();
@@ -138,7 +136,10 @@ export async function bootstrap() {
   bindDelegatedEvents();
   renderApp();
   bindTelegramViewportEvents();
+  window.addEventListener("pagehide", stopAdminEvents);
+  window.addEventListener("beforeunload", stopAdminEvents);
 
   if (!state.initData) return;
+  void startAdminEvents();
   await Promise.allSettled([loadUsers({ reset: true }), loadPayouts()]);
 }

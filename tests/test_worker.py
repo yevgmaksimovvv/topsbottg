@@ -4,7 +4,7 @@ import pytest
 from aiogram.types import InlineKeyboardMarkup
 
 from topsbottg.models import PayoutRecipient, RecipientStatus
-from topsbottg.services import add_recipients, create_payout, get_or_create_user, upsert_payment_profile
+from topsbottg.services import add_recipients, create_payout, get_admin_events_broadcaster, get_or_create_user, upsert_payment_profile
 from topsbottg.worker import _recipient_keyboard, process_recipient
 
 
@@ -101,7 +101,17 @@ async def test_worker_does_not_resend_non_sending(session_factory, settings):
 
 
 @pytest.mark.asyncio
-async def test_worker_success_without_profile_sets_payment_required(session_factory, settings):
+async def test_worker_success_without_profile_sets_payment_required(
+    session_factory,
+    settings,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def _publish(event_type: str, payload: dict[str, object] | None = None) -> None:
+        events.append((event_type, payload or {}))
+
+    monkeypatch.setattr(get_admin_events_broadcaster(), "publish", _publish)
     async with session_factory() as session:
         user = await get_or_create_user(session, 111, "Иван Иванов")
         payout = await create_payout(
@@ -112,11 +122,13 @@ async def test_worker_success_without_profile_sets_payment_required(session_fact
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.sending.value
         await session.commit()
+    events.clear()
     bot = FakeBot()
     await process_recipient(bot, session_factory, settings, recipient.id)
     async with session_factory() as session:
         refreshed = await session.get(PayoutRecipient, recipient.id)
         assert refreshed.status == RecipientStatus.payment_required.value
+    assert events == [("payout_recipients_changed", {"payout_id": recipient.payout_id, "reason": "worker_payment_required"})]
 
 
 @pytest.mark.asyncio

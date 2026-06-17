@@ -6,7 +6,7 @@ import logging
 import urllib.request
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -17,6 +17,7 @@ from topsbottg.logging_utils import log_event
 from topsbottg.models import PaymentProfile, Payout, PayoutRecipient, User
 from topsbottg.schemas import (
     AddRecipientsIn,
+    AdminEventsTokenOut,
     MarkPaidIn,
     PaymentProfileRevealOut,
     PayoutCreate,
@@ -45,6 +46,13 @@ from topsbottg.services import (
     mark_paid,
     retry_failed_recipient,
     set_payout_sending,
+    ADMIN_EVENT_PING,
+    ADMIN_EVENTS_KEEPALIVE_SECONDS,
+    ADMIN_EVENTS_TOKEN_TTL_SECONDS,
+    consume_admin_events_token,
+    configure_admin_events,
+    get_admin_events_broadcaster,
+    issue_admin_events_token,
     update_payout,
 )
 
@@ -170,6 +178,25 @@ def serialize_recipient(recipient: PayoutRecipient) -> RecipientOut:
     )
 
 
+def _sse_frame(event_type: str, payload: dict[str, object]) -> str:
+    return f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+
+
+async def _admin_events_stream():
+    broadcaster = get_admin_events_broadcaster()
+    queue = broadcaster.subscribe()
+    try:
+        yield _sse_frame(ADMIN_EVENT_PING, {})
+        while True:
+            try:
+                message = await asyncio.wait_for(queue.get(), timeout=ADMIN_EVENTS_KEEPALIVE_SECONDS)
+                yield _sse_frame(message["event"], message["payload"])
+            except asyncio.TimeoutError:
+                yield _sse_frame(ADMIN_EVENT_PING, {})
+    finally:
+        broadcaster.unsubscribe(queue)
+
+
 async def check_database_ready(session_factory) -> bool:
     try:
         async with session_factory() as session:
@@ -210,12 +237,13 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
     app = FastAPI(title="topsbottg")
     app.state.settings = settings
     app.state.session_factory = session_factory
+    app.state.admin_events_broadcaster, app.state.admin_events_token_store = configure_admin_events()
 
     @app.middleware("http")
     async def admin_cache_headers(request: Request, call_next):
         response = await call_next(request)
         if request.url.path.startswith("/api/admin/"):
-            response.headers["Cache-Control"] = "no-store"
+            response.headers["Cache-Control"] = "no-cache" if request.url.path == "/api/admin/events" else "no-store"
             response.headers["Pragma"] = "no-cache"
             response.headers["X-Content-Type-Options"] = "nosniff"
         return response
@@ -232,6 +260,27 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
     ) -> dict[str, object]:
         telegram_id = _require_admin(x_telegram_init_data, settings)
         return {"telegram_user_id": telegram_id, "telegram_id": telegram_id, "is_admin": True}
+
+    @app.post("/api/admin/events-token", response_model=AdminEventsTokenOut)
+    async def admin_events_token(
+        x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
+    ) -> AdminEventsTokenOut:
+        _require_admin(x_telegram_init_data, settings)
+        token = issue_admin_events_token()
+        return AdminEventsTokenOut(token=token.token, expires_in=ADMIN_EVENTS_TOKEN_TTL_SECONDS)
+
+    @app.get("/api/admin/events")
+    async def admin_events(token: str | None = Query(default=None)) -> StreamingResponse:
+        if not token:
+            raise HTTPException(status_code=401, detail="token required")
+        consumed = consume_admin_events_token(token)
+        if consumed is None:
+            raise HTTPException(status_code=403, detail="invalid token")
+        response = StreamingResponse(_admin_events_stream(), media_type="text/event-stream")
+        response.headers["Cache-Control"] = "no-cache"
+        response.headers["X-Accel-Buffering"] = "no"
+        response.headers["Connection"] = "keep-alive"
+        return response
 
     @app.get("/api/admin/users")
     async def admin_users(

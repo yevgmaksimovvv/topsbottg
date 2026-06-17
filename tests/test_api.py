@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import hashlib
 import hmac
 import json
@@ -225,6 +224,22 @@ async def test_non_admin_cannot_call_admin_api(client, non_admin_init_data):
 
 
 @pytest.mark.asyncio
+async def test_admin_can_get_events_token(client, admin_init_data):
+    response = await client.post("/api/admin/events-token", headers={"X-Telegram-Init-Data": admin_init_data})
+    assert response.status_code == 200
+    payload = response.json()
+    assert isinstance(payload["token"], str)
+    assert payload["token"]
+    assert payload["expires_in"] == 300
+
+
+@pytest.mark.asyncio
+async def test_non_admin_cannot_get_events_token(client, non_admin_init_data):
+    response = await client.post("/api/admin/events-token", headers={"X-Telegram-Init-Data": non_admin_init_data})
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_missing_init_data_rejected(client, caplog: pytest.LogCaptureFixture):
     caplog.set_level(logging.INFO)
     response = await client.get("/api/admin/me")
@@ -240,6 +255,33 @@ async def test_missing_init_data_rejected(client, caplog: pytest.LogCaptureFixtu
 async def test_invalid_telegram_init_data_rejected(client, invalid_init_data):
     response = await client.get("/api/admin/me", headers={"X-Telegram-Init-Data": invalid_init_data})
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_invalid_or_missing_events_token_rejected(client, admin_init_data):
+    missing = await client.get("/api/admin/events")
+    assert missing.status_code == 401
+
+    token_response = await client.post("/api/admin/events-token", headers={"X-Telegram-Init-Data": admin_init_data})
+    token = token_response.json()["token"]
+
+    invalid = await client.get("/api/admin/events", params={"token": f"{token}x"})
+    assert invalid.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_valid_events_token_opens_sse_response(client, app, admin_init_data):
+    token_response = await client.post("/api/admin/events-token", headers={"X-Telegram-Init-Data": admin_init_data})
+    token = token_response.json()["token"]
+
+    route = next(route for route in app.router.routes if getattr(route, "path", None) == "/api/admin/events")
+    response = await route.endpoint(token=token)
+    assert response.status_code == 200
+    assert response.media_type == "text/event-stream"
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-accel-buffering"] == "no"
 
 
 @pytest.mark.asyncio

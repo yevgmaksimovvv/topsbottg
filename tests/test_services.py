@@ -17,6 +17,7 @@ from topsbottg.services import (
     add_recipients,
     cancel_recipient,
     claim_pending_recipients,
+    get_admin_events_broadcaster,
     confirm_saved_profile,
     create_payout,
     finalize_payout_after_worker,
@@ -44,6 +45,16 @@ def _events(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
             events.append(json.loads(record.getMessage()))
         except json.JSONDecodeError:
             continue
+    return events
+
+
+def _capture_admin_events(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, object]]]:
+    events: list[tuple[str, dict[str, object]]] = []
+
+    def _publish(event_type: str, payload: dict[str, object] | None = None) -> None:
+        events.append((event_type, payload or {}))
+
+    monkeypatch.setattr(get_admin_events_broadcaster(), "publish", _publish)
     return events
 
 
@@ -108,11 +119,13 @@ async def test_registration_repeat_start(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_update_full_name(session_factory):
+async def test_update_full_name(session_factory, monkeypatch: pytest.MonkeyPatch):
+    events = _capture_admin_events(monkeypatch)
     async with session_factory() as session:
         user = await upsert_full_name(session, 111, "Иван Иванов")
         await session.commit()
     assert user.full_name == "Иван Иванов"
+    assert events == [("users_changed", {"user_id": user.id, "telegram_user_id": 111})]
 
 
 def test_validate_message_template_accepts_allowed_placeholders():
@@ -136,8 +149,9 @@ def test_validate_message_template_rejects_invalid_templates(template):
 
 
 @pytest.mark.asyncio
-async def test_payment_profile_lifecycle(session_factory, caplog: pytest.LogCaptureFixture):
+async def test_payment_profile_lifecycle(session_factory, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch):
     caplog.set_level(logging.INFO)
+    admin_events = _capture_admin_events(monkeypatch)
     async with session_factory() as session:
         user = await get_or_create_user(session, 111, "Иван Иванов")
         await session.commit()
@@ -156,6 +170,10 @@ async def test_payment_profile_lifecycle(session_factory, caplog: pytest.LogCapt
     assert any(event.get("event") == "payment_details_upsert_requested" for event in events)
     assert any(event.get("event") == "payment_details_upsert_completed" for event in events)
     assert "Иван Иванов\n+79990000000\nT-Bank" not in json.dumps(events, ensure_ascii=False)
+    assert admin_events == [
+        ("users_changed", {"user_id": user.id, "telegram_user_id": 111}),
+        ("users_changed", {"user_id": user.id, "telegram_user_id": 111}),
+    ]
 
 
 @pytest.mark.asyncio
@@ -616,7 +634,8 @@ async def test_free_text_reply_does_not_auto_mark_payment_received(session_facto
 
 
 @pytest.mark.asyncio
-async def test_confirm_saved_profile_sets_payment_received(session_factory):
+async def test_confirm_saved_profile_sets_payment_received(session_factory, monkeypatch: pytest.MonkeyPatch):
+    events = _capture_admin_events(monkeypatch)
     async with session_factory() as session:
         user = await get_or_create_user(session, 111, "Иван Иванов")
         await upsert_payment_profile(session, user, "Иван Иванов\n+79990000000\nT-Bank\ncomment")
@@ -628,6 +647,7 @@ async def test_confirm_saved_profile_sets_payment_received(session_factory):
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.sent.value
         await session.commit()
+    events.clear()
     async with session_factory() as session:
         saved = await confirm_saved_profile(session, recipient_id=recipient.id, user_id=user.id)
         await session.commit()
@@ -636,6 +656,7 @@ async def test_confirm_saved_profile_sets_payment_received(session_factory):
         refreshed = await session.get(PayoutRecipient, recipient.id)
         assert refreshed.status == RecipientStatus.payment_received.value
         assert refreshed.payment_profile_snapshot["raw_payment_details"] == "Иван Иванов\n+79990000000\nT-Bank\ncomment"
+    assert events == [("payout_recipients_changed", {"payout_id": payout.id, "reason": "confirm_saved_profile"})]
 
 
 @pytest.mark.asyncio
@@ -663,7 +684,8 @@ async def test_confirm_saved_profile_idor_rejected(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_mark_paid_service(session_factory):
+async def test_mark_paid_service(session_factory, monkeypatch: pytest.MonkeyPatch):
+    events = _capture_admin_events(monkeypatch)
     async with session_factory() as session:
         user = await get_or_create_user(session, 111, "Иван Иванов")
         payout = await create_payout(
@@ -674,15 +696,24 @@ async def test_mark_paid_service(session_factory):
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.payment_received.value
         await session.commit()
+    events.clear()
+    async with session_factory() as session:
+        recipient = await session.get(PayoutRecipient, recipient.id)
         recipient = await mark_paid(session, recipient, actor_telegram_id=123, paid_note="ok")
         await session.commit()
         assert recipient.status == RecipientStatus.paid.value
         assert recipient.paid_by_admin_id == 123
+    assert events == [("payout_recipients_changed", {"payout_id": payout.id, "reason": "mark_paid"})]
 
 
 @pytest.mark.asyncio
-async def test_add_recipients_logs_counts_without_details(session_factory, caplog: pytest.LogCaptureFixture):
+async def test_add_recipients_logs_counts_without_details(
+    session_factory,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+):
     caplog.set_level(logging.INFO)
+    admin_events = _capture_admin_events(monkeypatch)
     async with session_factory() as session:
         user = await get_or_create_user(session, 111, "Иван Иванов")
         payout = await create_payout(
@@ -692,21 +723,26 @@ async def test_add_recipients_logs_counts_without_details(session_factory, caplo
         )
         await session.commit()
 
+    admin_events.clear()
     async with session_factory() as session:
         payout = await session.get(type(payout), payout.id)
         created = await add_recipients(session, payout, [user.id])
         await session.commit()
         assert len(created) == 1
 
-    events = _events(caplog)
+    caplog_events = _events(caplog)
     completed = next(
         event
-        for event in events
+        for event in caplog_events
         if event.get("event") == "payout_action_completed" and event.get("action") == "add_recipients"
     )
     assert completed["payout_id"] == payout.id
     assert completed["result_count"] == 1
-    assert "Иван Иванов" not in json.dumps(events, ensure_ascii=False)
+    assert "Иван Иванов" not in json.dumps(caplog_events, ensure_ascii=False)
+    assert admin_events == [
+        ("payout_recipients_changed", {"payout_id": payout.id, "reason": "add_recipients"}),
+        ("payouts_changed", {"payout_id": payout.id, "reason": "add_recipients"}),
+    ]
 
 
 @pytest.mark.asyncio

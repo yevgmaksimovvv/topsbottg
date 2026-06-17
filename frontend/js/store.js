@@ -33,7 +33,6 @@ export const state = {
   loadingRecipientId: null,
   error: null,
   notification: null,
-  pollingTimer: null,
   usersRequestId: 0,
   payoutRequestId: 0,
   toastTimer: null,

@@ -207,12 +207,6 @@ export function renderCurrentPayout() {
 }
 
 export function renderActionState() {
-  setButtonState("reload-users", {
-    label: state.loading.users ? "Обновляем…" : "Обновить",
-    loading: state.loading.users,
-    disabled: state.loading.users || !canUseApi(),
-    hint: canUseApi() ? "Перезагрузить список пользователей." : "Нужен доступ к данным.",
-  });
   setButtonState("send-payout", {
     label: state.loading.sendPayout ? "Разосылаем…" : "Разослать",
     loading: state.loading.sendPayout,

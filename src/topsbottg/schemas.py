@@ -65,6 +65,11 @@ class AddRecipientsIn(BaseModel):
     user_ids: list[int]
 
 
+class AdminEventsTokenOut(BaseModel):
+    token: str
+    expires_in: int
+
+
 class MarkPaidIn(BaseModel):
     paid_at: datetime | None = None
     paid_note: str | None = Field(default=None, max_length=500)
