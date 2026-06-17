@@ -15,6 +15,7 @@ import { createPayout, sendPayout } from "./render-payouts.js";
 
 let adminRecoveryTimer = null;
 let adminRecoveryReason = null;
+const markPaidInFlightRecipientIds = new Set();
 
 function syncTelegramSafeAreaVariables() {
   const webApp = telegramWebApp();
@@ -105,12 +106,14 @@ function bindDelegatedEvents() {
     if (userCheckbox) return;
 
     if (payoutButton) {
+      event.preventDefault();
       await selectPayout(Number(payoutButton.dataset.payoutId));
       renderApp();
       return;
     }
 
     if (action?.dataset.action === "dismiss-toast") {
+      event.preventDefault();
       clearNotification();
       renderApp();
       return;
@@ -118,17 +121,31 @@ function bindDelegatedEvents() {
 
     if (action) {
       const { action: name, recipientId } = action.dataset;
+      if (action.disabled) {
+        event.preventDefault();
+        return;
+      }
+      event.preventDefault();
       if (name === "load-more-users") {
         await loadUsers({ reset: false });
       } else if (name === "clear-selection") {
         state.selectedUsers.clear();
         renderApp();
       } else if (name === "create-payout") {
+        await createPayout();
         return;
       } else if (name === "send-payout") {
         await sendPayout();
       } else if (name === "mark-paid") {
-        await markPaid(Number(recipientId));
+        const normalizedRecipientId = Number(recipientId);
+        if (markPaidInFlightRecipientIds.has(normalizedRecipientId)) return;
+        if (state.loading.markPaid && state.loadingRecipientId === normalizedRecipientId) return;
+        markPaidInFlightRecipientIds.add(normalizedRecipientId);
+        try {
+          await markPaid(normalizedRecipientId);
+        } finally {
+          markPaidInFlightRecipientIds.delete(normalizedRecipientId);
+        }
       }
       renderApp();
       return;
@@ -143,7 +160,9 @@ function bindDelegatedEvents() {
   });
 
   document.addEventListener("change", (event) => {
-    const checkbox = event.target.closest('input[type="checkbox"][data-user-id]');
+    const target = event.target;
+    const checkbox =
+      target?.matches?.('input[type="checkbox"][data-user-id]') ? target : target?.closest?.('input[type="checkbox"][data-user-id]');
     if (!checkbox) return;
     const id = Number(checkbox.dataset.userId);
     if (checkbox.checked) state.selectedUsers.add(id);

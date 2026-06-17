@@ -6,12 +6,14 @@ import {
   schedulePayoutsRefresh,
   upsertPayoutInList,
 } from "./api.js";
-import { payoutPeriodLabel, state, canUseApi, clearError, setError, setLoading, setToast } from "./store.js";
+import { payoutPeriodLabel, state, canUseApi, clearError, setError, setToast } from "./store.js";
 import { renderApp } from "./render-app.js";
 import { emptyStateMarkup, escapeHtml, loadingStateMarkup, statusLabel } from "./utils.js";
 import { payoutsEmptyMessage, selectedPayoutHintText } from "./render-common.js";
 
 const DRAFT_SEND_MESSAGE = "Выплату можно разослать только из черновика. Обновите список выплат.";
+let sendPayoutInFlight = false;
+let markPaidInFlightRecipientId = null;
 
 export function renderPayoutsInto(rootId) {
   const root = document.getElementById(rootId);
@@ -130,7 +132,11 @@ function setToastAndRender(message) {
 }
 
 export async function createPayout() {
-  if (!canUseApi()) return;
+  if (state.loading?.createPayout) return;
+  if (!canUseApi()) {
+    setErrorAndRender("Админский доступ ещё не готов. Подождите секунду и повторите.");
+    return;
+  }
   const payload = validatePayoutForm();
   if (!payload) return;
   setLoadingAndRender("createPayout", true);
@@ -152,15 +158,12 @@ export async function createPayout() {
     state.recipients = [];
     upsertPayoutInList(payout);
     clearError();
-    setLoading("createPayout", false);
     setToastAndRender(`Выплата #${payout.id} создана.`);
     void scheduleAdminStateRefresh({ selected: true, payouts: true, silent: true });
   } catch (error) {
     setErrorAndRender(error.message || "Не удалось создать выплату");
   } finally {
-    if (state.loading.createPayout) {
-      setLoadingAndRender("createPayout", false);
-    }
+    setLoadingAndRender("createPayout", false);
   }
 }
 
@@ -169,84 +172,85 @@ function recipientUserId(recipient) {
 }
 
 export async function sendPayout() {
-  if (!canUseApi() || !state.selectedPayoutId) return;
-  const payoutId = Number(state.selectedPayoutId);
-  let snapshot;
+  if (sendPayoutInFlight || state.loading?.sendPayout) return;
+  sendPayoutInFlight = true;
   try {
+    if (!canUseApi() || !state.selectedPayoutId) return;
+    const payoutId = Number(state.selectedPayoutId);
+    let snapshot;
     snapshot = await fetchSelectedPayoutSnapshot(payoutId);
-  } catch (error) {
-    setErrorAndRender(error.message || "Не удалось обновить выплату.");
-    return;
-  }
-  let payout = snapshot?.detail?.payout || state.selectedPayoutDetail?.payout;
-  if (!payout || Number(payout.id) !== payoutId) {
-    setErrorAndRender("Не удалось обновить выплату.");
-    return;
-  }
-  if (payout.status !== "draft") {
-    try {
-      snapshot = await fetchSelectedPayoutSnapshot(payoutId);
-    } catch (error) {
-      setErrorAndRender(error.message || "Не удалось обновить выплату.");
-      return;
-    }
-    payout = snapshot?.detail?.payout || state.selectedPayoutDetail?.payout;
+    let payout = snapshot?.detail?.payout || state.selectedPayoutDetail?.payout;
     if (!payout || Number(payout.id) !== payoutId) {
       setErrorAndRender("Не удалось обновить выплату.");
       return;
     }
     if (payout.status !== "draft") {
-      setErrorAndRender(DRAFT_SEND_MESSAGE);
+      try {
+        snapshot = await fetchSelectedPayoutSnapshot(payoutId);
+      } catch (error) {
+        setErrorAndRender(error.message || "Не удалось обновить выплату.");
+        return;
+      }
+      payout = snapshot?.detail?.payout || state.selectedPayoutDetail?.payout;
+      if (!payout || Number(payout.id) !== payoutId) {
+        setErrorAndRender("Не удалось обновить выплату.");
+        return;
+      }
+      if (payout.status !== "draft") {
+        setErrorAndRender(DRAFT_SEND_MESSAGE);
+        return;
+      }
+    }
+    let recipientsForSend = snapshot?.recipients || state.recipients;
+    const existingRecipientIds = new Set(recipientsForSend.map(recipientUserId).filter((id) => Number.isInteger(id)));
+    const selectedUserIds = [...state.selectedUsers];
+    const missingUserIds = selectedUserIds.filter((id) => !existingRecipientIds.has(id));
+    if (missingUserIds.length) {
+      clearError();
+      try {
+        await api(`/admin/payouts/${state.selectedPayoutId}/recipients`, {
+          method: "POST",
+          body: JSON.stringify({ user_ids: missingUserIds }),
+        });
+        snapshot = await fetchSelectedPayoutSnapshot(payoutId);
+        recipientsForSend = snapshot?.recipients || state.recipients;
+      } catch (error) {
+        setErrorAndRender(error.message || "Не удалось добавить пользователей");
+        return;
+      }
+    }
+    const count = recipientsForSend.length;
+    if (!count) {
+      setErrorAndRender("Нельзя отправить пустую выплату.");
       return;
     }
-  }
-  let recipientsForSend = snapshot?.recipients || state.recipients;
-  const existingRecipientIds = new Set(recipientsForSend.map(recipientUserId).filter((id) => Number.isInteger(id)));
-  const selectedUserIds = [...state.selectedUsers];
-  const missingUserIds = selectedUserIds.filter((id) => !existingRecipientIds.has(id));
-  if (missingUserIds.length) {
+    const confirmed = window.confirm(
+      `Запустить рассылку выплаты "${payoutPeriodLabel(payout) || payoutId}" для ${count} получателей?`
+    );
+    if (!confirmed) return;
+    setLoadingAndRender("sendPayout", true);
     clearError();
     try {
-      await api(`/admin/payouts/${state.selectedPayoutId}/recipients`, {
-        method: "POST",
-        body: JSON.stringify({ user_ids: missingUserIds }),
-      });
-      snapshot = await fetchSelectedPayoutSnapshot(payoutId);
-      recipientsForSend = snapshot?.recipients || state.recipients;
+      await api(`/admin/payouts/${payoutId}/send`, { method: "POST" });
+      state.selectedUsers.clear();
+      clearError();
+      setToastAndRender("Рассылка запущена.");
+      try {
+        await fetchSelectedPayoutSnapshot(payoutId);
+        await schedulePayoutsRefresh({ silent: true });
+      } catch {
+        // Refresh is best-effort here.
+      }
     } catch (error) {
-      setErrorAndRender(error.message || "Не удалось добавить пользователей");
-      return;
+      const message =
+        error?.message && error.message.includes("payout can only be sent from draft")
+          ? DRAFT_SEND_MESSAGE
+          : "Не удалось разослать выплату.";
+      setErrorAndRender(message);
+    } finally {
+      setLoadingAndRender("sendPayout", false);
     }
-  }
-  const count = recipientsForSend.length;
-  if (!count) {
-    setErrorAndRender("Нельзя отправить пустую выплату.");
-    return;
-  }
-  const confirmed = window.confirm(
-    `Запустить рассылку выплаты "${payoutPeriodLabel(payout) || payoutId}" для ${count} получателей?`
-  );
-  if (!confirmed) return;
-  setLoadingAndRender("sendPayout", true);
-  clearError();
-  try {
-    await api(`/admin/payouts/${payoutId}/send`, { method: "POST" });
-    state.selectedUsers.clear();
-    clearError();
-    setToastAndRender("Рассылка запущена.");
-    try {
-      await fetchSelectedPayoutSnapshot(payoutId);
-      await schedulePayoutsRefresh({ silent: true });
-    } catch {
-      // Refresh is best-effort here.
-    }
-  } catch (error) {
-    const message =
-      error?.message && error.message.includes("payout can only be sent from draft")
-        ? DRAFT_SEND_MESSAGE
-        : "Не удалось разослать выплату.";
-    setErrorAndRender(message);
   } finally {
-    setLoadingAndRender("sendPayout", false);
+    sendPayoutInFlight = false;
   }
 }
