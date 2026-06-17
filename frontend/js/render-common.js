@@ -163,6 +163,16 @@ export function selectedPayoutSummaryText() {
   return `Выплата #${payout.id}\n${periodLabel} · ${statusLabel(PAYOUT_STATUS_LABELS, payout.status)} · ${recipientsLabel}`;
 }
 
+export function canSendSelectedPayout() {
+  const payout = state.selectedPayoutDetail?.payout;
+  return Boolean(
+    canUseApi() &&
+      payout &&
+      payout.status === "draft" &&
+      (state.selectedUsers.size > 0 || state.recipients.length > 0)
+  );
+}
+
 export function renderCurrentPayoutInto(rootId) {
   const root = $(rootId);
   if (!root) return;
@@ -173,18 +183,7 @@ export function renderCurrentPayoutInto(rootId) {
   const payout = state.selectedPayoutDetail.payout;
   const sendLoading = state.loading.sendPayout;
   const periodLabel = payoutPeriodLabel(payout) || "Период не задан";
-  const hasRecipients = state.recipients.length > 0;
-  const hasSelection = state.selectedUsers.size > 0;
-  const sendAction =
-    payout.status === "draft"
-      ? `<button type="button" data-action="send-payout" ${sendLoading || (!hasRecipients && !hasSelection) ? "disabled" : ""}>${
-          sendLoading
-            ? '<span class="spinner"></span> Разосылаем…'
-            : hasRecipients || hasSelection
-              ? "Разослать"
-              : "Выберите пользователей"
-        }</button>`
-      : "";
+  const sendAction = payout.status === "draft" ? `<button type="button" class="success-button" data-action="send-payout" ${sendLoading || !canSendSelectedPayout() ? "disabled" : ""}>${sendLoading ? '<span class="spinner"></span> Разосылаем…' : "Разослать"}</button>` : "";
   root.innerHTML = `
     <div class="current-payout-card">
       <div class="current-payout-head">
@@ -197,7 +196,6 @@ export function renderCurrentPayoutInto(rootId) {
       </div>
       <div class="current-payout-stats">
         <span>${state.recipients.length} получателей</span>
-        ${payout.status === "draft" ? `<span>${escapeHtml(hasSelection ? `Выбрано ${state.selectedUsers.size} пользователей для этой выплаты` : "Пользователи выбираются во вкладке «Пользователи».")}</span>` : ""}
       </div>
       ${sendAction ? `<div class="current-payout-actions">${sendAction}</div>` : ""}
     </div>`;
@@ -215,8 +213,11 @@ export function renderActionState() {
     disabled: state.loading.users || !canUseApi(),
     hint: canUseApi() ? "Перезагрузить список пользователей." : "Нужен доступ к данным.",
   });
-  document.querySelectorAll('[data-action="reload-users"]').forEach((button) => {
-    button.classList.toggle("hidden", !canUseApi());
+  setButtonState("send-payout", {
+    label: state.loading.sendPayout ? "Разосылаем…" : "Разослать",
+    loading: state.loading.sendPayout,
+    disabled: state.loading.sendPayout || !canSendSelectedPayout(),
+    hint: "",
   });
   setButtonState("load-more-users", {
     label: state.loading.users ? "Загружаем…" : "Загрузить ещё",
@@ -235,9 +236,6 @@ export function renderActionState() {
     label: "Снять выбор",
     disabled: state.selectedUsers.size === 0 || !canUseApi(),
     hint: state.selectedUsers.size ? "Очистить выбранных пользователей." : "Ничего не выбрано.",
-  });
-  document.querySelectorAll('[data-action="clear-selection"]').forEach((button) => {
-    button.classList.toggle("hidden", !canUseApi() || state.selectedUsers.size === 0);
   });
   setButtonState("create-payout", {
     label: state.loading.createPayout ? "Создаём…" : "Создать выплату",

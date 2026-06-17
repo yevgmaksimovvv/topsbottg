@@ -101,6 +101,16 @@ button:disabled {
   background: #2a3c4f;
 }
 
+.success-button {
+  background: rgba(53, 199, 121, 0.18);
+  color: #e7fff0;
+  border-color: rgba(53, 199, 121, 0.28);
+}
+
+.success-button:hover:not(:disabled) {
+  background: rgba(53, 199, 121, 0.26);
+}
+
 .mobile-nav-button.active {
   background: rgba(46, 166, 255, 0.16);
   border-color: rgba(46, 166, 255, 0.35);
@@ -359,10 +369,11 @@ code {
 }
 
 .toolbar-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .controls {
@@ -462,42 +473,70 @@ code {
   white-space: nowrap;
 }
 
-.users-context {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: center;
-  padding: 12px 14px;
-  margin: 0 0 14px;
-  border-radius: 16px;
-  border: 1px solid rgba(46, 166, 255, 0.18);
-  background: rgba(46, 166, 255, 0.08);
+.user-row.is-locked {
+  cursor: not-allowed;
 }
 
-.users-context-copy {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-.users-context-warning {
-  border-color: rgba(242, 184, 75, 0.22);
-  background: rgba(242, 184, 75, 0.08);
-  color: #ffe6ad;
-}
-
-.checkbox-cell {
+.user-checkbox-wrap {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-}
-
-.checkbox-cell input {
   width: 20px;
   height: 20px;
-  min-height: 20px;
-  padding: 0;
-  accent-color: var(--primary);
+  flex: none;
+}
+
+.user-checkbox {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: inherit;
+}
+
+.user-checkbox-box {
+  width: 20px;
+  height: 20px;
+  border-radius: 7px;
+  border: 1.5px solid rgba(142, 162, 181, 0.5);
+  background: rgba(255, 255, 255, 0.02);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    transform 160ms ease;
+}
+
+.user-checkbox-box::before {
+  content: "";
+  width: 7px;
+  height: 11px;
+  border-right: 2px solid transparent;
+  border-bottom: 2px solid transparent;
+  transform: translateY(-1px) rotate(45deg);
+}
+
+.user-checkbox:checked + .user-checkbox-box {
+  background: var(--success);
+  border-color: rgba(53, 199, 121, 0.9);
+}
+
+.user-checkbox:checked + .user-checkbox-box::before {
+  border-right-color: #fff;
+  border-bottom-color: #fff;
+}
+
+.user-checkbox:focus-visible + .user-checkbox-box {
+  box-shadow: 0 0 0 4px rgba(53, 199, 121, 0.16);
+}
+
+.user-checkbox:disabled + .user-checkbox-box {
+  opacity: 0.45;
 }
 
 .badge {
@@ -852,7 +891,7 @@ code {
   }
 
   .toolbar-actions {
-    justify-content: stretch;
+    grid-template-columns: 1fr;
   }
 
   .toolbar-actions button {

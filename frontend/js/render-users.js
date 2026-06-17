@@ -1,46 +1,6 @@
-import { PAYOUT_STATUS_LABELS } from "./constants.js";
 import { state, canUseApi } from "./store.js";
-import { emptyStateMarkup, escapeHtml, loadingStateMarkup, statusLabel } from "./utils.js";
+import { emptyStateMarkup, escapeHtml, loadingStateMarkup } from "./utils.js";
 import { renderSelectedCount, usersEmptyMessage } from "./render-common.js";
-
-function selectedPayoutText() {
-  const payout = state.selectedPayoutDetail?.payout;
-  if (!payout) return "";
-  const status = statusLabel(PAYOUT_STATUS_LABELS, payout.status);
-  return `Выплата #${payout.id} · ${status}`;
-}
-
-function renderUsersContextInto(rootId) {
-  const root = document.getElementById(rootId);
-  if (!root) return;
-  const payout = state.selectedPayoutDetail?.payout || null;
-  if (!canUseApi()) {
-    root.classList.add("hidden");
-    root.innerHTML = "";
-    return;
-  }
-  root.classList.remove("hidden");
-  if (!payout) {
-    root.innerHTML = `<div class="users-context"><span>Сначала выберите выплату в списке.</span></div>`;
-    return;
-  }
-  if (payout.status !== "draft") {
-    root.innerHTML = `
-      <div class="users-context users-context-warning">
-        <span>Выбрана выплата ${escapeHtml(selectedPayoutText())}. Пользователей можно менять только у черновика.</span>
-      </div>`;
-    return;
-  }
-  const hasSelection = state.selectedUsers.size > 0;
-  root.innerHTML = `
-    <div class="users-context">
-      <div class="users-context-copy">
-        <strong>${escapeHtml(selectedPayoutText())}</strong>
-        <span>${hasSelection ? "Выбор привязан к этой выплате. Перед отправкой будут добавлены только недостающие получатели." : "Выбор привязан к этой выплате. Отметьте пользователей ниже."}</span>
-      </div>
-      ${hasSelection ? `<button type="button" data-action="send-payout">${state.loading.sendPayout ? '<span class="spinner"></span> Разосылаем…' : "Разослать"}</button>` : ""}
-    </div>`;
-}
 
 export function renderUsersInto(rootId) {
   const root = document.getElementById(rootId);
@@ -59,9 +19,12 @@ export function renderUsersInto(rootId) {
       const locked = !canUseApi() || !state.selectedPayoutDetail || state.selectedPayoutDetail.payout.status !== "draft";
       return `
         <article class="user-card">
-          <label class="user-row" aria-label="Выбрать пользователя">
+          <label class="user-row${locked ? " is-locked" : ""}" aria-label="Выбрать пользователя">
             <strong class="user-name">${escapeHtml(user.full_name)}</strong>
-            <input type="checkbox" data-user-id="${user.id}" ${state.selectedUsers.has(user.id) ? "checked" : ""} ${locked ? "disabled" : ""} />
+            <span class="user-checkbox-wrap">
+              <input type="checkbox" class="user-checkbox" data-user-id="${user.id}" ${state.selectedUsers.has(user.id) ? "checked" : ""} ${locked ? "disabled" : ""} />
+              <span class="user-checkbox-box" aria-hidden="true"></span>
+            </span>
           </label>
         </article>`;
     })
@@ -69,8 +32,6 @@ export function renderUsersInto(rootId) {
 }
 
 export function renderUsers() {
-  renderUsersContextInto("desktop-users-context");
-  renderUsersContextInto("mobile-users-context");
   renderUsersInto("desktop-users");
   renderUsersInto("mobile-users");
   renderSelectedCount();
