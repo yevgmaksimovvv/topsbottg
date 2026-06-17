@@ -1,6 +1,11 @@
 import { POLL_INTERVAL_MS } from "./constants.js";
 import { state, canUseApi, clearError, setError, setLoading, setToast } from "./store.js";
 import { renderApp } from "./render-app.js";
+import {
+  attachSelected as renderAttachSelected,
+  createPayout as renderCreatePayout,
+  sendPayout as renderSendPayout,
+} from "./render-payouts.js";
 
 async function readErrorMessage(response) {
   const contentType = response.headers.get("content-type") || "";
@@ -11,7 +16,7 @@ async function readErrorMessage(response) {
   return response.text();
 }
 
-export async function api(path, options = {}) {
+async function api(path, options = {}) {
   if (!canUseApi()) {
     throw new Error("Нет доступа к данным");
   }
@@ -96,7 +101,7 @@ async function loadUsers({ reset = true } = {}) {
   }
 }
 
-export async function loadPayouts() {
+async function loadPayouts() {
   if (!canUseApi()) return;
   const requestId = ++state.payoutRequestId;
   setLoadingAndRender("payouts", true);
@@ -117,7 +122,7 @@ export async function loadPayouts() {
   }
 }
 
-export async function refreshSelectedPayout({ silent = false } = {}) {
+async function refreshSelectedPayout({ silent = false } = {}) {
   if (!state.selectedPayoutId || !canUseApi()) return;
   const requestId = ++state.payoutRequestId;
   if (!silent) setLoadingAndRender("recipients", true);
@@ -170,14 +175,14 @@ async function markPaid(recipientId) {
 
 export {
   api,
-  attachSelected,
-  createPayout,
+  renderAttachSelected as attachSelected,
+  renderCreatePayout as createPayout,
   loadPayouts,
   loadUsers,
   markPaid,
   refreshSelectedPayout,
   selectPayout,
-  sendPayout,
+  renderSendPayout as sendPayout,
   startPollingSelectedPayout,
   stopPolling,
 };
