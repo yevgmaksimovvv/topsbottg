@@ -7,13 +7,59 @@ import {
   sendPayout as renderSendPayout,
 } from "./render-payouts.js";
 
+const TEMPORARY_BACKEND_ERROR = "Backend временно недоступен. Проверьте сервер приложения.";
+const AUTH_REQUIRED_ERROR = "Требуется вход через Telegram.";
+const FORBIDDEN_ERROR = "Недостаточно прав администратора.";
+
+function isJsonResponse(response) {
+  const contentType = response.headers.get("content-type") || "";
+  return contentType.includes("application/json");
+}
+
+function isHtmlText(text, contentType = "") {
+  const trimmed = text.trimStart();
+  return contentType.includes("text/html") || trimmed.startsWith("<!doctype html") || trimmed.startsWith("<html");
+}
+
+function safeDetailMessage(detail) {
+  if (typeof detail === "string") return detail.trim();
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => (typeof item === "string" ? item.trim() : ""))
+      .filter(Boolean)
+      .join(" ");
+  }
+  if (detail && typeof detail === "object") return JSON.stringify(detail);
+  return "";
+}
+
 async function readErrorMessage(response) {
   const contentType = response.headers.get("content-type") || "";
-  if (contentType.includes("application/json")) {
-    const data = await response.json();
-    return data.detail || JSON.stringify(data);
+  if (response.status === 502 || response.status === 503 || response.status === 504) {
+    return TEMPORARY_BACKEND_ERROR;
   }
-  return response.text();
+  if (response.status === 401) return AUTH_REQUIRED_ERROR;
+  if (response.status === 403) return FORBIDDEN_ERROR;
+  if (isJsonResponse(response)) {
+    try {
+      const data = await response.json();
+      const detail = safeDetailMessage(data?.detail);
+      if (detail) return detail;
+      return "Запрос не выполнен.";
+    } catch {
+      return "Запрос не выполнен.";
+    }
+  }
+  try {
+    const text = await response.text();
+    if (isHtmlText(text, contentType)) {
+      return response.status >= 500 ? TEMPORARY_BACKEND_ERROR : "Сервер вернул некорректный ответ.";
+    }
+    const trimmed = text.trim();
+    return trimmed || "Запрос не выполнен.";
+  } catch {
+    return "Запрос не выполнен.";
+  }
 }
 
 async function api(path, options = {}) {
@@ -32,8 +78,7 @@ async function api(path, options = {}) {
     throw new Error(await readErrorMessage(response));
   }
   if (response.status === 204) return null;
-  const contentType = response.headers.get("content-type") || "";
-  if (contentType.includes("application/json")) return response.json();
+  if (isJsonResponse(response)) return response.json();
   return response.text();
 }
 

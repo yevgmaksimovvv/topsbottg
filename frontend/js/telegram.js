@@ -53,19 +53,16 @@ export function renderAuthState() {
   const banner = document.getElementById("auth-banner");
   if (!pill || !banner) return;
   if (canUseApi()) {
-    pill.textContent = "Telegram подключён";
-    pill.className = "auth-pill auth-ok";
-    pill.classList.remove("hidden");
+    pill.textContent = "";
+    pill.className = "auth-pill hidden";
     banner.classList.add("hidden");
     banner.textContent = "";
   } else if (state.authStatus === "telegram_missing_init_data") {
-    pill.textContent = "Telegram открыт";
-    pill.className = "auth-pill auth-warn";
-    pill.classList.remove("hidden");
+    pill.textContent = "";
+    pill.className = "auth-pill hidden";
     banner.textContent = "Telegram открыт, но не передал данные авторизации. Откройте мини-приложение через кнопку бота.";
     banner.classList.remove("hidden");
   } else {
-    pill.textContent = "";
     pill.className = "auth-pill hidden";
     banner.textContent = "Откройте через Telegram, чтобы загрузить данные.";
     banner.classList.remove("hidden");

@@ -145,7 +145,7 @@ code {
 .app-shell {
   width: min(100% - 40px, 1380px);
   margin: 0 auto;
-  padding: 24px 0 32px;
+  padding: 16px 0 24px;
 }
 
 .app-shell > * {
@@ -166,9 +166,10 @@ code {
   justify-content: space-between;
   gap: 18px;
   align-items: center;
-  padding: 18px 20px;
+  padding: 12px 16px;
 }
 
+.app-header-title,
 .app-header > div,
 .panel-head > div,
 .users-toolbar,
@@ -181,22 +182,10 @@ code {
   min-width: 0;
 }
 
-.eyebrow {
-  margin-bottom: 6px;
-  color: var(--primary);
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  font-size: 12px;
-}
-
-h1 {
-  font-size: clamp(28px, 2.6vw, 32px);
-  line-height: 1.06;
-}
-
-.app-header p {
-  margin-top: 8px;
-  color: var(--muted);
+.app-header-title {
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
 }
 
 .auth-pill {
@@ -209,21 +198,9 @@ h1 {
   overflow-wrap: anywhere;
 }
 
-.auth-pill.auth-ok {
-  background: rgba(53, 199, 121, 0.14);
-  color: #c8f7dd;
-  border-color: rgba(53, 199, 121, 0.22);
-}
-
-.auth-pill.auth-warn {
-  background: rgba(242, 184, 75, 0.14);
-  color: #ffe6ad;
-  border-color: rgba(242, 184, 75, 0.22);
-}
-
 .auth-banner {
-  margin-top: 14px;
-  padding: 14px 16px;
+  margin-top: 10px;
+  padding: 10px 14px;
   color: #dcecff;
   background: rgba(46, 166, 255, 0.1);
   border-color: rgba(46, 166, 255, 0.22);
@@ -256,7 +233,7 @@ h1 {
   grid-template-columns: minmax(320px, 0.9fr) minmax(420px, 1.15fr) minmax(330px, 0.95fr);
   gap: 16px;
   align-items: start;
-  margin-top: 14px;
+  margin-top: 12px;
 }
 
 .side-stack {
