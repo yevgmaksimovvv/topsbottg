@@ -31,10 +31,6 @@ export function syncViewportVariables() {
     Math.round(webApp?.viewportHeight || window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight)
   );
   root.setProperty("--app-viewport-height", `${viewportHeight}px`);
-  const mobileNav = document.querySelector(".mobile-nav");
-  if (mobileNav) {
-    root.setProperty("--mobile-nav-height", `${Math.ceil(mobileNav.getBoundingClientRect().height)}px`);
-  }
 }
 
 export function bindTelegramViewportEvents(onChange = syncViewportVariables) {
