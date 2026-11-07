@@ -281,6 +281,8 @@ def test_ci_bootstraps_deploy_script_on_first_run_with_strict_host_checking(tmp_
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "PROJECT_DIR": str(project),
         "DOCKER_CALL_LOG": str(tmp_path / "docker.log"),
+        "COMPOSE_RESOLVED_FILE": str(tmp_path / "compose-resolved.json"),
+        "REAL_DOCKER": shutil.which("docker") or "docker",
         "CURL_CALL_LOG": str(tmp_path / "curl.log"),
         "SSH_CALL_LOG": str(tmp_path / "ssh.log"),
         "REMOTE_HOME": str(remote_home),
