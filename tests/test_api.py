@@ -701,6 +701,34 @@ async def test_create_payout_uses_yearless_period_response(client, admin_init_da
 
 
 @pytest.mark.asyncio
+async def test_existing_payout_without_new_message_parts_is_readable(
+    client,
+    session_factory,
+    admin_init_data,
+):
+    async with session_factory() as session:
+        payout = await create_payout(
+            session,
+            actor_telegram_id=123,
+            payload={**_payout_payload(), "message_template": "Payout period {period_label}"},
+        )
+        payout.message_before_period = None
+        payout.message_after_period = None
+        payout_id = payout.id
+        await session.commit()
+
+    response = await client.get(
+        f"/api/admin/payouts/{payout_id}",
+        headers={"X-Telegram-Init-Data": admin_init_data},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["payout"]["message_before_period"] is None
+    assert response.json()["payout"]["message_after_period"] is None
+    assert response.json()["payout"]["period_label"] == "01.02 \u2013 28.02"
+
+
+@pytest.mark.asyncio
 async def test_create_payout_rejects_invalid_month_and_day(client, admin_init_data):
     response = await client.post(
         "/api/admin/payouts",

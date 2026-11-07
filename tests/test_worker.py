@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from aiogram.types import InlineKeyboardMarkup
 
-from topsbottg.models import PayoutRecipient, RecipientStatus
+from topsbottg.models import PayoutRecipient, PayoutStatus, RecipientStatus
 from topsbottg.services import (
     add_recipients,
     create_payout,
@@ -11,7 +13,7 @@ from topsbottg.services import (
     get_or_create_user,
     upsert_payment_profile,
 )
-from topsbottg.worker import _recipient_keyboard, process_recipient
+from topsbottg.worker import MAX_TELEGRAM_MESSAGE_LENGTH, _recipient_keyboard, process_recipient, run_worker
 
 
 class FakeBot:
@@ -259,3 +261,71 @@ async def test_worker_sends_segmented_message_with_literal_braces(session_factor
     await process_recipient(bot, session_factory, settings, recipient.id)
     assert len(bot.sent) == 1
     assert bot.sent[0][1] == "Pay {name} for 01.02 \u2013 28.02."
+
+
+@pytest.mark.asyncio
+async def test_worker_rejects_message_one_character_over_limit(session_factory, settings):
+    period = "01.02 \u2013 28.02"
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 444, "Long message")
+        payout_data = _payout_payload()
+        payout_data.update(
+            {
+                "message_before_period": "x" * (MAX_TELEGRAM_MESSAGE_LENGTH + 1 - len(period)),
+                "message_after_period": "",
+            }
+        )
+        payout = await create_payout(session, actor_telegram_id=123, payload=payout_data)
+        [recipient] = await add_recipients(session, payout, [user.id])
+        recipient.status = RecipientStatus.sending.value
+        await session.commit()
+
+    bot = FakeBot()
+    await process_recipient(bot, session_factory, settings, recipient.id)
+
+    assert bot.sent == []
+    async with session_factory() as session:
+        failed = await session.get(PayoutRecipient, recipient.id)
+        assert failed.status == RecipientStatus.failed.value
+        assert "4096-character limit" in failed.failure_reason
+
+
+@pytest.mark.asyncio
+async def test_worker_counts_period_and_payment_details_and_continues_broadcast(
+    session_factory,
+    settings,
+):
+    period = "01.02 \u2013 28.02"
+    stop_event = asyncio.Event()
+
+    class StopAfterSendBot(FakeBot):
+        async def send_message(self, chat_id: int, text: str, reply_markup=None):  # noqa: ANN001
+            await super().send_message(chat_id, text, reply_markup)
+            stop_event.set()
+
+    async with session_factory() as session:
+        long_profile_user = await get_or_create_user(session, 445, "Long profile")
+        await upsert_payment_profile(session, long_profile_user, "Account details")
+        exact_limit_user = await get_or_create_user(session, 446, "Exact limit")
+        payout_data = _payout_payload()
+        payout_data.update(
+            {
+                "message_before_period": "x" * (MAX_TELEGRAM_MESSAGE_LENGTH - len(period)),
+                "message_after_period": "",
+            }
+        )
+        payout = await create_payout(session, actor_telegram_id=123, payload=payout_data)
+        payout.status = PayoutStatus.sending.value
+        recipients = await add_recipients(session, payout, [long_profile_user.id, exact_limit_user.id])
+        recipient_ids = [recipient.id for recipient in recipients]
+        await session.commit()
+
+    bot = StopAfterSendBot()
+    await asyncio.wait_for(run_worker(bot, session_factory, settings, stop_event), timeout=3)
+
+    assert len(bot.sent) == 1
+    assert len(bot.sent[0][1]) == MAX_TELEGRAM_MESSAGE_LENGTH
+    async with session_factory() as session:
+        failed, sent_at_limit = [await session.get(PayoutRecipient, recipient_id) for recipient_id in recipient_ids]
+        assert failed.status == RecipientStatus.failed.value
+        assert sent_at_limit.status == RecipientStatus.payment_required.value
