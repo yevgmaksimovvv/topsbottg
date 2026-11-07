@@ -109,6 +109,12 @@ jobs:
       group: production-deploy
       cancel-in-progress: false
     steps:
+      - name: Check out the CI-verified commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
       - name: Validate production connection settings
         env:
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
@@ -135,26 +141,4 @@ jobs:
           DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
           SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
         shell: bash
-        run: |
-          set -euo pipefail
-          key_file="$(mktemp)"
-          known_hosts_file="$(mktemp)"
-          trap 'rm -f "$key_file" "$known_hosts_file"' EXIT
-          umask 077
-          printf '%s\n' "$SSH_PRIVATE_KEY" > "$key_file"
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$known_hosts_file"
-          chmod 600 "$key_file" "$known_hosts_file"
-          echo "Deploying commit $GITHUB_SHA to production."
-          timeout 12m ssh \
-            -i "$key_file" \
-            -p "$DEPLOY_PORT" \
-            -o BatchMode=yes \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            -o UserKnownHostsFile="$known_hosts_file" \
-            -o ConnectTimeout=15 \
-            -o ServerAliveInterval=15 \
-            -o ServerAliveCountMax=3 \
-            "$DEPLOY_USER@$DEPLOY_HOST" \
-            "bash /home/deploy/apps/topsbottg/scripts/deploy-production.sh '$GITHUB_SHA'"
-          echo "Production deploy completed for $GITHUB_SHA."
+        run: bash scripts/ci-deploy.sh "$GITHUB_SHA"

@@ -5,15 +5,29 @@ PROJECT_DIR="${PROJECT_DIR:-/home/deploy/apps/topsbottg}"
 DEPLOY_SHA="${1:-}"
 COMPOSE_TIMEOUT_SECONDS="${COMPOSE_TIMEOUT_SECONDS:-240}"
 HEALTH_TIMEOUT_SECONDS="${HEALTH_TIMEOUT_SECONDS:-90}"
+PROJECT_NAME="$(basename "$PROJECT_DIR")"
+RELEASE_ROOT="${DEPLOY_RELEASE_ROOT:-$(dirname "$PROJECT_DIR")/.topsbottg-deploy/releases}"
+RELEASE_DIR="$RELEASE_ROOT/$DEPLOY_SHA"
+RELEASE_CREATED=0
+NGINX_SWITCH_STARTED=0
 
 log() { printf '[deploy] %s\n' "$*"; }
 fail() { log "ERROR: $*" >&2; exit 1; }
+compose() {
+  docker compose --project-name "$PROJECT_NAME" --project-directory "$RELEASE_DIR" \
+    --env-file "$PROJECT_DIR/.env" "$@"
+}
 on_error() {
   local status=$?
   log "FAILED at line ${BASH_LINENO[0]} (exit ${status}). Recent app/nginx logs:" >&2
   if [[ -d "$PROJECT_DIR" ]]; then
-    (cd "$PROJECT_DIR" && timeout 20s docker compose logs --tail=80 app nginx 2>&1) \
+    (cd "$PROJECT_DIR" && timeout 20s docker compose --project-name "$PROJECT_NAME" \
+      --project-directory "$PROJECT_DIR" --env-file "$PROJECT_DIR/.env" logs --tail=80 app nginx 2>&1) \
       | sed -E 's#(https?://[^:/[:space:]]+):[^@/[:space:]]+@#\1:[REDACTED]@#g; s/[0-9]{6,}:[A-Za-z0-9_-]{20,}/[REDACTED_BOT_TOKEN]/g' >&2 || true
+  fi
+  if (( RELEASE_CREATED == 1 && NGINX_SWITCH_STARTED == 0 )); then
+    log "Removing incomplete staging worktree $RELEASE_DIR."
+    git -C "$PROJECT_DIR" worktree remove "$RELEASE_DIR" || true
   fi
   exit "$status"
 }
@@ -47,21 +61,38 @@ latest_main="$(git rev-parse refs/remotes/origin/main)"
 git cat-file -e "$DEPLOY_SHA^{commit}" || fail "Requested SHA is not a commit in this repository."
 current="$(git rev-parse HEAD)"
 git merge-base --is-ancestor "$current" "$DEPLOY_SHA" || fail "Requested SHA is not a fast-forward from current production HEAD."
-log "Fast-forwarding production checkout to $DEPLOY_SHA."
-git merge --ff-only "$DEPLOY_SHA"
 
-log "Validating Docker Compose configuration."
-docker compose config --quiet
-log "Building app image."
-timeout "$COMPOSE_TIMEOUT_SECONDS"s docker compose build app
-log "Starting app and waiting for its health check."
-timeout "$COMPOSE_TIMEOUT_SECONDS"s docker compose up -d --no-deps --wait --wait-timeout "$HEALTH_TIMEOUT_SECONDS" app
+if [[ ! -e "$RELEASE_DIR" ]]; then
+  mkdir -p "$RELEASE_ROOT"
+  log "Preparing an isolated release worktree for $DEPLOY_SHA."
+  git worktree add --detach "$RELEASE_DIR" "$DEPLOY_SHA"
+  RELEASE_CREATED=1
+else
+  [[ "$(git -C "$RELEASE_DIR" rev-parse HEAD)" == "$DEPLOY_SHA" ]] || fail "Existing release staging directory has the wrong SHA."
+  log "Reusing isolated release worktree for $DEPLOY_SHA."
+fi
+
+log "Validating Docker Compose configuration from the isolated release."
+compose config --quiet
+log "Building app image from the isolated release."
+timeout "$COMPOSE_TIMEOUT_SECONDS"s docker compose --project-name "$PROJECT_NAME" \
+  --project-directory "$RELEASE_DIR" --env-file "$PROJECT_DIR/.env" build app
+log "Starting the new app and waiting for its health check; the live frontend is unchanged."
+timeout "$COMPOSE_TIMEOUT_SECONDS"s docker compose --project-name "$PROJECT_NAME" \
+  --project-directory "$RELEASE_DIR" --env-file "$PROJECT_DIR/.env" \
+  up -d --no-deps --wait --wait-timeout "$HEALTH_TIMEOUT_SECONDS" app
 
 log "Verifying Alembic reached head."
-timeout 30s docker compose exec -T app alembic current | grep -q '(head)' || fail "Alembic is not at head. Do not run downgrade automatically."
+timeout 30s compose exec -T app alembic current | grep -q '(head)' || fail "Alembic is not at head. Do not run downgrade automatically."
 
-log "Updating only the Compose nginx service."
-timeout 90s docker compose up -d --no-deps --wait --wait-timeout "$HEALTH_TIMEOUT_SECONDS" nginx
+log "Fast-forwarding the production checkout after the new app is healthy."
+git merge --ff-only "$DEPLOY_SHA"
+
+log "Recreating only the Compose nginx service after the new app passed health checks."
+NGINX_SWITCH_STARTED=1
+timeout 90s docker compose --project-name "$PROJECT_NAME" --project-directory "$RELEASE_DIR" \
+  --env-file "$PROJECT_DIR/.env" up -d --no-deps --force-recreate --wait \
+  --wait-timeout "$HEALTH_TIMEOUT_SECONDS" nginx
 
 app_domain="$(sed -n 's/^APP_DOMAIN=//p' .env | tail -n 1 | tr -d '\r"' | sed "s/^'//; s/'$//")"
 [[ -n "$app_domain" ]] || fail "APP_DOMAIN is missing from production .env."

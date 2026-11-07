@@ -7,29 +7,38 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "deploy-production.sh"
+DEPLOY_SCRIPT = ROOT / "scripts" / "deploy-production.sh"
+CI_DEPLOY_SCRIPT = ROOT / "scripts" / "ci-deploy.sh"
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="Deployment integration harness runs on Linux CI.")
 
 
 def _production_checkout(tmp_path: Path, *, backup_fails: bool = False) -> tuple[Path, str, Path]:
-    project = tmp_path / "production"
-    project.mkdir()
+    project = tmp_path / "apps" / "topsbottg"
+    project.mkdir(parents=True)
     subprocess.run(["git", "init", "-b", "main", str(project)], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(project), "config", "user.email", "deploy@example.invalid"], check=True)
     subprocess.run(["git", "-C", str(project), "config", "user.name", "Deploy test"], check=True)
-    tracked = project / "tracked.txt"
-    tracked.write_text("clean\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(project), "add", "tracked.txt"], check=True)
-    subprocess.run(["git", "-C", str(project), "commit", "-m", "initial"], check=True, capture_output=True)
+    (project / "tracked.txt").write_text("old backend\n", encoding="utf-8")
+    frontend = project / "frontend"
+    frontend.mkdir()
+    (frontend / "index.html").write_text("old frontend\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(project), "add", "tracked.txt", "frontend/index.html"], check=True)
+    subprocess.run(["git", "-C", str(project), "commit", "-m", "deployed version"], check=True, capture_output=True)
+
+    (project / "tracked.txt").write_text("new backend\n", encoding="utf-8")
+    (frontend / "index.html").write_text("new frontend\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(project), "add", "tracked.txt", "frontend/index.html"], check=True)
+    subprocess.run(["git", "-C", str(project), "commit", "-m", "release candidate"], check=True, capture_output=True)
     sha = subprocess.check_output(["git", "-C", str(project), "rev-parse", "HEAD"], text=True).strip()
     subprocess.run(
         ["git", "-C", str(project), "remote", "add", "origin", "https://github.com/yevgmaksimovvv/topsbottg.git"],
         check=True,
     )
     subprocess.run(["git", "-C", str(project), "update-ref", "refs/remotes/origin/main", sha], check=True)
+    subprocess.run(["git", "-C", str(project), "checkout", "HEAD^"], check=True, capture_output=True)
     (project / ".env").write_text("APP_DOMAIN=example.com\n", encoding="utf-8")
-    backup = project / "scripts"
-    backup.mkdir()
+    backup_dir = project / "scripts"
+    backup_dir.mkdir()
     backup_script = "#!/usr/bin/env bash\nset -e\n"
     if backup_fails:
         backup_script += "exit 1\n"
@@ -38,7 +47,7 @@ def _production_checkout(tmp_path: Path, *, backup_fails: bool = False) -> tuple
             "mkdir -p backups; printf 'SQL\\n' > backups/backup.sql; "
             "echo 'Backup completed: backups/backup.sql'\n"
         )
-    backup_file = backup / "backup.sh"
+    backup_file = backup_dir / "backup.sh"
     backup_file.write_text(backup_script, encoding="utf-8")
     backup_file.chmod(0o755)
 
@@ -51,20 +60,22 @@ def _production_checkout(tmp_path: Path, *, backup_fails: bool = False) -> tuple
     (bin_dir / "docker").write_text(
         "#!/usr/bin/env bash\n"
         "echo \"$*\" >> \"$DOCKER_CALL_LOG\"\n"
+        "if [[ ${FAIL_APP_START:-0} == 1 && $* == *'up -d --no-deps --wait'* && $* == *' app'* ]]; then exit 1; fi\n"
         "if [[ $* == *'alembic current'* ]]; then echo 'abc123 (head)'; fi\n"
         "exit 0\n",
         encoding="utf-8",
     )
     (bin_dir / "curl").write_text(
         "#!/usr/bin/env bash\n"
-        "if [[ ${FAIL_HEALTH:-0} == 1 && $* == *'/healthz'* ]]; then exit 22; fi\n"
-        "if [[ $* == *'example.com/miniapp/'* && $* != *'/app.js'* ]]; then\n"
+        "echo \"$*\" >> \"$CURL_CALL_LOG\"\n"
+        "if [[ ${FAIL_HEALTH:-0} == 1 && $* == *'http://127.0.0.1:18080/healthz'* ]]; then exit 22; fi\n"
+        "if [[ $* == *'http://127.0.0.1:18080/miniapp/'* && $* != *'/app.js'* ]]; then\n"
         "  echo '<script type=module src=\"/miniapp/app.js?v=1\"></script>'; exit 0\n"
         "fi\n"
         "while (($#)); do\n"
         "  if [[ $1 == -D ]]; then\n"
-        "    shift; printf 'Content-Type: application/javascript; charset=utf-8\\nX-Content-Type-Options: nosniff\\n' "
-        "> \"$1\";\n"
+        "    shift; { echo 'Content-Type: application/javascript; charset=utf-8'; "
+        "echo 'X-Content-Type-Options: nosniff'; } > \"$1\";\n"
         "  fi; shift;\n"
         "done\n"
         "exit 0\n",
@@ -78,26 +89,24 @@ def _production_checkout(tmp_path: Path, *, backup_fails: bool = False) -> tuple
 def _run_deploy(
     tmp_path: Path, project: Path, sha: str, bin_dir: Path, **extra_env: str
 ) -> subprocess.CompletedProcess[str]:
-    call_log = tmp_path / "docker.log"
     env = os.environ | extra_env | {
         "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
         "PROJECT_DIR": str(project),
-        "DOCKER_CALL_LOG": str(call_log),
+        "DOCKER_CALL_LOG": str(tmp_path / "docker.log"),
+        "CURL_CALL_LOG": str(tmp_path / "curl.log"),
     }
-    return subprocess.run(["bash", str(SCRIPT), sha], env=env, text=True, capture_output=True, timeout=30)
+    return subprocess.run(["bash", str(DEPLOY_SCRIPT), sha], env=env, text=True, capture_output=True, timeout=30)
 
 
-def test_deploy_rejects_invalid_sha_before_touching_project(tmp_path: Path) -> None:
-    result = subprocess.run(["bash", str(SCRIPT), "not-a-sha"], text=True, capture_output=True, timeout=5)
+def test_deploy_rejects_invalid_sha_before_touching_project() -> None:
+    result = subprocess.run(["bash", str(DEPLOY_SCRIPT), "not-a-sha"], text=True, capture_output=True, timeout=5)
     assert result.returncode != 0
     assert "40-character" in result.stderr
 
 
 def test_deploy_rejects_valid_but_stale_sha(tmp_path: Path) -> None:
-    project, sha, bin_dir = _production_checkout(tmp_path)
-    stale_sha = "0" * 40
-    assert stale_sha != sha
-    result = _run_deploy(tmp_path, project, stale_sha, bin_dir)
+    project, _, bin_dir = _production_checkout(tmp_path)
+    result = _run_deploy(tmp_path, project, "0" * 40, bin_dir)
     assert result.returncode != 0
     assert "Refusing stale deploy" in result.stderr
     assert "build app" not in (tmp_path / "docker.log").read_text(encoding="utf-8")
@@ -123,9 +132,97 @@ def test_backup_failure_stops_before_build_or_migration(tmp_path: Path) -> None:
     assert "alembic current" not in calls
 
 
-def test_health_check_failure_does_not_record_successful_sha(tmp_path: Path) -> None:
+def test_app_health_failure_keeps_live_frontend_and_checkout_unchanged(tmp_path: Path) -> None:
     project, sha, bin_dir = _production_checkout(tmp_path)
-    result = _run_deploy(tmp_path, project, sha, bin_dir, FAIL_HEALTH="1")
+    result = _run_deploy(tmp_path, project, sha, bin_dir, FAIL_APP_START="1")
     assert result.returncode != 0
-    assert "FAILED" in result.stderr
+    assert (project / "frontend/index.html").read_text(encoding="utf-8") == "old frontend\n"
+    assert subprocess.check_output(["git", "-C", str(project), "rev-parse", "HEAD"], text=True).strip() != sha
+    calls = (tmp_path / "docker.log").read_text(encoding="utf-8")
+    assert " app" in calls
+    assert not [line for line in calls.splitlines() if "up -d" in line and line.endswith("nginx")]
     assert not (project / ".deployed-sha").exists()
+
+
+def test_deploy_happy_path_records_sha_and_recreates_only_nginx(tmp_path: Path) -> None:
+    project, sha, bin_dir = _production_checkout(tmp_path)
+    result = _run_deploy(tmp_path, project, sha, bin_dir)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert (project / ".deployed-sha").read_text(encoding="utf-8").strip() == sha
+    assert (project / "frontend/index.html").read_text(encoding="utf-8") == "new frontend\n"
+
+    docker_calls = (tmp_path / "docker.log").read_text(encoding="utf-8")
+    assert "--force-recreate" in docker_calls
+    assert "--no-deps --force-recreate" in docker_calls
+    nginx_up_calls = [line for line in docker_calls.splitlines() if "up -d" in line and line.endswith("nginx")]
+    assert len(nginx_up_calls) == 1
+    assert "--no-deps --force-recreate" in nginx_up_calls[0]
+    assert " postgres" not in nginx_up_calls[0]
+    assert " app" not in nginx_up_calls[0]
+    compose_up_calls = [line for line in docker_calls.splitlines() if "up -d" in line]
+    assert len(compose_up_calls) == 2
+    assert any(line.endswith(" app") for line in compose_up_calls)
+
+    curl_calls = (tmp_path / "curl.log").read_text(encoding="utf-8")
+    assert "http://127.0.0.1:18080/healthz" in curl_calls
+    assert "http://127.0.0.1:18080/miniapp/" in curl_calls
+    assert "http://127.0.0.1:18080/miniapp/app.js?v=1" in curl_calls
+
+
+def test_ci_bootstraps_deploy_script_on_first_run_with_strict_host_checking(tmp_path: Path) -> None:
+    project, sha, bin_dir = _production_checkout(tmp_path)
+    remote_home = tmp_path / "remote-home"
+    remote_home.mkdir()
+    remote_script = remote_home / ".topsbottg-deploy-42-1.sh"
+    assert not remote_script.exists()
+
+    (bin_dir / "scp").write_text(
+        "#!/usr/bin/env bash\n"
+        "echo \"scp $*\" >> \"$SSH_CALL_LOG\"\n"
+        "[[ $* == *'StrictHostKeyChecking=yes'* ]] || exit 81\n"
+        "for arg in \"$@\"; do if [[ $arg == UserKnownHostsFile=* ]]; then "
+        "grep -Fq '[vps.example.invalid]:2222 ssh-ed25519 AAAATEST' \"${arg#*=}\" || exit 84; fi; done\n"
+        "while (($#)); do case $1 in -q) shift;; -i|-o|-P) shift 2;; *) break;; esac; done\n"
+        "source_file=$1; target=${2#*:}; cp \"$source_file\" \"$REMOTE_HOME/${target##*/}\"\n",
+        encoding="utf-8",
+    )
+    (bin_dir / "ssh").write_text(
+        "#!/usr/bin/env bash\n"
+        "echo \"ssh $*\" >> \"$SSH_CALL_LOG\"\n"
+        "[[ $* == *'StrictHostKeyChecking=yes'* ]] || exit 82\n"
+        "for arg in \"$@\"; do if [[ $arg == UserKnownHostsFile=* ]]; then "
+        "grep -Fq '[vps.example.invalid]:2222 ssh-ed25519 AAAATEST' \"${arg#*=}\" || exit 85; fi; done\n"
+        "remote_command=${@: -1}\n"
+        "[[ $remote_command == *\"$REMOTE_SHA\"* ]] || exit 83\n"
+        "cat > \"$REMOTE_HOME/remote-runner.sh\"\n"
+        "bash \"$REMOTE_HOME/remote-runner.sh\" \"$REMOTE_HOME/.topsbottg-deploy-42-1.sh\" \"$REMOTE_SHA\"\n",
+        encoding="utf-8",
+    )
+    (bin_dir / "scp").chmod(0o755)
+    (bin_dir / "ssh").chmod(0o755)
+    env = os.environ | {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "PROJECT_DIR": str(project),
+        "DOCKER_CALL_LOG": str(tmp_path / "docker.log"),
+        "CURL_CALL_LOG": str(tmp_path / "curl.log"),
+        "SSH_CALL_LOG": str(tmp_path / "ssh.log"),
+        "REMOTE_HOME": str(remote_home),
+        "REMOTE_SHA": sha,
+        "GITHUB_RUN_ID": "42",
+        "GITHUB_RUN_ATTEMPT": "1",
+        "DEPLOY_HOST": "vps.example.invalid",
+        "DEPLOY_PORT": "2222",
+        "DEPLOY_USER": "deploy",
+        "DEPLOY_KNOWN_HOSTS": "[vps.example.invalid]:2222 ssh-ed25519 AAAATEST",
+        "SSH_PRIVATE_KEY": "test-only-private-key",
+    }
+    result = subprocess.run(
+        ["bash", str(CI_DEPLOY_SCRIPT), sha], env=env, text=True, capture_output=True, timeout=40
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert (project / ".deployed-sha").read_text(encoding="utf-8").strip() == sha
+    assert not remote_script.exists(), "remote bootstrap script should be removed after execution"
+    ssh_calls = (tmp_path / "ssh.log").read_text(encoding="utf-8")
+    assert "StrictHostKeyChecking=yes" in ssh_calls
+    assert "UserKnownHostsFile=" in ssh_calls
+    assert "2222" in ssh_calls
