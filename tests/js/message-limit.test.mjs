@@ -3,84 +3,103 @@ import test from "node:test";
 
 import {
   MAX_PAYOUT_MESSAGE_LENGTH,
+  PAYOUT_PERIOD_RESERVED_LENGTH,
   composerMessageText,
   countCharacters,
   countComposerMessage,
-  fitComposerToLimit,
   fitInsertion,
   truncateCharacters,
 } from "../../frontend/js/message-limit.mjs";
 
+const period = "01.02 \u2013 28.02";
+
 test("message length counts Unicode code points, emoji, newlines, and the displayed period", () => {
   const composer = {
-    messageBefore: "🙂\n",
+    messageBefore: "\u{1f642}\n",
     periodStart: "01.02",
     periodEnd: "28.02",
-    messageAfter: "\nГотово",
+    messageAfter: "\n\u0413\u043e\u0442\u043e\u0432\u043e",
   };
 
-  assert.equal(composerMessageText(composer), "🙂\n01.02 – 28.02\nГотово");
+  assert.equal(composerMessageText(composer), `\u{1f642}\n${period}\n\u0413\u043e\u0442\u043e\u0432\u043e`);
   assert.equal(countComposerMessage(composer), Array.from(composerMessageText(composer)).length);
-  assert.equal(countCharacters("🙂\n"), 2);
+  assert.equal(countCharacters("\u{1f642}\n"), 2);
 });
 
 test("paste is truncated to the available length without splitting a surrogate pair", () => {
+  const currentText = "x".repeat(MAX_PAYOUT_MESSAGE_LENGTH - PAYOUT_PERIOD_RESERVED_LENGTH - 2);
   const result = fitInsertion({
-    currentText: "x".repeat(MAX_PAYOUT_MESSAGE_LENGTH - 15),
-    start: MAX_PAYOUT_MESSAGE_LENGTH - 15,
-    end: MAX_PAYOUT_MESSAGE_LENGTH - 15,
-    insertedText: "🙂ab",
+    currentText,
+    start: currentText.length,
+    end: currentText.length,
+    insertedText: "\u{1f642}ab",
     otherText: "",
-    periodText: "01.02 – 28.02",
   });
 
-  assert.equal(result.acceptedText, "🙂a");
+  assert.equal(result.acceptedText, "\u{1f642}a");
   assert.equal(result.truncated, true);
-  assert.equal(countCharacters(result.text) + countCharacters("01.02 – 28.02"), MAX_PAYOUT_MESSAGE_LENGTH);
+  assert.equal(countCharacters(result.text) + PAYOUT_PERIOD_RESERVED_LENGTH, MAX_PAYOUT_MESSAGE_LENGTH);
 });
 
 test("replacing a selection uses the removed characters as available space", () => {
-  const otherText = "z".repeat(MAX_PAYOUT_MESSAGE_LENGTH - 17);
+  const otherText = "z".repeat(MAX_PAYOUT_MESSAGE_LENGTH - PAYOUT_PERIOD_RESERVED_LENGTH - 4);
   const result = fitInsertion({
-    currentText: "A🙂B",
+    currentText: "A\u{1f642}B",
     start: 1,
     end: 3,
-    insertedText: "🙂x",
+    insertedText: "\u{1f642}x",
     otherText,
-    periodText: "01.02 – 28.02",
   });
 
-  assert.equal(result.text, "A🙂xB");
+  assert.equal(result.text, "A\u{1f642}xB");
   assert.equal(result.truncated, false);
-  assert.equal(countCharacters(result.text) + countCharacters(otherText) + countCharacters("01.02 – 28.02"), MAX_PAYOUT_MESSAGE_LENGTH);
+  assert.equal(countCharacters(result.text) + countCharacters(otherText) + PAYOUT_PERIOD_RESERVED_LENGTH, MAX_PAYOUT_MESSAGE_LENGTH);
 });
 
 test("period placeholders count toward the initial editor total", () => {
   assert.equal(
     countComposerMessage({ messageBefore: "", periodStart: "", periodEnd: "", messageAfter: "" }),
-    countCharacters("ДД.ММ – ДД.ММ"),
+    countCharacters("\u0414\u0414.\u041c\u041c \u2013 \u0414\u0414.\u041c\u041c"),
   );
 });
 
-test("when a date edit expands the displayed period, message text is clipped to fit", () => {
+test("editing partial dates always reserves all 13 period characters", () => {
   const composer = {
     messageBefore: "a".repeat(1000),
     periodStart: "1",
     periodEnd: "2",
-    messageAfter: "b".repeat(2490),
+    messageAfter: "b".repeat(2487),
   };
-  const expandedComposer = { ...composer, periodStart: "01.02", periodEnd: "28.02" };
-  const fitted = fitComposerToLimit(expandedComposer);
-  const completedDates = {
-    ...expandedComposer,
-    ...fitted,
-  };
+  const completedDates = { ...composer, periodStart: "01.02", periodEnd: "28.02" };
+  const result = fitInsertion({
+    currentText: composer.messageAfter,
+    start: composer.messageAfter.length,
+    end: composer.messageAfter.length,
+    insertedText: "x",
+    otherText: composer.messageBefore,
+  });
 
-  assert.equal(countComposerMessage(completedDates), MAX_PAYOUT_MESSAGE_LENGTH);
-  assert.equal(fitted.messageBefore, composer.messageBefore);
-  assert.equal(fitted.messageAfter.length, 2487);
+  assert.equal(PAYOUT_PERIOD_RESERVED_LENGTH, 13);
+  assert.equal(countCharacters(composer.messageBefore + composer.messageAfter) + PAYOUT_PERIOD_RESERVED_LENGTH, 3500);
+  assert.equal(result.acceptedText, "");
+  assert.equal(composer.messageBefore, completedDates.messageBefore);
+  assert.equal(composer.messageAfter, completedDates.messageAfter);
+});
+
+test("textarea values preserve one trailing newline in the final message", () => {
+  const beforePeriod = {
+    messageBefore: "a\n",
+    periodStart: "01.02",
+    periodEnd: "28.02",
+    messageAfter: "",
+  };
+  const afterPeriod = { ...beforePeriod, messageBefore: "", messageAfter: "a\n" };
+
+  assert.equal(composerMessageText(beforePeriod), `a\n${period}`);
+  assert.equal(composerMessageText(afterPeriod), `${period}a\n`);
+  assert.equal(countComposerMessage(afterPeriod), Array.from(composerMessageText(afterPeriod)).length);
 });
 
 test("truncation never returns half of a Unicode code point", () => {
-  assert.equal(truncateCharacters("a🙂b", 2), "a🙂");
+  assert.equal(truncateCharacters("a\u{1f642}b", 2), "a\u{1f642}");
 });

@@ -184,8 +184,8 @@ export function syncComposerFields() {
       if (!fields[key]) continue;
       if (key.startsWith("period")) {
         if (fields[key].value !== state.composer[key]) fields[key].value = state.composer[key];
-      } else if (fields[key].innerText.replace(/\r\n?/g, "\n") !== state.composer[key]) {
-        fields[key].textContent = state.composer[key];
+      } else if (fields[key].value !== state.composer[key]) {
+        fields[key].value = state.composer[key];
       }
     }
     if (fields.periodLabel && fields.periodLabel.textContent !== periodLabel) fields.periodLabel.textContent = periodLabel;

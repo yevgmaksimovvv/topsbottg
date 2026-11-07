@@ -2,155 +2,28 @@ import { COMPOSER_IDS } from "./constants.js";
 import { renderApp } from "./render-app.js";
 import {
   MAX_PAYOUT_MESSAGE_LENGTH,
-  composerPeriodLabel,
+  PAYOUT_PERIOD_RESERVED_LENGTH,
   countCharacters,
   fitInsertion,
-  truncateCharacters,
 } from "./message-limit.mjs";
 import { state, syncComposerFields } from "./store.js";
 
 const composingEditors = new WeakSet();
 const inputSnapshots = new WeakMap();
 
-function editorText(editor) {
-  return textFromNode(editor).replace(/\r\n?/g, "\n");
-}
-
-function textFromNode(node) {
-  if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
-  if (node.nodeName === "BR") return "\n";
-
-  let text = "";
-  for (const child of node.childNodes) {
-    const isBlock = child.nodeType === Node.ELEMENT_NODE && ["DIV", "P"].includes(child.tagName);
-    if (isBlock && text && !text.endsWith("\n")) text += "\n";
-    text += textFromNode(child);
-  }
-  return text;
-}
-
-function selectionOffset(editor, node, offset) {
-  const range = document.createRange();
-  range.selectNodeContents(editor);
-  range.setEnd(node, offset);
-  return textFromNode(range.cloneContents()).length;
-}
-
-function selectionOffsets(editor) {
-  const selection = window.getSelection();
-  if (!selection?.anchorNode || !editor.contains(selection.anchorNode)) {
-    const end = editorText(editor).length;
-    return { start: end, end, anchor: end, focus: end };
-  }
-
-  const anchor = selectionOffset(editor, selection.anchorNode, selection.anchorOffset);
-  const focus = selectionOffset(editor, selection.focusNode, selection.focusOffset);
-  return {
-    start: Math.min(anchor, focus),
-    end: Math.max(anchor, focus),
-    anchor,
-    focus,
-  };
-}
-
-function clampOffset(text, offset) {
-  let result = Math.max(0, Math.min(offset, text.length));
-  if (result > 0 && result < text.length) {
-    const previous = text.charCodeAt(result - 1);
-    const next = text.charCodeAt(result);
-    if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) result -= 1;
-  }
-  return result;
-}
-
-function setEditorSelection(editor, anchorOffset, focusOffset) {
-  const text = editorText(editor);
-  if (editor.childNodes.length !== 1 || editor.firstChild.nodeType !== Node.TEXT_NODE) {
-    editor.textContent = text;
-  }
-  let textNode = editor.firstChild;
-  if (!textNode) {
-    editor.append(document.createTextNode(""));
-    textNode = editor.firstChild;
-  }
-  const anchor = clampOffset(text, anchorOffset);
-  const focus = clampOffset(text, focusOffset);
-  const selection = window.getSelection();
-  if (!selection) return;
-
-  if (typeof selection.setBaseAndExtent === "function") {
-    selection.setBaseAndExtent(textNode, anchor, textNode, focus);
-    return;
-  }
-  const range = document.createRange();
-  range.setStart(textNode, Math.min(anchor, focus));
-  range.setEnd(textNode, Math.max(anchor, focus));
-  selection.removeAllRanges();
-  selection.addRange(range);
-}
-
 function otherText(key) {
   return state.composer[key === "messageBefore" ? "messageAfter" : "messageBefore"];
 }
 
-function descriptorFor(editor) {
-  return { key: editor.dataset.messagePart };
-}
-
-function insertionFit(editor, insertedText, offsets = selectionOffsets(editor)) {
-  const descriptor = descriptorFor(editor);
+function insertionFit(editor, insertedText, start = editor.selectionStart, end = editor.selectionEnd) {
+  const key = editor.dataset.messagePart;
   return fitInsertion({
-    currentText: editorText(editor),
-    start: offsets.start,
-    end: offsets.end,
+    currentText: editor.value,
+    start,
+    end,
     insertedText,
-    otherText: otherText(descriptor.key),
-    periodText: composerPeriodLabel(state.composer),
+    otherText: otherText(key),
   });
-}
-
-function snapshotFor(editor) {
-  return { text: editorText(editor), ...selectionOffsets(editor) };
-}
-
-function selectInsertionRange(editor, start, end) {
-  const text = editorText(editor);
-  if (editor.childNodes.length !== 1 || editor.firstChild.nodeType !== Node.TEXT_NODE) {
-    editor.textContent = text;
-  }
-  if (!editor.firstChild) editor.append(document.createTextNode(""));
-  const textNode = editor.firstChild;
-  const range = document.createRange();
-  range.setStart(textNode, clampOffset(text, start));
-  range.setEnd(textNode, clampOffset(text, end));
-  const selection = window.getSelection();
-  selection.removeAllRanges();
-  selection.addRange(range);
-}
-
-function insertText(editor, text, offsets) {
-  const snapshot = snapshotFor(editor);
-  inputSnapshots.set(editor, snapshot);
-  selectInsertionRange(editor, offsets.start, offsets.end);
-  const inserted = document.execCommand("insertText", false, text);
-  if (!inserted) {
-    const range = window.getSelection()?.getRangeAt(0);
-    if (range) {
-      range.deleteContents();
-      const textNode = document.createTextNode(text);
-      range.insertNode(textNode);
-      range.setStartAfter(textNode);
-      range.collapse(true);
-      const selection = window.getSelection();
-      selection.removeAllRanges();
-      selection.addRange(range);
-    }
-    updateEditor(editor, false);
-  }
-}
-
-function allowedInsertionText(editor, insertionText, offsets) {
-  return insertionFit(editor, insertionText, offsets).acceptedText;
 }
 
 function inputText(event) {
@@ -159,20 +32,36 @@ function inputText(event) {
   return typeof event.data === "string" ? event.data : null;
 }
 
-function clampAfterInput(editor, snapshot) {
-  const nextText = editorText(editor);
-  const descriptor = descriptorFor(editor);
-  if (countCharacters(nextText) + countCharacters(otherText(descriptor.key)) + countCharacters(composerPeriodLabel(state.composer)) <= MAX_PAYOUT_MESSAGE_LENGTH) {
-    return nextText;
-  }
+function replaceSelection(editor, text) {
+  const { selectionStart: start, selectionEnd: end } = editor;
+  editor.focus();
+  editor.setSelectionRange(start, end);
+  if (document.execCommand("insertText", false, text)) return;
 
-  const oldText = snapshot?.text ?? state.composer[descriptor.key];
+  editor.setRangeText(text, start, end, "end");
+  updateEditor(editor, false);
+}
+
+function snapshot(editor) {
+  return {
+    text: editor.value,
+    start: editor.selectionStart,
+    end: editor.selectionEnd,
+  };
+}
+
+function clampAfterInput(editor, previous) {
+  const nextText = editor.value;
+  const key = editor.dataset.messagePart;
+  if (
+    countCharacters(nextText) + countCharacters(otherText(key)) + PAYOUT_PERIOD_RESERVED_LENGTH <= MAX_PAYOUT_MESSAGE_LENGTH
+  ) return;
+
+  const oldText = previous?.text ?? state.composer[key];
   let prefixLength = 0;
   while (prefixLength < oldText.length && prefixLength < nextText.length && oldText[prefixLength] === nextText[prefixLength]) {
     prefixLength += 1;
   }
-  prefixLength = clampOffset(oldText, prefixLength);
-
   let suffixLength = 0;
   while (
     suffixLength < oldText.length - prefixLength &&
@@ -180,10 +69,6 @@ function clampAfterInput(editor, snapshot) {
     oldText[oldText.length - suffixLength - 1] === nextText[nextText.length - suffixLength - 1]
   ) {
     suffixLength += 1;
-  }
-  if (suffixLength > 0) {
-    const oldSuffixStart = clampOffset(oldText, oldText.length - suffixLength);
-    suffixLength = oldText.length - oldSuffixStart;
   }
 
   const oldEnd = oldText.length - suffixLength;
@@ -194,39 +79,21 @@ function clampAfterInput(editor, snapshot) {
     start: prefixLength,
     end: oldEnd,
     insertedText,
-    otherText: otherText(descriptor.key),
-    periodText: composerPeriodLabel(state.composer),
+    otherText: otherText(key),
   });
-  let finalText = fitted.text;
-  if (countCharacters(finalText) + countCharacters(otherText(descriptor.key)) + countCharacters(composerPeriodLabel(state.composer)) > MAX_PAYOUT_MESSAGE_LENGTH) {
-    const budget = MAX_PAYOUT_MESSAGE_LENGTH - countCharacters(otherText(descriptor.key)) - countCharacters(composerPeriodLabel(state.composer));
-    finalText = truncateCharacters(finalText, budget);
-  }
-
-  const currentSelection = selectionOffsets(editor);
-  const mapOffset = (offset) => {
-    if (offset <= prefixLength) return offset;
-    if (offset >= newEnd) return offset - (insertedText.length - fitted.acceptedText.length);
-    return prefixLength + fitted.acceptedText.length;
-  };
-  const anchor = mapOffset(currentSelection.anchor);
-  const focus = mapOffset(currentSelection.focus);
-  editor.textContent = finalText;
-  setEditorSelection(editor, anchor, focus);
-  return finalText;
+  const cursorDelta = insertedText.length - fitted.acceptedText.length;
+  const cursor = Math.max(prefixLength, editor.selectionStart - cursorDelta);
+  editor.setRangeText(fitted.text, 0, editor.value.length, "preserve");
+  editor.setSelectionRange(Math.min(cursor, fitted.text.length), Math.min(cursor, fitted.text.length));
 }
 
 function updateEditor(editor, isComposing) {
-  const descriptor = descriptorFor(editor);
-  let text = editorText(editor);
-  state.composer[descriptor.key] = text;
-
+  const key = editor.dataset.messagePart;
   if (!isComposing) {
-    text = clampAfterInput(editor, inputSnapshots.get(editor));
-    state.composer[descriptor.key] = text;
+    clampAfterInput(editor, inputSnapshots.get(editor));
     inputSnapshots.delete(editor);
   }
-
+  state.composer[key] = editor.value;
   syncComposerFields();
   renderApp();
 }
@@ -234,7 +101,7 @@ function updateEditor(editor, isComposing) {
 function bindEditor(editor) {
   editor.addEventListener("compositionstart", () => {
     composingEditors.add(editor);
-    inputSnapshots.set(editor, snapshotFor(editor));
+    inputSnapshots.set(editor, snapshot(editor));
   });
 
   editor.addEventListener("compositionend", () => {
@@ -248,21 +115,19 @@ function bindEditor(editor) {
 
     const text = inputText(event);
     if (text === null) return;
-    const offsets = selectionOffsets(editor);
-    const fit = insertionFit(editor, text, offsets);
-    inputSnapshots.set(editor, snapshotFor(editor));
-
-    if (fit.truncated || event.inputType === "insertParagraph" || event.inputType === "insertLineBreak") {
+    inputSnapshots.set(editor, snapshot(editor));
+    const fit = insertionFit(editor, text);
+    if (fit.truncated) {
       event.preventDefault();
-      insertText(editor, fit.acceptedText, offsets);
+      replaceSelection(editor, fit.acceptedText);
     }
   });
 
   editor.addEventListener("paste", (event) => {
     event.preventDefault();
     const text = event.clipboardData?.getData("text/plain") || "";
-    const offsets = selectionOffsets(editor);
-    insertText(editor, allowedInsertionText(editor, text, offsets), offsets);
+    inputSnapshots.set(editor, snapshot(editor));
+    replaceSelection(editor, insertionFit(editor, text).acceptedText);
   });
 
   editor.addEventListener("input", (event) => {

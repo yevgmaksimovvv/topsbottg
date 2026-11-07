@@ -22,7 +22,6 @@ import {
 } from "./api.js";
 import { createPayout, sendPayout } from "./render-payouts.js";
 import { bindMessageEditors } from "./message-editor.js";
-import { fitComposerToLimit } from "./message-limit.mjs";
 
 let adminRecoveryTimer = null;
 let adminRecoveryReason = null;
@@ -77,7 +76,6 @@ function bindComposerInputs() {
         const nextCaret = digitsBeforeCaret > 2 ? digitsBeforeCaret + 1 : digitsBeforeCaret;
         input.setSelectionRange(nextCaret, nextCaret);
         state.composer[key] = formatted;
-        Object.assign(state.composer, fitComposerToLimit(state.composer));
         syncComposerFields();
         renderApp();
       });

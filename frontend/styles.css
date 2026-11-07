@@ -399,8 +399,7 @@ code {
 .message-part {
   width: 100%; min-height: 96px; max-height: 40vh; overflow: auto; resize: vertical;
   padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px;
-  background: var(--surface-2); color: var(--text); outline: none; white-space: pre-wrap;
-  overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; touch-action: manipulation;
+  background: var(--surface-2); color: var(--text); outline: none; font: inherit; line-height: inherit;
 }
 .message-part:focus {
   border-color: rgba(46, 166, 255, 0.55);
