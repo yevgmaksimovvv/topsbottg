@@ -392,7 +392,14 @@ code {
 }
 
 .controls-composer {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.message-editor textarea { min-height: 96px; resize: vertical; }
+.message-editor .protected-period {
+  display: block; padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px;
+  background: rgba(46, 166, 255, 0.12); color: var(--text); font-weight: 700; text-align: center;
+  user-select: none; -webkit-user-select: none;
 }
 
 .field {

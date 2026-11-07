@@ -4,7 +4,13 @@ import pytest
 from aiogram.types import InlineKeyboardMarkup
 
 from topsbottg.models import PayoutRecipient, RecipientStatus
-from topsbottg.services import add_recipients, create_payout, get_admin_events_broadcaster, get_or_create_user, upsert_payment_profile
+from topsbottg.services import (
+    add_recipients,
+    create_payout,
+    get_admin_events_broadcaster,
+    get_or_create_user,
+    upsert_payment_profile,
+)
 from topsbottg.worker import _recipient_keyboard, process_recipient
 
 
@@ -41,7 +47,7 @@ async def test_worker_sends_only_sending_claimed_recipient(session_factory, sett
     bot = FakeBot()
     await process_recipient(bot, session_factory, settings, recipient.id)
     assert len(bot.sent) == 1
-    assert "01.02 — 28.02" in bot.sent[0][1]
+    assert "01.02 \u2013 28.02" in bot.sent[0][1]
     assert "Платёжные данные:" not in bot.sent[0][1]
     assert isinstance(bot.sent[0][2], InlineKeyboardMarkup)
     assert [[button.text for button in row] for row in bot.sent[0][2].inline_keyboard] == [["Заполнить данные"]]
@@ -128,7 +134,12 @@ async def test_worker_success_without_profile_sets_payment_required(
     async with session_factory() as session:
         refreshed = await session.get(PayoutRecipient, recipient.id)
         assert refreshed.status == RecipientStatus.payment_required.value
-    assert events == [("payout_recipients_changed", {"payout_id": recipient.payout_id, "reason": "worker_payment_required"})]
+    assert events == [
+        (
+            "payout_recipients_changed",
+            {"payout_id": recipient.payout_id, "reason": "worker_payment_required"},
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -211,3 +222,40 @@ async def test_worker_does_not_overwrite_payment_received(session_factory, setti
     async with session_factory() as session:
         refreshed = await session.get(PayoutRecipient, recipient.id)
         assert refreshed.status == RecipientStatus.payment_received.value
+
+
+@pytest.mark.asyncio
+async def test_worker_marks_bad_legacy_format_failed_and_continues(session_factory, settings):
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 222, "Broken template")
+        payout = await create_payout(session, actor_telegram_id=123, payload=_payout_payload())
+        payout.message_template = "{unknown_field}"
+        [recipient] = await add_recipients(session, payout, [user.id])
+        recipient.status = RecipientStatus.sending.value
+        await session.commit()
+    bot = FakeBot()
+    await process_recipient(bot, session_factory, settings, recipient.id)
+    assert bot.sent == []
+    async with session_factory() as session:
+        failed = await session.get(PayoutRecipient, recipient.id)
+        assert failed.status == RecipientStatus.failed.value
+        assert "unknown_field" in failed.failure_reason
+
+
+@pytest.mark.asyncio
+async def test_worker_sends_segmented_message_with_literal_braces(session_factory, settings):
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 333, "Literal braces")
+        payout_data = _payout_payload()
+        payout_data.update({
+            "message_before_period": "Pay {name} for ",
+            "message_after_period": ".",
+        })
+        payout = await create_payout(session, actor_telegram_id=123, payload=payout_data)
+        [recipient] = await add_recipients(session, payout, [user.id])
+        recipient.status = RecipientStatus.sending.value
+        await session.commit()
+    bot = FakeBot()
+    await process_recipient(bot, session_factory, settings, recipient.id)
+    assert len(bot.sent) == 1
+    assert bot.sent[0][1] == "Pay {name} for 01.02 \u2013 28.02."

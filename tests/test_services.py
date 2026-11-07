@@ -17,10 +17,10 @@ from topsbottg.services import (
     add_recipients,
     cancel_recipient,
     claim_pending_recipients,
-    get_admin_events_broadcaster,
     confirm_saved_profile,
     create_payout,
     finalize_payout_after_worker,
+    get_admin_events_broadcaster,
     get_or_create_user,
     list_users,
     mark_paid,
@@ -149,7 +149,11 @@ def test_validate_message_template_rejects_invalid_templates(template):
 
 
 @pytest.mark.asyncio
-async def test_payment_profile_lifecycle(session_factory, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch):
+async def test_payment_profile_lifecycle(
+    session_factory,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+):
     caplog.set_level(logging.INFO)
     admin_events = _capture_admin_events(monkeypatch)
     async with session_factory() as session:
@@ -881,3 +885,19 @@ async def test_set_payout_sending_requires_draft_status(session_factory):
 def test_services_source_has_no_legacy_payment_helper():
     source = (Path(__file__).resolve().parents[1] / "src/topsbottg/services.py").read_text(encoding="utf-8")
     assert "_legacy_payment_details_text" not in source
+
+
+@pytest.mark.asyncio
+async def test_segmented_message_renders_period_and_literal_braces(session_factory):
+    from topsbottg.services import render_message_template
+
+    async with session_factory() as session:
+        payout = await create_payout(
+            session, actor_telegram_id=123, payload={
+                "period_start_day": 1, "period_start_month": 1,
+                "period_end_day": 15, "period_end_month": 1,
+                "message_before_period": "Hello {name}\nPeriod ",
+                "message_after_period": "!\n  keep spaces  ",
+            }
+        )
+        assert render_message_template(payout) == "Hello {name}\nPeriod 01.01 \u2013 15.01!\n  keep spaces  "

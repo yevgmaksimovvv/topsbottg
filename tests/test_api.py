@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import hashlib
 import hmac
 import json
@@ -637,7 +638,11 @@ async def test_mark_paid_endpoint(client, session_factory, admin_init_data):
 
 
 @pytest.mark.asyncio
-async def test_payout_validation_rejects_bad_dates_and_placeholders(client, session_factory, admin_init_data):
+async def test_payout_validation_rejects_bad_dates_and_preserves_literal_braces(
+    client,
+    session_factory,
+    admin_init_data,
+):
     response = await client.post(
         "/api/admin/payouts",
         headers={"X-Telegram-Init-Data": admin_init_data},
@@ -646,7 +651,8 @@ async def test_payout_validation_rejects_bad_dates_and_placeholders(client, sess
             "period_start_month": 2,
             "period_end_day": 1,
             "period_end_month": 2,
-            "message_template": None,
+            "message_before_period": "Before ",
+            "message_after_period": " after.",
         },
     )
     assert response.status_code == 400
@@ -660,11 +666,13 @@ async def test_payout_validation_rejects_bad_dates_and_placeholders(client, sess
             "period_start_month": 2,
             "period_end_day": 28,
             "period_end_month": 2,
-            "message_template": "hello {name}",
+            "message_before_period": "hello {name} ",
+            "message_after_period": " literally",
         },
     )
-    assert response.status_code == 400
-    assert "шаблон" in response.json()["detail"].lower()
+    assert response.status_code == 200
+    assert response.json()["message_before_period"] == "hello {name} "
+    assert response.json()["message_after_period"] == " literally"
 
 
 @pytest.mark.asyncio
@@ -677,7 +685,8 @@ async def test_create_payout_uses_yearless_period_response(client, admin_init_da
             "period_start_month": 6,
             "period_end_day": 5,
             "period_end_month": 6,
-            "message_template": None,
+            "message_before_period": "Before ",
+            "message_after_period": " after.",
         },
     )
     assert response.status_code == 200
@@ -686,7 +695,9 @@ async def test_create_payout_uses_yearless_period_response(client, admin_init_da
     assert "period_from" not in payload
     assert "period_to" not in payload
     assert "period_start_day" in payload
-    assert payload["period_label"] == "05.06 — 05.06"
+    assert payload["period_label"] == "05.06 \u2013 05.06"
+    assert payload["message_before_period"] == "Before "
+    assert payload["message_after_period"] == " after."
 
 
 @pytest.mark.asyncio
@@ -699,7 +710,8 @@ async def test_create_payout_rejects_invalid_month_and_day(client, admin_init_da
             "period_start_month": 13,
             "period_end_day": 5,
             "period_end_month": 6,
-            "message_template": None,
+            "message_before_period": "Before ",
+            "message_after_period": " after.",
         },
     )
     assert response.status_code == 400
@@ -713,7 +725,8 @@ async def test_create_payout_rejects_invalid_month_and_day(client, admin_init_da
             "period_start_month": 6,
             "period_end_day": 5,
             "period_end_month": 6,
-            "message_template": None,
+            "message_before_period": "Before ",
+            "message_after_period": " after.",
         },
     )
     assert response.status_code == 400
@@ -730,7 +743,8 @@ async def test_create_payout_accepts_29_february(client, admin_init_data):
             "period_start_month": 2,
             "period_end_day": 29,
             "period_end_month": 2,
-            "message_template": None,
+            "message_before_period": "Before ",
+            "message_after_period": " after.",
         },
     )
     assert response.status_code == 200
@@ -746,7 +760,8 @@ async def test_list_payouts_returns_yearless_labels(client, admin_init_data):
             "period_start_month": 6,
             "period_end_day": 5,
             "period_end_month": 6,
-            "message_template": None,
+            "message_before_period": "Before ",
+            "message_after_period": " after.",
         },
     )
     await client.post(
@@ -757,14 +772,17 @@ async def test_list_payouts_returns_yearless_labels(client, admin_init_data):
             "period_start_month": 6,
             "period_end_day": 5,
             "period_end_month": 6,
-            "message_template": None,
+            "message_before_period": "Before ",
+            "message_after_period": " after.",
         },
     )
     response = await client.get("/api/admin/payouts", headers={"X-Telegram-Init-Data": admin_init_data})
     assert response.status_code == 200
     payload = response.json()
     assert len(payload) == 2
-    assert payload[0]["period_label"] == "05.06 — 05.06"
+    assert payload[0]["period_label"] == "05.06 \u2013 05.06"
+    assert payload[0]["message_before_period"] == "Before "
+    assert payload[0]["message_after_period"] == " after."
     assert "title" not in payload[0]
 
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import os
+import contextlib
 import logging
+import os
 import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -11,8 +12,7 @@ from string import Formatter
 
 from sqlalchemy import event, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import Session
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import Session, selectinload
 
 from topsbottg.logging_utils import log_event
 from topsbottg.models import (
@@ -102,14 +102,10 @@ class AdminEventsBroadcaster:
                     event_type=event_type,
                     queue_size=queue.qsize(),
                 )
-                try:
+                with contextlib.suppress(asyncio.QueueEmpty):
                     queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-                try:
+                with contextlib.suppress(asyncio.QueueFull):
                     queue.put_nowait(message)
-                except asyncio.QueueFull:
-                    pass
 
 
 _admin_events_broadcaster = AdminEventsBroadcaster()
@@ -158,8 +154,8 @@ def queue_admin_events(session: AsyncSession, events: Sequence[tuple[str, dict[s
 
 def _flush_admin_events(sync_session: Session) -> None:
     queued = sync_session.info.pop(_ADMIN_EVENT_QUEUE_KEY, [])
-    for event in queued:
-        publish_admin_event(event["event_type"], event["payload"])
+    for queued_event in queued:
+        publish_admin_event(queued_event["event_type"], queued_event["payload"])
 
 
 @event.listens_for(Session, "after_commit")
@@ -225,7 +221,7 @@ def format_payout_period_label(
     end_day: int,
     end_month: int,
 ) -> str:
-    return f"{start_day:02d}.{start_month:02d} — {end_day:02d}.{end_month:02d}"
+    return f"{start_day:02d}.{start_month:02d} \u2013 {end_day:02d}.{end_month:02d}"
 
 
 def validate_payout_period_parts(
@@ -248,6 +244,11 @@ def validate_payout_period_parts(
 
 
 def render_message_template(payout: Payout) -> str:
+    period = format_payout_period_label(
+        payout.period_start_day, payout.period_start_month, payout.period_end_day, payout.period_end_month
+    )
+    if payout.message_before_period is not None and payout.message_after_period is not None:
+        return payout.message_before_period + period + payout.message_after_period
     return payout.message_template.format(
         period_label=format_payout_period_label(
             payout.period_start_day,
@@ -485,7 +486,11 @@ async def soft_delete_payment_profile(session: AsyncSession, user: User) -> None
     if profile:
         profile.deleted_at = utcnow()
         await session.flush()
-        queue_admin_event(session, ADMIN_EVENT_USERS_CHANGED, {"user_id": user.id, "telegram_user_id": user.telegram_id})
+        queue_admin_event(
+            session,
+            ADMIN_EVENT_USERS_CHANGED,
+            {"user_id": user.id, "telegram_user_id": user.telegram_id},
+        )
 
 
 async def list_users(
@@ -545,8 +550,13 @@ async def create_payout(session: AsyncSession, *, actor_telegram_id: int, payloa
         actor_telegram_id=actor_telegram_id,
     )
     try:
+        before = payload.get("message_before_period")
+        after = payload.get("message_after_period")
         message_template = payload.get("message_template") or DEFAULT_MESSAGE_TEMPLATE
-        validate_message_template(message_template)
+        if before is None and after is None:
+            validate_message_template(message_template)
+        elif before is None or after is None:
+            raise ValueError("Both message parts must be provided together.")
         period_start_day = payload["period_start_day"]
         period_start_month = payload["period_start_month"]
         period_end_day = payload["period_end_day"]
@@ -558,6 +568,8 @@ async def create_payout(session: AsyncSession, *, actor_telegram_id: int, payloa
             period_end_day=period_end_day,
             period_end_month=period_end_month,
             message_template=message_template,
+            message_before_period=before,
+            message_after_period=after,
             status=PayoutStatus.draft.value,
             created_by_telegram_id=actor_telegram_id,
         )
@@ -600,11 +612,18 @@ async def update_payout(session: AsyncSession, payout: Payout, *, actor_telegram
         actor_telegram_id=actor_telegram_id,
     )
     try:
+        payload_before = payload.get("message_before_period")
+        payload_after = payload.get("message_after_period")
+        if (payload_before is None) != (payload_after is None):
+            raise ValueError("Both message parts must be provided together.")
+        if payload_before is not None:
+            payout.message_before_period = payload_before
+            payout.message_after_period = payload_after
         payload_message_template = payload.get("message_template")
         next_message_template = (
             payout.message_template if payload_message_template is None else payload_message_template
         )
-        if next_message_template is not None:
+        if next_message_template is not None and payload_before is None:
             validate_message_template(next_message_template)
         next_period_start_day = payload.get("period_start_day", payout.period_start_day)
         next_period_start_month = payload.get("period_start_month", payout.period_start_month)

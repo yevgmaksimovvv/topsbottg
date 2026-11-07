@@ -26,20 +26,18 @@ export const MOBILE_QUERY = window.matchMedia("(max-width: 759px)");
 
 export const COMPOSER_IDS = {
   desktop: {
-    periodStartDay: "desktop-period-start-day",
-    periodStartMonth: "desktop-period-start-month",
-    periodEndDay: "desktop-period-end-day",
-    periodEndMonth: "desktop-period-end-month",
-    messageTemplate: "desktop-message-template",
+    periodStart: "desktop-period-start",
+    periodEnd: "desktop-period-end",
+    messageBefore: "desktop-message-before",
+    messageAfter: "desktop-message-after",
     validation: "desktop-payout-validation",
     preview: "desktop-preview",
   },
   mobile: {
-    periodStartDay: "mobile-period-start-day",
-    periodStartMonth: "mobile-period-start-month",
-    periodEndDay: "mobile-period-end-day",
-    periodEndMonth: "mobile-period-end-month",
-    messageTemplate: "mobile-message-template",
+    periodStart: "mobile-period-start",
+    periodEnd: "mobile-period-end",
+    messageBefore: "mobile-message-before",
+    messageAfter: "mobile-message-after",
     validation: "mobile-payout-validation",
     preview: "mobile-preview",
   },

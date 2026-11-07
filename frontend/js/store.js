@@ -12,11 +12,10 @@ export const state = {
   selectedPayoutId: null,
   selectedPayoutDetail: null,
   composer: {
-    periodStartDay: "",
-    periodStartMonth: "",
-    periodEndDay: "",
-    periodEndMonth: "",
-    messageTemplate: "",
+    periodStart: "",
+    periodEnd: "",
+    messageBefore: "",
+    messageAfter: "",
   },
   usersLimit: USERS_LIMIT,
   usersOffset: 0,
@@ -154,25 +153,17 @@ export function getComposerElements() {
   const ids = COMPOSER_IDS[side];
   return {
     side,
-    periodStartDay: $(ids.periodStartDay),
-    periodStartMonth: $(ids.periodStartMonth),
-    periodEndDay: $(ids.periodEndDay),
-    periodEndMonth: $(ids.periodEndMonth),
-    messageTemplate: $(ids.messageTemplate),
-    validation: $(ids.validation),
-    preview: $(ids.preview),
+    periodStart: $(ids.periodStart), periodEnd: $(ids.periodEnd),
+    messageBefore: $(ids.messageBefore), messageAfter: $(ids.messageAfter),
+    validation: $(ids.validation), preview: $(ids.preview),
   };
 }
 
 export function getAllComposerElementPairs() {
   return Object.values(COMPOSER_IDS).map((ids) => ({
-    periodStartDay: $(ids.periodStartDay),
-    periodStartMonth: $(ids.periodStartMonth),
-    periodEndDay: $(ids.periodEndDay),
-    periodEndMonth: $(ids.periodEndMonth),
-    messageTemplate: $(ids.messageTemplate),
-    validation: $(ids.validation),
-    preview: $(ids.preview),
+    periodStart: $(ids.periodStart), periodEnd: $(ids.periodEnd),
+    messageBefore: $(ids.messageBefore), messageAfter: $(ids.messageAfter),
+    validation: $(ids.validation), preview: $(ids.preview),
   }));
 }
 
@@ -185,14 +176,9 @@ export function syncFilterInputs() {
 
 export function syncComposerFields() {
   getAllComposerElementPairs().forEach((fields) => {
-    if (fields.periodStartDay) fields.periodStartDay.value = state.composer.periodStartDay;
-    if (fields.periodStartMonth) fields.periodStartMonth.value = state.composer.periodStartMonth;
-    if (fields.periodEndDay) fields.periodEndDay.value = state.composer.periodEndDay;
-    if (fields.periodEndMonth) fields.periodEndMonth.value = state.composer.periodEndMonth;
-    if (fields.messageTemplate) fields.messageTemplate.value = state.composer.messageTemplate;
-    if (fields.validation) {
-      fields.validation.textContent = "";
-      fields.validation.classList.add("hidden");
+    for (const key of ["periodStart", "periodEnd", "messageBefore", "messageAfter"]) {
+      if (fields[key] && fields[key].value !== state.composer[key]) fields[key].value = state.composer[key];
     }
+    if (fields.validation && !fields.validation.textContent) fields.validation.classList.add("hidden");
   });
 }

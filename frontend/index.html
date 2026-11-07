@@ -66,29 +66,15 @@
           </div>
 
           <form class="composer-form" data-action-form="create-payout">
-            <div class="controls controls-composer">
-              <label class="field">
-                <span>День начала</span>
-                <input id="desktop-period-start-day" type="number" min="1" max="31" inputmode="numeric" placeholder="ДД" />
-              </label>
-              <label class="field">
-                <span>Месяц начала</span>
-                <input id="desktop-period-start-month" type="number" min="1" max="12" inputmode="numeric" placeholder="ММ" />
-              </label>
-              <label class="field">
-                <span>День окончания</span>
-                <input id="desktop-period-end-day" type="number" min="1" max="31" inputmode="numeric" placeholder="ДД" />
-              </label>
-              <label class="field">
-                <span>Месяц окончания</span>
-                <input id="desktop-period-end-month" type="number" min="1" max="12" inputmode="numeric" placeholder="ММ" />
-              </label>
+            <div class="controls controls-composer period-fields">
+              <label class="field"><span>&#1053;&#1072;&#1095;&#1072;&#1083;&#1086; &#1087;&#1077;&#1088;&#1080;&#1086;&#1076;&#1072;</span><input id="desktop-period-start" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="&#1044;&#1044;.&#1052;&#1052;" /></label>
+              <label class="field"><span>&#1050;&#1086;&#1085;&#1077;&#1094; &#1087;&#1077;&#1088;&#1080;&#1086;&#1076;&#1072;</span><input id="desktop-period-end" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="&#1044;&#1044;.&#1052;&#1052;" /></label>
             </div>
-
-            <label class="field">
-              <span>Шаблон сообщения</span>
-              <textarea id="desktop-message-template" rows="10"></textarea>
-            </label>
+            <div class="field message-editor"><span>?????????</span>
+              <textarea id="desktop-message-before" rows="4"></textarea>
+              <span class="protected-period" aria-label="&#1055;&#1077;&#1088;&#1080;&#1086;&#1076; &#1079;&#1072;&#1076;&#1072;&#1105;&#1090;&#1089;&#1103; &#1087;&#1086;&#1083;&#1103;&#1084;&#1080; &#1074;&#1099;&#1096;&#1077;">&#1044;&#1044;.&#1052;&#1052; &#8211; &#1044;&#1044;.&#1052;&#1052;</span>
+              <textarea id="desktop-message-after" rows="6"></textarea>
+            </div>
             <div id="desktop-payout-validation" class="form-hint hidden"></div>
 
             <div id="desktop-preview" class="preview-root"></div>
@@ -177,29 +163,15 @@
             </div>
 
             <form class="composer-form" data-action-form="create-payout">
-              <div class="controls controls-composer">
-                <label class="field">
-                  <span>День начала</span>
-                  <input id="mobile-period-start-day" type="number" min="1" max="31" inputmode="numeric" placeholder="ДД" />
-                </label>
-                <label class="field">
-                  <span>Месяц начала</span>
-                  <input id="mobile-period-start-month" type="number" min="1" max="12" inputmode="numeric" placeholder="ММ" />
-                </label>
-                <label class="field">
-                  <span>День окончания</span>
-                  <input id="mobile-period-end-day" type="number" min="1" max="31" inputmode="numeric" placeholder="ДД" />
-                </label>
-                <label class="field">
-                  <span>Месяц окончания</span>
-                  <input id="mobile-period-end-month" type="number" min="1" max="12" inputmode="numeric" placeholder="ММ" />
-                </label>
-              </div>
-
-              <label class="field">
-                <span>Шаблон сообщения</span>
-                <textarea id="mobile-message-template" rows="10"></textarea>
-              </label>
+              <div class="controls controls-composer period-fields">
+              <label class="field"><span>&#1053;&#1072;&#1095;&#1072;&#1083;&#1086; &#1087;&#1077;&#1088;&#1080;&#1086;&#1076;&#1072;</span><input id="mobile-period-start" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="&#1044;&#1044;.&#1052;&#1052;" /></label>
+              <label class="field"><span>&#1050;&#1086;&#1085;&#1077;&#1094; &#1087;&#1077;&#1088;&#1080;&#1086;&#1076;&#1072;</span><input id="mobile-period-end" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="&#1044;&#1044;.&#1052;&#1052;" /></label>
+            </div>
+            <div class="field message-editor"><span>?????????</span>
+              <textarea id="mobile-message-before" rows="4"></textarea>
+              <span class="protected-period" aria-label="&#1055;&#1077;&#1088;&#1080;&#1086;&#1076; &#1079;&#1072;&#1076;&#1072;&#1105;&#1090;&#1089;&#1103; &#1087;&#1086;&#1083;&#1103;&#1084;&#1080; &#1074;&#1099;&#1096;&#1077;">&#1044;&#1044;.&#1052;&#1052; &#8211; &#1044;&#1044;.&#1052;&#1052;</span>
+              <textarea id="mobile-message-after" rows="6"></textarea>
+            </div>
               <div id="mobile-payout-validation" class="form-hint hidden"></div>
 
               <div id="mobile-preview" class="preview-root"></div>
