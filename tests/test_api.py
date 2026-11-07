@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 import topsbottg.api as api_module
 import topsbottg.security as security_module
+from topsbottg.constants import MAX_PAYOUT_MESSAGE_LENGTH
 from topsbottg.logging_utils import log_event
 from topsbottg.models import AuditLog, RecipientStatus
 from topsbottg.services import add_recipients, create_payout, get_or_create_user, upsert_payment_profile
@@ -726,6 +727,50 @@ async def test_existing_payout_without_new_message_parts_is_readable(
     assert response.json()["payout"]["message_before_period"] is None
     assert response.json()["payout"]["message_after_period"] is None
     assert response.json()["payout"]["period_label"] == "01.02 \u2013 28.02"
+
+
+@pytest.mark.asyncio
+async def test_payout_message_length_limit_includes_period_on_create_and_update(
+    client,
+    admin_init_data,
+):
+    exact_limit_before = "\U0001f600" * 1743
+    exact_limit_after = "x" * 1744
+    payload = {
+        "period_start_day": 1,
+        "period_start_month": 2,
+        "period_end_day": 28,
+        "period_end_month": 2,
+        "message_before_period": exact_limit_before,
+        "message_after_period": exact_limit_after,
+    }
+    assert len(exact_limit_before + "01.02 \u2013 28.02" + exact_limit_after) == MAX_PAYOUT_MESSAGE_LENGTH
+
+    response = await client.post(
+        "/api/admin/payouts",
+        headers={"X-Telegram-Init-Data": admin_init_data},
+        json=payload,
+    )
+    assert response.status_code == 200
+    payout_id = response.json()["id"]
+
+    too_long_before = exact_limit_before + "y"
+    too_long_payload = {**payload, "message_before_period": too_long_before}
+    response = await client.post(
+        "/api/admin/payouts",
+        headers={"X-Telegram-Init-Data": admin_init_data},
+        json=too_long_payload,
+    )
+    assert response.status_code == 400
+    assert str(MAX_PAYOUT_MESSAGE_LENGTH) in response.json()["detail"]
+
+    response = await client.patch(
+        f"/api/admin/payouts/{payout_id}",
+        headers={"X-Telegram-Init-Data": admin_init_data},
+        json={"message_before_period": too_long_before, "message_after_period": exact_limit_after},
+    )
+    assert response.status_code == 400
+    assert str(MAX_PAYOUT_MESSAGE_LENGTH) in response.json()["detail"]
 
 
 @pytest.mark.asyncio

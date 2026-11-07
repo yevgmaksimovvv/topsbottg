@@ -5,6 +5,7 @@ import asyncio
 import pytest
 from aiogram.types import InlineKeyboardMarkup
 
+from topsbottg.constants import MAX_PAYOUT_MESSAGE_LENGTH
 from topsbottg.models import PayoutRecipient, PayoutStatus, RecipientStatus
 from topsbottg.services import (
     add_recipients,
@@ -271,11 +272,12 @@ async def test_worker_rejects_message_one_character_over_limit(session_factory, 
         payout_data = _payout_payload()
         payout_data.update(
             {
-                "message_before_period": "x" * (MAX_TELEGRAM_MESSAGE_LENGTH + 1 - len(period)),
+                "message_before_period": "x" * (MAX_PAYOUT_MESSAGE_LENGTH - len(period)),
                 "message_after_period": "",
             }
         )
         payout = await create_payout(session, actor_telegram_id=123, payload=payout_data)
+        payout.message_before_period = "x" * (MAX_TELEGRAM_MESSAGE_LENGTH + 1 - len(period))
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.sending.value
         await session.commit()
@@ -310,11 +312,12 @@ async def test_worker_counts_period_and_payment_details_and_continues_broadcast(
         payout_data = _payout_payload()
         payout_data.update(
             {
-                "message_before_period": "x" * (MAX_TELEGRAM_MESSAGE_LENGTH - len(period)),
+                "message_before_period": "x" * (MAX_PAYOUT_MESSAGE_LENGTH - len(period)),
                 "message_after_period": "",
             }
         )
         payout = await create_payout(session, actor_telegram_id=123, payload=payout_data)
+        payout.message_before_period = "x" * (MAX_TELEGRAM_MESSAGE_LENGTH - len(period))
         payout.status = PayoutStatus.sending.value
         recipients = await add_recipients(session, payout, [long_profile_user.id, exact_limit_user.id])
         recipient_ids = [recipient.id for recipient in recipients]

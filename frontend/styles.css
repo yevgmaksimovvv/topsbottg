@@ -395,7 +395,20 @@ code {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.message-editor textarea { min-height: 96px; resize: vertical; }
+.message-editor { display: grid; gap: 8px; }
+.message-part {
+  width: 100%; min-height: 96px; max-height: 40vh; overflow: auto; resize: vertical;
+  padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px;
+  background: var(--surface-2); color: var(--text); outline: none; white-space: pre-wrap;
+  overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; touch-action: manipulation;
+}
+.message-part:focus {
+  border-color: rgba(46, 166, 255, 0.55);
+  box-shadow: 0 0 0 4px rgba(46, 166, 255, 0.12);
+}
+.message-count {
+  justify-self: end; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums;
+}
 .message-editor .protected-period {
   display: block; padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px;
   background: rgba(46, 166, 255, 0.12); color: var(--text); font-weight: 700; text-align: center;

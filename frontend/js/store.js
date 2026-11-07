@@ -1,4 +1,5 @@
 import { AUTO_HIDE_TOAST_MS, COMPOSER_IDS, MOBILE_QUERY, USERS_LIMIT } from "./constants.js";
+import { composerPeriodLabel } from "./message-limit.mjs";
 
 export const state = {
   isTelegramEnvironment: Boolean(window.Telegram?.WebApp),
@@ -155,7 +156,8 @@ export function getComposerElements() {
     side,
     periodStart: $(ids.periodStart), periodEnd: $(ids.periodEnd),
     messageBefore: $(ids.messageBefore), messageAfter: $(ids.messageAfter),
-    validation: $(ids.validation), preview: $(ids.preview),
+    periodLabel: document.querySelector(`#${side}-protected-period`),
+    messageCount: $(ids.messageCount), validation: $(ids.validation), preview: $(ids.preview),
   };
 }
 
@@ -163,7 +165,8 @@ export function getAllComposerElementPairs() {
   return Object.values(COMPOSER_IDS).map((ids) => ({
     periodStart: $(ids.periodStart), periodEnd: $(ids.periodEnd),
     messageBefore: $(ids.messageBefore), messageAfter: $(ids.messageAfter),
-    validation: $(ids.validation), preview: $(ids.preview),
+    periodLabel: document.querySelector(`#${ids.messageBefore.split("-")[0]}-protected-period`),
+    messageCount: $(ids.messageCount), validation: $(ids.validation), preview: $(ids.preview),
   }));
 }
 
@@ -175,10 +178,17 @@ export function syncFilterInputs() {
 }
 
 export function syncComposerFields() {
+  const periodLabel = composerPeriodLabel(state.composer);
   getAllComposerElementPairs().forEach((fields) => {
     for (const key of ["periodStart", "periodEnd", "messageBefore", "messageAfter"]) {
-      if (fields[key] && fields[key].value !== state.composer[key]) fields[key].value = state.composer[key];
+      if (!fields[key]) continue;
+      if (key.startsWith("period")) {
+        if (fields[key].value !== state.composer[key]) fields[key].value = state.composer[key];
+      } else if (fields[key].innerText.replace(/\r\n?/g, "\n") !== state.composer[key]) {
+        fields[key].textContent = state.composer[key];
+      }
     }
+    if (fields.periodLabel && fields.periodLabel.textContent !== periodLabel) fields.periodLabel.textContent = periodLabel;
     if (fields.validation && !fields.validation.textContent) fields.validation.classList.add("hidden");
   });
 }

@@ -14,6 +14,7 @@ from sqlalchemy import event, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, selectinload
 
+from topsbottg.constants import MAX_PAYOUT_MESSAGE_LENGTH
 from topsbottg.logging_utils import log_event
 from topsbottg.models import (
     AuditLog,
@@ -222,6 +223,11 @@ def format_payout_period_label(
     end_month: int,
 ) -> str:
     return f"{start_day:02d}.{start_month:02d} \u2013 {end_day:02d}.{end_month:02d}"
+
+
+def validate_payout_message_length(text: str) -> None:
+    if len(text) > MAX_PAYOUT_MESSAGE_LENGTH:
+        raise ValueError(f"Текст выплаты вместе с периодом не должен превышать {MAX_PAYOUT_MESSAGE_LENGTH} символов.")
 
 
 def validate_payout_period_parts(
@@ -562,6 +568,15 @@ async def create_payout(session: AsyncSession, *, actor_telegram_id: int, payloa
         period_end_day = payload["period_end_day"]
         period_end_month = payload["period_end_month"]
         validate_payout_period_parts(period_start_day, period_start_month, period_end_day, period_end_month)
+        period_label = format_payout_period_label(
+            period_start_day, period_start_month, period_end_day, period_end_month
+        )
+        rendered_message = (
+            before + period_label + after
+            if before is not None and after is not None
+            else message_template.format(period_label=period_label)
+        )
+        validate_payout_message_length(rendered_message)
         payout = Payout(
             period_start_day=period_start_day,
             period_start_month=period_start_month,
@@ -616,9 +631,6 @@ async def update_payout(session: AsyncSession, payout: Payout, *, actor_telegram
         payload_after = payload.get("message_after_period")
         if (payload_before is None) != (payload_after is None):
             raise ValueError("Both message parts must be provided together.")
-        if payload_before is not None:
-            payout.message_before_period = payload_before
-            payout.message_after_period = payload_after
         payload_message_template = payload.get("message_template")
         next_message_template = (
             payout.message_template if payload_message_template is None else payload_message_template
@@ -635,6 +647,23 @@ async def update_payout(session: AsyncSession, payout: Payout, *, actor_telegram
             next_period_end_day,
             next_period_end_month,
         )
+        next_message_before = payout.message_before_period if payload_before is None else payload_before
+        next_message_after = payout.message_after_period if payload_after is None else payload_after
+        period_label = format_payout_period_label(
+            next_period_start_day,
+            next_period_start_month,
+            next_period_end_day,
+            next_period_end_month,
+        )
+        rendered_message = (
+            next_message_before + period_label + next_message_after
+            if next_message_before is not None and next_message_after is not None
+            else next_message_template.format(period_label=period_label)
+        )
+        validate_payout_message_length(rendered_message)
+
+        payout.message_before_period = next_message_before
+        payout.message_after_period = next_message_after
         payout.period_start_day = next_period_start_day
         payout.period_start_month = next_period_start_month
         payout.period_end_day = next_period_end_day

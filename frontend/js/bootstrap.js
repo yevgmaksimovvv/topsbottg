@@ -21,6 +21,8 @@ import {
   stopAdminEvents,
 } from "./api.js";
 import { createPayout, sendPayout } from "./render-payouts.js";
+import { bindMessageEditors } from "./message-editor.js";
+import { fitComposerToLimit } from "./message-limit.mjs";
 
 let adminRecoveryTimer = null;
 let adminRecoveryReason = null;
@@ -64,19 +66,18 @@ function scheduleAdminRecoveryRefresh(reason = "visibilitychange") {
 function bindComposerInputs() {
   const pairs = ["desktop", "mobile"];
   for (const prefix of pairs) {
-    for (const [suffix, key] of [["period-start", "periodStart"], ["period-end", "periodEnd"], ["message-before", "messageBefore"], ["message-after", "messageAfter"]]) {
+    for (const [suffix, key] of [["period-start", "periodStart"], ["period-end", "periodEnd"]]) {
       document.getElementById(`${prefix}-${suffix}`)?.addEventListener("input", (event) => {
-        if (key.startsWith("period")) {
-          const input = event.target;
-          const caret = input.selectionStart ?? input.value.length;
-          const digitsBeforeCaret = input.value.slice(0, caret).replace(/\D/g, "").length;
-          const digits = input.value.replace(/\D/g, "").slice(0, 4);
-          const formatted = digits.length > 2 ? `${digits.slice(0, 2)}.${digits.slice(2)}` : digits;
-          input.value = formatted;
-          const nextCaret = digitsBeforeCaret > 2 ? digitsBeforeCaret + 1 : digitsBeforeCaret;
-          input.setSelectionRange(nextCaret, nextCaret);
-          state.composer[key] = formatted;
-        } else state.composer[key] = event.target.value;
+        const input = event.target;
+        const caret = input.selectionStart ?? input.value.length;
+        const digitsBeforeCaret = input.value.slice(0, caret).replace(/\D/g, "").length;
+        const digits = input.value.replace(/\D/g, "").slice(0, 4);
+        const formatted = digits.length > 2 ? `${digits.slice(0, 2)}.${digits.slice(2)}` : digits;
+        input.value = formatted;
+        const nextCaret = digitsBeforeCaret > 2 ? digitsBeforeCaret + 1 : digitsBeforeCaret;
+        input.setSelectionRange(nextCaret, nextCaret);
+        state.composer[key] = formatted;
+        Object.assign(state.composer, fitComposerToLimit(state.composer));
         syncComposerFields();
         renderApp();
       });
@@ -236,6 +237,7 @@ export async function bootstrap() {
   syncFilterInputs();
   syncComposerFields();
   bindComposerInputs();
+  bindMessageEditors();
   bindFilterInputs();
   bindDelegatedEvents();
   renderApp();

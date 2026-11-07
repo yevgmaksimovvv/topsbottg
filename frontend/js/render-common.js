@@ -1,5 +1,10 @@
 import { PAYOUT_STATUS_LABELS } from "./constants.js";
 import { $, canUseApi, payoutPeriodLabel, state } from "./store.js";
+import {
+  MAX_PAYOUT_MESSAGE_LENGTH,
+  composerMessageText,
+  countComposerMessage,
+} from "./message-limit.mjs";
 import { badgeClassForStatus, emptyStateMarkup, escapeHtml, formatTime, statusLabel } from "./utils.js";
 
 function setTextAll(ids, text) {
@@ -7,10 +12,6 @@ function setTextAll(ids, text) {
     const node = $(id);
     if (node) node.textContent = text;
   });
-}
-
-function composerPeriodLabel() {
-  return `${state.composer.periodStart || "\u0414\u0414.\u041c\u041c"} \u2013 ${state.composer.periodEnd || "\u0414\u0414.\u041c\u041c"}`;
 }
 
 export function renderNotifications() {
@@ -64,8 +65,7 @@ export function setButtonState(action, { label, loading = false, disabled = fals
 }
 
 export function formatPayoutPreviewText() {
-  const { messageBefore, messageAfter } = state.composer;
-  return `${messageBefore}${composerPeriodLabel()}${messageAfter}`;
+  return composerMessageText(state.composer);
 }
 
 export function renderPreviewInto(rootId) {
@@ -97,6 +97,11 @@ export function renderPreviewInto(rootId) {
 export function renderPreview() {
   renderPreviewInto("desktop-preview");
   renderPreviewInto("mobile-preview");
+  const count = `${countComposerMessage(state.composer)} / ${MAX_PAYOUT_MESSAGE_LENGTH}`;
+  ["desktop-message-count", "mobile-message-count"].forEach((id) => {
+    const output = $(id);
+    if (output && output.textContent !== count) output.textContent = count;
+  });
 }
 
 export function usersEmptyMessage() {

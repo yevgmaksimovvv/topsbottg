@@ -570,7 +570,12 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             )
             raise HTTPException(status_code=404, detail="payout not found")
         try:
-            payout = await update_payout(session, payout, actor_telegram_id=telegram_id, payload=payload.model_dump())
+            payout = await update_payout(
+                session,
+                payout,
+                actor_telegram_id=telegram_id,
+                payload=payload.model_dump(exclude_unset=True),
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         await session.commit()
