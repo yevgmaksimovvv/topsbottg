@@ -21,6 +21,7 @@ import {
   stopAdminEvents,
 } from "./api.js";
 import { createPayout, sendPayout } from "./render-payouts.js";
+import { bindMessageEditors } from "./message-editor.js";
 
 let adminRecoveryTimer = null;
 let adminRecoveryReason = null;
@@ -62,26 +63,24 @@ function scheduleAdminRecoveryRefresh(reason = "visibilitychange") {
 }
 
 function bindComposerInputs() {
-  const ids = [
-    ["desktop-period-start-day", "periodStartDay"],
-    ["desktop-period-start-month", "periodStartMonth"],
-    ["desktop-period-end-day", "periodEndDay"],
-    ["desktop-period-end-month", "periodEndMonth"],
-    ["desktop-message-template", "messageTemplate"],
-    ["mobile-period-start-day", "periodStartDay"],
-    ["mobile-period-start-month", "periodStartMonth"],
-    ["mobile-period-end-day", "periodEndDay"],
-    ["mobile-period-end-month", "periodEndMonth"],
-    ["mobile-message-template", "messageTemplate"],
-  ];
-
-  ids.forEach(([id, key]) => {
-    document.getElementById(id)?.addEventListener("input", (event) => {
-      state.composer[key] = event.target.value;
-      syncComposerFields();
-      renderApp();
-    });
-  });
+  const pairs = ["desktop", "mobile"];
+  for (const prefix of pairs) {
+    for (const [suffix, key] of [["period-start", "periodStart"], ["period-end", "periodEnd"]]) {
+      document.getElementById(`${prefix}-${suffix}`)?.addEventListener("input", (event) => {
+        const input = event.target;
+        const caret = input.selectionStart ?? input.value.length;
+        const digitsBeforeCaret = input.value.slice(0, caret).replace(/\D/g, "").length;
+        const digits = input.value.replace(/\D/g, "").slice(0, 4);
+        const formatted = digits.length > 2 ? `${digits.slice(0, 2)}.${digits.slice(2)}` : digits;
+        input.value = formatted;
+        const nextCaret = digitsBeforeCaret > 2 ? digitsBeforeCaret + 1 : digitsBeforeCaret;
+        input.setSelectionRange(nextCaret, nextCaret);
+        state.composer[key] = formatted;
+        syncComposerFields();
+        renderApp();
+      });
+    }
+  }
 }
 
 function bindFilterInputs() {
@@ -226,9 +225,17 @@ export async function bootstrap() {
     "укажите ваши фамилию и имя, имя владельца, номер телефона владельца, банк.\n\n" +
     "После сохранения бот должен ответить: «Ваше сообщение сохранено».";
 
+  const defaultMessage = state.composer.messageTemplate;
+  const marker = "{period_label}";
+  const markerIndex = defaultMessage.indexOf(marker);
+  state.composer.messageBefore = defaultMessage.slice(0, markerIndex);
+  state.composer.messageAfter = defaultMessage.slice(markerIndex + marker.length);
+  state.composer.messageTemplate = undefined;
+
   syncFilterInputs();
   syncComposerFields();
   bindComposerInputs();
+  bindMessageEditors();
   bindFilterInputs();
   bindDelegatedEvents();
   renderApp();

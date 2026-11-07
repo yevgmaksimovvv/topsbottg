@@ -78,6 +78,8 @@ class Payout(Base, TimestampMixin):
     period_end_day: Mapped[int] = mapped_column(nullable=False)
     period_end_month: Mapped[int] = mapped_column(nullable=False)
     message_template: Mapped[str] = mapped_column(Text, nullable=False)
+    message_before_period: Mapped[str | None] = mapped_column(Text, nullable=True)
+    message_after_period: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default=PayoutStatus.draft.value)
     created_by_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
 

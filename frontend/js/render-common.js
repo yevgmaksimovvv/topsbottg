@@ -1,5 +1,10 @@
 import { PAYOUT_STATUS_LABELS } from "./constants.js";
-import { $, canUseApi, payoutPeriodLabel, formatPayoutPeriodLabel, state } from "./store.js";
+import { $, canUseApi, payoutPeriodLabel, state } from "./store.js";
+import {
+  MAX_PAYOUT_MESSAGE_LENGTH,
+  composerMessageText,
+  countComposerMessage,
+} from "./message-limit.js";
 import { badgeClassForStatus, emptyStateMarkup, escapeHtml, formatTime, statusLabel } from "./utils.js";
 
 function setTextAll(ids, text) {
@@ -7,15 +12,6 @@ function setTextAll(ids, text) {
     const node = $(id);
     if (node) node.textContent = text;
   });
-}
-
-function composerPeriodLabel() {
-  const startDay = state.composer.periodStartDay;
-  const startMonth = state.composer.periodStartMonth;
-  const endDay = state.composer.periodEndDay;
-  const endMonth = state.composer.periodEndMonth;
-  if (!startDay || !startMonth || !endDay || !endMonth) return "";
-  return formatPayoutPeriodLabel(startDay, startMonth, endDay, endMonth);
 }
 
 export function renderNotifications() {
@@ -69,16 +65,7 @@ export function setButtonState(action, { label, loading = false, disabled = fals
 }
 
 export function formatPayoutPreviewText() {
-  const payoutDetail = state.selectedPayoutDetail?.payout || null;
-  const template = state.composer.messageTemplate.trim() || payoutDetail?.message_template || "";
-  if (!template.trim()) return "";
-  const periodLabel = composerPeriodLabel() || payoutPeriodLabel(payoutDetail);
-  const periodStart = periodLabel ? periodLabel.split(" — ")[0] : "";
-  const periodEnd = periodLabel ? periodLabel.split(" — ")[1] : "";
-  return template
-    .replaceAll("{period_start}", periodStart)
-    .replaceAll("{period_end}", periodEnd)
-    .replaceAll("{period_label}", periodLabel);
+  return composerMessageText(state.composer);
 }
 
 export function renderPreviewInto(rootId) {
@@ -110,6 +97,11 @@ export function renderPreviewInto(rootId) {
 export function renderPreview() {
   renderPreviewInto("desktop-preview");
   renderPreviewInto("mobile-preview");
+  const count = `${countComposerMessage(state.composer)} / ${MAX_PAYOUT_MESSAGE_LENGTH}`;
+  ["desktop-message-count", "mobile-message-count"].forEach((id) => {
+    const output = $(id);
+    if (output && output.textContent !== count) output.textContent = count;
+  });
 }
 
 export function usersEmptyMessage() {
@@ -206,6 +198,11 @@ export function renderCurrentPayout() {
   renderCurrentPayoutInto("mobile-current-payout");
 }
 
+function validComposerDates() {
+  const valid = (text) => { const m = /^(\d{2})\.(\d{2})$/.exec(text); if (!m) return false; const d=+m[1], mo=+m[2], max=[31,29,31,30,31,30,31,31,30,31,30,31][mo-1]; return mo>=1 && mo<=12 && d>=1 && d<=max; };
+  return valid(state.composer.periodStart) && valid(state.composer.periodEnd);
+}
+
 export function renderActionState() {
   setButtonState("send-payout", {
     label: state.loading.sendPayout ? "Разосылаем…" : "Разослать",
@@ -234,7 +231,7 @@ export function renderActionState() {
   setButtonState("create-payout", {
     label: state.loading.createPayout ? "Создаём…" : "Создать выплату",
     loading: state.loading.createPayout,
-    disabled: state.loading.createPayout || !canUseApi(),
+    disabled: state.loading.createPayout || !canUseApi() || !validComposerDates(),
     hint: canUseApi() ? "Создать новую выплату." : "Нужен доступ к данным.",
   });
   document.querySelectorAll('[data-action="dismiss-toast"]').forEach((button) => {

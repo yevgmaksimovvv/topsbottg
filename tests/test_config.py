@@ -119,7 +119,9 @@ def test_compose_exposes_adminer_and_points_it_at_postgres() -> None:
 def test_nginx_template_uses_app_domain() -> None:
     text = _read_text("nginx/templates/default.conf.template")
     assert "server_name ${APP_DOMAIN};" in text
-    assert "ssl_certificate /etc/letsencrypt/live/${APP_DOMAIN}/fullchain.pem;" in text
+    assert "listen 80;" in text
+    assert "listen 443" not in text
+    assert "ssl_certificate" not in text
 
 
 def test_local_cert_bootstrap_uses_host_openssl_and_volume_copy() -> None:

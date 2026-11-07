@@ -21,6 +21,8 @@ from topsbottg.services import (
     render_message_template,
 )
 
+MAX_TELEGRAM_MESSAGE_LENGTH = 4096
+
 
 class MessageSender(Protocol):
     async def send_message(
@@ -63,11 +65,18 @@ async def process_recipient(
         user = recipient.user
         profile = await get_payment_profile(session, recipient.user_id)
         has_profile = profile is not None and profile.deleted_at is None
-        text = render_message_template(payout)
-        if has_profile:
-            text = f"{text}\n\nПлатёжные данные:\n{profile.raw_payment_details}"
         keyboard = _recipient_keyboard(recipient.id, has_profile=has_profile)
         try:
+            text = render_message_template(payout)
+            if has_profile:
+                text += (
+                    "\n\n\u041f\u043b\u0430\u0442\u0451\u0436\u043d\u044b\u0435 "
+                    f"\u0434\u0430\u043d\u043d\u044b\u0435:\n{profile.raw_payment_details}"
+                )
+            if len(text) > MAX_TELEGRAM_MESSAGE_LENGTH:
+                raise ValueError(
+                    f"Telegram message exceeds the {MAX_TELEGRAM_MESSAGE_LENGTH}-character limit."
+                )
             await bot.send_message(user.telegram_id, text, reply_markup=keyboard)
         except Exception as exc:  # noqa: BLE001
             async with session_factory() as fail_session:

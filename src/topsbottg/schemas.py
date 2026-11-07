@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from topsbottg.constants import MAX_PAYOUT_MESSAGE_LENGTH
+
 
 class UserOut(BaseModel):
     id: int
@@ -48,7 +50,8 @@ class PayoutCreate(BaseModel):
     period_start_month: int
     period_end_day: int
     period_end_month: int
-    message_template: str | None = Field(default=None, max_length=4000)
+    message_before_period: str | None = Field(default=None, max_length=MAX_PAYOUT_MESSAGE_LENGTH)
+    message_after_period: str | None = Field(default=None, max_length=MAX_PAYOUT_MESSAGE_LENGTH)
 
 
 class PayoutUpdate(BaseModel):
@@ -58,7 +61,8 @@ class PayoutUpdate(BaseModel):
     period_start_month: int | None = None
     period_end_day: int | None = None
     period_end_month: int | None = None
-    message_template: str | None = Field(default=None, max_length=4000)
+    message_before_period: str | None = Field(default=None, max_length=MAX_PAYOUT_MESSAGE_LENGTH)
+    message_after_period: str | None = Field(default=None, max_length=MAX_PAYOUT_MESSAGE_LENGTH)
 
 
 class AddRecipientsIn(BaseModel):
@@ -108,6 +112,8 @@ class PayoutOut(BaseModel):
     period_end_month: int
     period_label: str
     message_template: str
+    message_before_period: str | None = None
+    message_after_period: str | None = None
     status: str
     created_by_telegram_id: int
     created_at: datetime

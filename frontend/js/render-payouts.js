@@ -48,69 +48,29 @@ export function renderPayouts() {
   renderPayoutsInto("mobile-payouts");
 }
 
-const PAYOUT_PERIOD_MONTH_MAX_DAYS = {
-  1: 31,
-  2: 29,
-  3: 31,
-  4: 30,
-  5: 31,
-  6: 30,
-  7: 31,
-  8: 31,
-  9: 30,
-  10: 31,
-  11: 30,
-  12: 31,
-};
-
-function parsePositiveInteger(value) {
-  if (value === "" || value === null || value === undefined) return null;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) ? parsed : null;
+const PAYOUT_PERIOD_MONTH_MAX_DAYS = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+function parsePeriod(value, side) {
+  const match = /^(\d{2})\.(\d{2})$/.exec(value);
+  if (!match) return { error: `\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u0434\u0430\u0442\u0443 ${side} \u043f\u0435\u0440\u0438\u043e\u0434\u0430 \u0432 \u0444\u043e\u0440\u043c\u0430\u0442\u0435 \u0414\u0414.\u041c\u041c.` };
+  const day = Number(match[1]), month = Number(match[2]);
+  if (month < 1 || month > 12 || day < 1 || day > PAYOUT_PERIOD_MONTH_MAX_DAYS[month - 1]) return { error: `\u0423\u043a\u0430\u0437\u0430\u043d\u0430 \u043d\u0435\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u0430\u044f \u0434\u0430\u0442\u0430 ${side} \u043f\u0435\u0440\u0438\u043e\u0434\u0430.` };
+  return { day, month };
 }
-
-function validatePeriodPart(day, month, sideLabel) {
-  if (!Number.isInteger(day) || day < 1 || day > 31) return `День ${sideLabel} должен быть от 1 до 31.`;
-  if (!Number.isInteger(month) || month < 1 || month > 12) return `Месяц ${sideLabel} должен быть от 1 до 12.`;
-  if (day > PAYOUT_PERIOD_MONTH_MAX_DAYS[month]) return `Для ${sideLabel} указана невозможная дата.`;
-  return "";
-}
-
 function validatePayoutForm() {
-  const errors = [];
-  const periodStartDay = parsePositiveInteger(state.composer.periodStartDay);
-  const periodStartMonth = parsePositiveInteger(state.composer.periodStartMonth);
-  const periodEndDay = parsePositiveInteger(state.composer.periodEndDay);
-  const periodEndMonth = parsePositiveInteger(state.composer.periodEndMonth);
-
-  if (!state.composer.periodStartDay) errors.push("Укажите день начала периода.");
-  if (!state.composer.periodStartMonth) errors.push("Укажите месяц начала периода.");
-  if (!state.composer.periodEndDay) errors.push("Укажите день окончания периода.");
-  if (!state.composer.periodEndMonth) errors.push("Укажите месяц окончания периода.");
-
-  if (periodStartDay !== null && periodStartMonth !== null) {
-    const error = validatePeriodPart(periodStartDay, periodStartMonth, "начала периода");
-    if (error) errors.push(error);
-  }
-  if (periodEndDay !== null && periodEndMonth !== null) {
-    const error = validatePeriodPart(periodEndDay, periodEndMonth, "окончания периода");
-    if (error) errors.push(error);
-  }
-
+  const start = parsePeriod(state.composer.periodStart, "\u043d\u0430\u0447\u0430\u043b\u0430");
+  const end = parsePeriod(state.composer.periodEnd, "\u043e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u044f");
+  const errors = [start.error, end.error].filter(Boolean);
   document.querySelectorAll("#desktop-payout-validation, #mobile-payout-validation").forEach((node) => {
-    node.textContent = errors.join(" ");
-    node.classList.toggle("hidden", errors.length === 0);
+    node.textContent = errors.join(" "); node.classList.toggle("hidden", !errors.length);
   });
-
-  return errors.length === 0
-    ? {
-        periodStartDay,
-        periodStartMonth,
-        periodEndDay,
-        periodEndMonth,
-        messageTemplate: state.composer.messageTemplate,
-      }
-    : null;
+  return errors.length ? null : {
+    periodStartDay: start.day, periodStartMonth: start.month,
+    periodEndDay: end.day, periodEndMonth: end.month,
+    messageBefore: state.composer.messageBefore, messageAfter: state.composer.messageAfter,
+  };
+}
+export function payoutDatesValid() {
+  return Boolean(parsePeriod(state.composer.periodStart, "\u043d\u0430\u0447\u0430\u043b\u0430").day && parsePeriod(state.composer.periodEnd, "\u043e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u044f").day);
 }
 
 function setLoadingAndRender(key, value) {
@@ -146,7 +106,8 @@ export async function createPayout() {
         period_start_month: payload.periodStartMonth,
         period_end_day: payload.periodEndDay,
         period_end_month: payload.periodEndMonth,
-        message_template: payload.messageTemplate.trim() || null,
+        message_before_period: payload.messageBefore,
+        message_after_period: payload.messageAfter,
       }),
     });
     state.selectedUsers.clear();

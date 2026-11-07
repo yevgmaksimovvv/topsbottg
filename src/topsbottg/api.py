@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 import urllib.request
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -32,16 +31,23 @@ from topsbottg.schemas import (
 )
 from topsbottg.security import InitDataError, validate_telegram_init_data
 from topsbottg.services import (
+    ADMIN_EVENT_PING,
+    ADMIN_EVENTS_KEEPALIVE_SECONDS,
+    ADMIN_EVENTS_TOKEN_TTL_SECONDS,
     add_recipients,
     cancel_payout,
     cancel_recipient,
     complete_payout,
+    configure_admin_events,
+    consume_admin_events_token,
     create_payout,
     format_payout_period_label,
+    get_admin_events_broadcaster,
     get_payment_profile_for_admin_reveal,
     get_payout,
     get_payout_recipients,
     get_user_by_id,
+    issue_admin_events_token,
     list_payouts,
     list_users,
     log_audit,
@@ -49,13 +55,6 @@ from topsbottg.services import (
     retry_failed_recipient,
     send_selected_payout,
     set_payout_sending,
-    ADMIN_EVENT_PING,
-    ADMIN_EVENTS_KEEPALIVE_SECONDS,
-    ADMIN_EVENTS_TOKEN_TTL_SECONDS,
-    consume_admin_events_token,
-    configure_admin_events,
-    get_admin_events_broadcaster,
-    issue_admin_events_token,
     update_payout,
 )
 
@@ -145,6 +144,8 @@ def serialize_payout(payout: Payout) -> PayoutOut:
             payout.period_end_month,
         ),
         message_template=payout.message_template,
+        message_before_period=payout.message_before_period,
+        message_after_period=payout.message_after_period,
         status=payout.status,
         created_by_telegram_id=payout.created_by_telegram_id,
         created_at=payout.created_at,
@@ -203,7 +204,7 @@ async def _admin_events_stream(*, token_hash: str | None = None):
             try:
                 message = await asyncio.wait_for(queue.get(), timeout=ADMIN_EVENTS_KEEPALIVE_SECONDS)
                 yield _sse_frame(message["event"], message["payload"])
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 yield _sse_frame(ADMIN_EVENT_PING, {})
     finally:
         broadcaster.unsubscribe(queue)
@@ -569,7 +570,12 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             )
             raise HTTPException(status_code=404, detail="payout not found")
         try:
-            payout = await update_payout(session, payout, actor_telegram_id=telegram_id, payload=payload.model_dump())
+            payout = await update_payout(
+                session,
+                payout,
+                actor_telegram_id=telegram_id,
+                payload=payload.model_dump(exclude_unset=True),
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         await session.commit()
