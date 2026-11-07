@@ -83,7 +83,9 @@ timeout "$COMPOSE_TIMEOUT_SECONDS"s docker compose --project-name "$PROJECT_NAME
   up -d --no-deps --wait --wait-timeout "$HEALTH_TIMEOUT_SECONDS" app
 
 log "Verifying Alembic reached head."
-timeout 30s compose exec -T app alembic current | grep -q '(head)' || fail "Alembic is not at head. Do not run downgrade automatically."
+timeout 30s docker compose --project-name "$PROJECT_NAME" --project-directory "$RELEASE_DIR" \
+  --env-file "$PROJECT_DIR/.env" exec -T app alembic current \
+  | grep -q '(head)' || fail "Alembic is not at head. Do not run downgrade automatically."
 
 log "Fast-forwarding the production checkout after the new app is healthy."
 git merge --ff-only "$DEPLOY_SHA"
