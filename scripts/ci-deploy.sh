@@ -16,10 +16,15 @@ REMOTE_RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
 : "${DEPLOY_USER:?DEPLOY_USER is required}"
 : "${DEPLOY_KNOWN_HOSTS:?DEPLOY_KNOWN_HOSTS is required}"
 : "${SSH_PRIVATE_KEY:?SSH_PRIVATE_KEY is required}"
-[[ "$DEPLOY_PORT" =~ ^[0-9]+$ ]] && (( DEPLOY_PORT > 0 && DEPLOY_PORT < 65536 )) || {
+if [[ ! "$DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]]; then
   echo "DEPLOY_PORT must be between 1 and 65535." >&2
   exit 2
-}
+fi
+port_number=$((10#$DEPLOY_PORT))
+if (( port_number < 1 || port_number > 65535 )); then
+  echo "DEPLOY_PORT must be between 1 and 65535." >&2
+  exit 2
+fi
 
 key_file="$(mktemp)"
 known_hosts_file="$(mktemp)"

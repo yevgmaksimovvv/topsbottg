@@ -45,6 +45,8 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
 fi
 
 log "Checking PostgreSQL readiness."
+# These environment variables are intentionally expanded by the shell inside the postgres container.
+# shellcheck disable=SC2016
 timeout 20s docker compose exec -T postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 
 log "Creating a database backup before any code update or migration."

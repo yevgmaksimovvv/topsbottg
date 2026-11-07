@@ -130,7 +130,9 @@ jobs:
           : "${DEPLOY_USER:?Set production variable DEPLOY_USER}"
           : "${DEPLOY_KNOWN_HOSTS:?Set production variable DEPLOY_KNOWN_HOSTS}"
           : "${SSH_PRIVATE_KEY:?Set production secret DEPLOY_SSH_PRIVATE_KEY}"
-          [[ "$DEPLOY_PORT" =~ ^[0-9]+$ ]] && (( DEPLOY_PORT > 0 && DEPLOY_PORT < 65536 ))
+          [[ "$DEPLOY_PORT" =~ ^[0-9]{1,5}$ ]]
+          port_number=$((10#$DEPLOY_PORT))
+          (( port_number > 0 && port_number < 65536 ))
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
 
       - name: Deploy exact CI-verified commit
