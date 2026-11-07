@@ -53,6 +53,7 @@ server {
     }
 
     location /miniapp/ {
+        add_header X-Content-Type-Options nosniff always;
         add_header Cache-Control "no-store" always;
         alias /usr/share/nginx/html/miniapp/;
         try_files $uri $uri/ /miniapp/index.html;

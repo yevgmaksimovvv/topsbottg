@@ -1,5 +1,5 @@
 import { AUTO_HIDE_TOAST_MS, COMPOSER_IDS, MOBILE_QUERY, USERS_LIMIT } from "./constants.js";
-import { composerPeriodLabel } from "./message-limit.mjs";
+import { composerPeriodLabel } from "./message-limit.js";
 
 export const state = {
   isTelegramEnvironment: Boolean(window.Telegram?.WebApp),

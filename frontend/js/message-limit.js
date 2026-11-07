@@ -19,7 +19,7 @@ export function composerMessageText(composer) {
 }
 
 export function countComposerMessage(composer) {
-  return countCharacters(composerMessageText(composer));
+  return countCharacters(composer.messageBefore) + PAYOUT_PERIOD_RESERVED_LENGTH + countCharacters(composer.messageAfter);
 }
 
 export function fitInsertion({ currentText, start, end, insertedText, otherText }) {

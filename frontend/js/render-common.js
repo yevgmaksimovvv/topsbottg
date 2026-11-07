@@ -4,7 +4,7 @@ import {
   MAX_PAYOUT_MESSAGE_LENGTH,
   composerMessageText,
   countComposerMessage,
-} from "./message-limit.mjs";
+} from "./message-limit.js";
 import { badgeClassForStatus, emptyStateMarkup, escapeHtml, formatTime, statusLabel } from "./utils.js";
 
 function setTextAll(ids, text) {

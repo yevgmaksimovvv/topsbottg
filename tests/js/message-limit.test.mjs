@@ -9,7 +9,7 @@ import {
   countComposerMessage,
   fitInsertion,
   truncateCharacters,
-} from "../../frontend/js/message-limit.mjs";
+} from "../../frontend/js/message-limit.js";
 
 const period = "01.02 \u2013 28.02";
 
@@ -80,10 +80,32 @@ test("editing partial dates always reserves all 13 period characters", () => {
   });
 
   assert.equal(PAYOUT_PERIOD_RESERVED_LENGTH, 13);
-  assert.equal(countCharacters(composer.messageBefore + composer.messageAfter) + PAYOUT_PERIOD_RESERVED_LENGTH, 3500);
+  assert.equal(countComposerMessage(composer), 3500);
+  assert.equal(countComposerMessage(completedDates), 3500);
   assert.equal(result.acceptedText, "");
   assert.equal(composer.messageBefore, completedDates.messageBefore);
   assert.equal(composer.messageAfter, completedDates.messageAfter);
+});
+
+test("counter and available input budget agree while dates are partially filled", () => {
+  const composer = {
+    messageBefore: "a".repeat(1000),
+    periodStart: "1",
+    periodEnd: "2",
+    messageAfter: "b".repeat(1000),
+  };
+  const available = MAX_PAYOUT_MESSAGE_LENGTH - countComposerMessage(composer);
+  const insertion = fitInsertion({
+    currentText: composer.messageAfter,
+    start: composer.messageAfter.length,
+    end: composer.messageAfter.length,
+    insertedText: "x".repeat(available + 1),
+    otherText: composer.messageBefore,
+  });
+
+  assert.equal(available, 1487);
+  assert.equal(insertion.acceptedText.length, available);
+  assert.equal(countComposerMessage({ ...composer, messageAfter: insertion.text }), MAX_PAYOUT_MESSAGE_LENGTH);
 });
 
 test("textarea values preserve one trailing newline in the final message", () => {

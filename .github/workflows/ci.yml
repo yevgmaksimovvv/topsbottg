@@ -70,6 +70,24 @@ jobs:
       - name: Test payout message length helpers
         run: node --test tests/js/*.test.mjs
 
+      - name: Check JavaScript modules through Nginx
+        shell: bash
+        run: |
+          docker run --rm -d --name ci-nginx-mime-check \
+            --add-host app:127.0.0.1 \
+            -p 127.0.0.1:18081:80 \
+            -e APP_DOMAIN=localhost \
+            -v "$GITHUB_WORKSPACE/nginx/nginx.conf:/etc/nginx/nginx.conf:ro" \
+            -v "$GITHUB_WORKSPACE/nginx/templates:/etc/nginx/templates:ro" \
+            -v "$GITHUB_WORKSPACE/frontend:/usr/share/nginx/html/miniapp:ro" \
+            nginx:1.27-alpine
+          trap 'docker rm -f ci-nginx-mime-check >/dev/null 2>&1 || true' EXIT
+          for attempt in {1..20}; do
+            if curl --silent --fail http://127.0.0.1:18081/miniapp/ >/dev/null; then break; fi
+            sleep 1
+          done
+          NGINX_BASE_URL=http://127.0.0.1:18081 uv run --locked python scripts/check_nginx_mime.py
+
       - name: Apply Alembic migrations
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/topsbottg

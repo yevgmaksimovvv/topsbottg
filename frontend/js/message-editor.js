@@ -5,7 +5,7 @@ import {
   PAYOUT_PERIOD_RESERVED_LENGTH,
   countCharacters,
   fitInsertion,
-} from "./message-limit.mjs";
+} from "./message-limit.js";
 import { state, syncComposerFields } from "./store.js";
 
 const composingEditors = new WeakSet();
