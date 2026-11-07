@@ -161,6 +161,29 @@ docker compose logs -f nginx
 - audit log не должен содержать платежные реквизиты;
 - банковская оплата выполняется вне сервиса.
 
+## Автоматический production deploy
+
+После merge PR каждый push в `main` проходит workflow `CI`. Job `Deploy production` запускается только после успешных проверок, использует тот же SHA и подключается к VPS как `deploy` в `/home/deploy/apps/topsbottg`. В GitHub создайте Environment `production` и добавьте настройки именно в него:
+
+- Secret `DEPLOY_SSH_PRIVATE_KEY` — отдельный приватный OpenSSH ключ CI.
+- Variables `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER` — адрес VPS, SSH порт и пользователь `deploy`.
+- Variable `DEPLOY_KNOWN_HOSTS` — доверенная строка ключа хоста из `known_hosts`. Для нестандартного порта формат записи: `[host]:port ssh-ed25519 AAAA...`.
+
+Однократная настройка с Windows PowerShell (укажите реальный адрес VPS и порт):
+
+```powershell
+ssh-keygen -t ed25519 -C "topsbottg-github-actions-production" -f "$env:USERPROFILE\.ssh\topsbottg-production" -N ""
+Get-Content "$env:USERPROFILE\.ssh\topsbottg-production.pub" | ssh deploy@VPS "umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys"
+ssh-keygen -lf "$env:USERPROFILE\.ssh\topsbottg-production.pub"
+ssh-keyscan -p 22 -t ed25519 VPS
+```
+
+Сверьте отпечаток `ssh-keyscan` с доверенным отпечатком VPS (на сервере: `sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`) и сохраните выданную строку в `DEPLOY_KNOWN_HOSTS`. Не добавляйте приватный файл `topsbottg-production` в репозиторий. В **Settings → Environments → New environment** создайте `production` и задайте Secret/Variables выше.
+
+Workflow не запускает параллельные deploy и откажется выкладывать SHA, если `origin/main` успел продвинуться. VPS должен иметь Git, Docker Compose plugin, `curl`, GNU `timeout`, доступ к GitHub по HTTPS и production `.env`. Скрипт проверяет БД, создаёт SQL backup до изменения кода/миграций, применяет только fast-forward, ждёт здоровья app, проверяет Alembic, Mini App и заголовки JavaScript, затем обновляет только Compose-сервис `nginx`. Успешный SHA хранится в `.deployed-sha`.
+
+При ошибке workflow покажет последние логи `app` и `nginx`. Сначала сохраните логи и выясните причину; не запускайте автоматический `alembic downgrade`. Для восстановления проверьте `.deployed-sha`, рабочее дерево и файлы `backups/topsbottg-*.sql`; восстановление БД выполняйте только после согласования с оператором БД и выбора подходящего backup. Исправленную версию поставляйте новым PR в `main`. Возврат приложения к прежней версии допустим отдельным forward commit после проверки совместимости схемы. Автоматического отката миграций или восстановления БД нет.
+
 ## Operational notes
 
 - app делает миграции на старте контейнера;

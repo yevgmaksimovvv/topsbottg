@@ -8,16 +8,18 @@ on:
       - opened
       - synchronize
       - reopened
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
 
-concurrency:
-  group: ci-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
 jobs:
   checks:
+    concurrency:
+      group: ci-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -95,3 +97,64 @@ jobs:
 
       - name: Build Docker image
         run: docker build --tag topsbottg:ci .
+
+  deploy:
+    name: Deploy production
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: checks
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 15
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Validate production connection settings
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${DEPLOY_HOST:?Set production variable DEPLOY_HOST}"
+          : "${DEPLOY_PORT:?Set production variable DEPLOY_PORT}"
+          : "${DEPLOY_USER:?Set production variable DEPLOY_USER}"
+          : "${DEPLOY_KNOWN_HOSTS:?Set production variable DEPLOY_KNOWN_HOSTS}"
+          : "${SSH_PRIVATE_KEY:?Set production secret DEPLOY_SSH_PRIVATE_KEY}"
+          [[ "$DEPLOY_PORT" =~ ^[0-9]+$ ]] && (( DEPLOY_PORT > 0 && DEPLOY_PORT < 65536 ))
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+      - name: Deploy exact CI-verified commit
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.DEPLOY_KNOWN_HOSTS }}
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_file="$(mktemp)"
+          known_hosts_file="$(mktemp)"
+          trap 'rm -f "$key_file" "$known_hosts_file"' EXIT
+          umask 077
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$key_file"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$known_hosts_file"
+          chmod 600 "$key_file" "$known_hosts_file"
+          echo "Deploying commit $GITHUB_SHA to production."
+          timeout 12m ssh \
+            -i "$key_file" \
+            -p "$DEPLOY_PORT" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$known_hosts_file" \
+            -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=3 \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "bash /home/deploy/apps/topsbottg/scripts/deploy-production.sh '$GITHUB_SHA'"
+          echo "Production deploy completed for $GITHUB_SHA."
