@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import selectinload
 
-from topsbottg.models import Payout, PayoutRecipient, PayoutStatus, RecipientStatus
+from topsbottg.models import Payout, PayoutReadyNotification, PayoutRecipient, PayoutStatus, RecipientStatus
 from topsbottg.services import (
     ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
     claim_pending_recipients,
@@ -116,14 +116,64 @@ async def deliver_ready_notifications(bot: MessageSender, session_factory: async
         notifications = [(row.id, row.telegram_id, row.message) for row in rows]
         await session.commit()
     for message_id, chat_id, message in notifications:
-        error: Exception | None = None
-        try:
-            await bot.send_message(chat_id, message)
-        except Exception as exc:  # noqa: BLE001
-            error = exc
-        async with session_factory() as session:
+        await deliver_ready_notification(bot, session_factory, message_id, chat_id, message)
+
+
+async def deliver_ready_notification(
+    bot: MessageSender, session_factory: async_sessionmaker, message_id: int, chat_id: int, message: str
+) -> None:
+    async with session_factory() as session:
+        notification = await session.get(PayoutReadyNotification, message_id)
+        if notification is None:
+            return
+        async with payout_send_lock(notification.payout_id, session):
+            notification = await session.scalar(
+                select(PayoutReadyNotification)
+                .where(PayoutReadyNotification.id == message_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            payout = (
+                await session.scalar(
+                    select(Payout)
+                    .where(Payout.id == notification.payout_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if notification is not None
+                else None
+            )
+            if (
+                notification is None
+                or notification.delivered_at is not None
+                or notification.discarded_at is not None
+            ):
+                return
+            statuses = list(
+                await session.scalars(
+                    select(PayoutRecipient.status).where(PayoutRecipient.payout_id == notification.payout_id)
+                )
+            )
+            active = [status for status in statuses if status != RecipientStatus.cancelled.value]
+            ready = (
+                payout is not None
+                and payout.deleted_at is None
+                and payout.status in {PayoutStatus.sent.value, PayoutStatus.partially_failed.value}
+                and active
+                and RecipientStatus.payment_received.value in active
+                and all(
+                    status in {RecipientStatus.payment_received.value, RecipientStatus.paid.value} for status in active
+                )
+            )
+            if not ready:
+                await settle_ready_notification(session, message_id, discard=True)
+                return
+            error: Exception | None = None
+            try:
+                await bot.send_message(chat_id, message)
+            except Exception as exc:  # noqa: BLE001
+                error = exc
             await settle_ready_notification(session, message_id, error)
-            await session.commit()
 
 
 async def run_worker(bot: Bot, session_factory: async_sessionmaker, settings, stop_event: asyncio.Event) -> None:

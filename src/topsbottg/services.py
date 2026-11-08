@@ -1723,9 +1723,8 @@ async def claim_ready_notifications(session: AsyncSession, limit: int = 5) -> li
         select(PayoutReadyNotification)
         .join(Payout)
         .where(
-            Payout.deleted_at.is_(None),
-            Payout.status.in_([PayoutStatus.sent.value, PayoutStatus.partially_failed.value]),
             PayoutReadyNotification.delivered_at.is_(None),
+            PayoutReadyNotification.discarded_at.is_(None),
             or_(
                 PayoutReadyNotification.next_attempt_at.is_(None),
                 PayoutReadyNotification.next_attempt_at <= now,
@@ -1744,11 +1743,22 @@ async def claim_ready_notifications(session: AsyncSession, limit: int = 5) -> li
     return rows
 
 
-async def settle_ready_notification(session: AsyncSession, message_id: int, error: Exception | None = None) -> None:
+async def settle_ready_notification(
+    session: AsyncSession,
+    message_id: int,
+    error: Exception | None = None,
+    *,
+    discard: bool = False,
+) -> None:
     row = await session.get(PayoutReadyNotification, message_id)
     if row is None or row.delivered_at is not None:
         return
     row.claimed_until = None
+    if discard:
+        row.discarded_at = utcnow()
+        row.last_error = "Payout is no longer ready for payment."
+        await session.flush()
+        return
     row.attempts += 1
     if error is None:
         row.delivered_at = utcnow()
