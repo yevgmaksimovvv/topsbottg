@@ -1,5 +1,5 @@
 import { state, canUseApi, $, payoutPeriodLabel } from "./store.js";
-import { PAYOUT_STATUS_LABELS } from "./constants.js";
+import { PAYOUT_WORKFLOW_LABELS } from "./constants.js";
 import {
   composerMessageText,
   countComposerMessage,
@@ -23,7 +23,7 @@ export function renderPayoutsInto(id = "payouts-list") {
   root.innerHTML = list
     .map(
       (p) =>
-        `<button type="button" class="payout-row" data-payout-id="${Number(p.id)}"><span class="payout-main"><strong>#${Number(p.id)} · ${escapeHtml(payoutPeriodLabel(p) || "Период не задан")}</strong><span>${escapeHtml(nameFor(PAYOUT_STATUS_LABELS, p.status))}</span></span><span class="current-marker">${Number(p.id) === Number(state.selectedPayoutId) ? "Текущая" : "Выбрать"}</span></button>`,
+        `<button type="button" class="payout-row" data-payout-id="${Number(p.id)}"><span class="payout-main"><strong>#${Number(p.id)} · ${escapeHtml(payoutPeriodLabel(p) || "Период не задан")}</strong><span>${escapeHtml(nameFor(PAYOUT_WORKFLOW_LABELS, p.workflow_state))}</span><small>\u0412\u044b\u043f\u043b\u0430\u0447\u0435\u043d\u043e: ${Number(p.paid_recipient_count || 0)} \u0438\u0437 ${Number(p.recipient_count || 0)}</small></span><span class="current-marker">${Number(p.id) === Number(state.selectedPayoutId) ? "Текущая" : "Выбрать"}</span></button>`,
     )
     .join("");
 }
@@ -32,16 +32,12 @@ export function renderPayouts() {
 }
 export function renderCurrentPayout() {
   const p = state.selectedPayoutDetail?.payout;
-  const context = p
-    ? `Текущая: #${state.selectedPayoutId} · ${payoutPeriodLabel(p)} · ${nameFor(PAYOUT_STATUS_LABELS, p.status)}`
-    : "Текущая выплата не выбрана.";
-  for (const id of [
-    "history-current-context",
-    "selection-payout-context",
-    "recipients-context",
-  ]) {
+  const label = p ? `\u0422\u0435\u043a\u0443\u0449\u0430\u044f: #${state.selectedPayoutId} \u00b7 ${payoutPeriodLabel(p)} \u00b7 ${nameFor(PAYOUT_WORKFLOW_LABELS, p.workflow_state)} \u00b7 \u0412\u044b\u043f\u043b\u0430\u0447\u0435\u043d\u043e: ${Number(p.paid_recipient_count || 0)} \u0438\u0437 ${Number(p.recipient_count || 0)}` : "";
+  const history = $("history-current-context");
+  if (history) history.innerHTML = p ? `<span>${escapeHtml(label)}</span><button type="button" class="button button-quiet" data-action="clear-payout">\u0421\u043d\u044f\u0442\u044c \u0432\u044b\u0431\u043e\u0440</button>` : "";
+  for (const id of ["selection-payout-context", "recipients-context"]) {
     const el = $(id);
-    if (el) el.textContent = context;
+    if (el) { el.textContent = label; el.classList.toggle("hidden", !p); }
   }
 }
 export function renderActionState() {
@@ -68,17 +64,9 @@ export function renderPreview() {
   if (n)
     n.textContent = `${countComposerMessage(state.composer)} / ${MAX_PAYOUT_MESSAGE_LENGTH}`;
   const p = $("preview");
-  if (p) {
-    p.classList.toggle("hidden", !state.previewOpen);
-    if (state.previewOpen) p.textContent = composerMessageText(state.composer);
-  }
+  if (p) p.textContent = composerMessageText(state.composer);
   const toggle = document.querySelector('[data-action="toggle-preview"]');
-  if (toggle) {
-    toggle.textContent = state.previewOpen
-      ? "Скрыть сообщение"
-      : "Посмотреть сообщение";
-    toggle.setAttribute("aria-expanded", String(state.previewOpen));
-  }
+  if (toggle) toggle.setAttribute("aria-expanded", String(state.previewOpen));
 }
 export function renderNotifications() {
   const el = $("toast");

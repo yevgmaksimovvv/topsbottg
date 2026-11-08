@@ -71,6 +71,7 @@ async function readErrorMessage(response) {
   }
   if (response.status === 401) return AUTH_REQUIRED_ERROR;
   if (response.status === 403) return FORBIDDEN_ERROR;
+  if (response.status === 409) return "\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b \u0438\u0437\u043c\u0435\u043d\u0438\u043b\u0438\u0441\u044c. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0430\u043a\u0442\u0443\u0430\u043b\u044c\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435 \u043f\u0435\u0440\u0435\u0434 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435\u043c \u043e\u043f\u043b\u0430\u0442\u044b";
   if (isJsonResponse(response)) {
     try {
       const data = await response.json();
@@ -302,6 +303,24 @@ export async function fetchSelectedPayoutSnapshot(payoutId) {
     renderSelectedPayoutView();
   }
   return { detail, recipients };
+}
+
+export function clearPayoutSelection() {
+  const payoutId = Number(state.selectedPayoutId);
+  const payoutIds = new Set([...state.selectedUsersByPayout.keys(), ...(payoutId ? [payoutId] : [])]);
+  for (const id of payoutIds)
+    state.selectionGenerationByPayout.set(id, (state.selectionGenerationByPayout.get(id) || 0) + 1);
+  state.selectedPayoutRequestId += 1;
+  state.selectedPayoutId = null;
+  state.selectedPayoutDetail = null;
+  state.recipients = [];
+  state.recipientsLoadError = null;
+  state.selectedUsers.clear();
+  state.selectedUsersByPayout.clear();
+  state.expandedRecipients.clear();
+  state.recipientOperationError = {};
+  state.loading.recipients = false;
+  renderApp();
 }
 
 export function scheduleSelectedPayoutRefresh({ silent = true } = {}) {
@@ -568,12 +587,13 @@ async function selectPayout(id, { requireSuccessfulLoad = false } = {}) {
   return loadedForTarget;
 }
 
-async function markPaid(recipientId) {
+async function markPaid(recipientId, expectedSnapshotVersion) {
   if (!canUseApi() || !state.selectedPayoutId) return;
   if (markPaidInFlight) return;
   const payoutId = Number(state.selectedPayoutId);
+  const payoutRequestId = state.selectedPayoutRequestId;
   const id = Number(recipientId);
-  const isCurrentPayout = () => Number(state.selectedPayoutId) === payoutId;
+  const isCurrentPayout = () => Number(state.selectedPayoutId) === payoutId && state.selectedPayoutRequestId === payoutRequestId;
   markPaidInFlight = true;
   setLoadingAndRender("markPaid", true);
   state.loadingRecipientId = id;
@@ -583,7 +603,7 @@ async function markPaid(recipientId) {
       `/admin/payouts/${payoutId}/recipients/${id}/mark-paid`,
       {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify({ expected_snapshot_version: expectedSnapshotVersion }),
       },
     );
     if (isCurrentPayout()) {

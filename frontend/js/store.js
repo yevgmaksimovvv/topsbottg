@@ -19,6 +19,7 @@ export const state = {
   recipientsLoadError: null,
   selectedUsers: new Set(),
   selectedUsersByPayout: new Map(),
+  selectionGenerationByPayout: new Map(),
   selectedPayoutId: null,
   selectedPayoutDetail: null,
   composer: {

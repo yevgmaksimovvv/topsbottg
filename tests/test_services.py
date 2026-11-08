@@ -12,8 +12,9 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import select
 
-from topsbottg.models import AuditLog, PayoutRecipient, PayoutStatus, RecipientStatus
+from topsbottg.models import AuditLog, Payout, PayoutRecipient, PayoutStatus, RecipientStatus
 from topsbottg.services import (
+    SnapshotVersionConflict,
     add_recipients,
     cancel_recipient,
     claim_pending_recipients,
@@ -24,6 +25,7 @@ from topsbottg.services import (
     get_or_create_user,
     list_users,
     mark_paid,
+    payout_workflow_state,
     recover_stale_sending,
     retry_failed_recipient,
     save_payment_reply,
@@ -36,6 +38,32 @@ from topsbottg.services import (
     upsert_payment_profile,
     validate_message_template,
 )
+
+
+@pytest.mark.parametrize(
+    ("payout_status", "recipient_statuses", "expected"),
+    [
+        ("draft", ["paid"], "draft"),
+        ("sending", ["payment_received"], "sending"),
+        ("sent", [], "no_recipients"),
+        ("sent", ["failed", "paid"], "delivery_errors"),
+        ("sent", ["payment_received", "payment_received"], "ready_for_payment"),
+        ("sent", ["payment_received", "paid"], "ready_for_payment"),
+        ("sent", ["paid", "paid"], "paid"),
+        ("sent", ["payment_received", "sent"], "awaiting_confirmation"),
+        ("cancelled", ["paid"], "cancelled"),
+    ],
+)
+def test_payout_workflow_state(payout_status, recipient_statuses, expected):
+    payout = Payout(status=payout_status)
+    recipients = [PayoutRecipient(status=status) for status in recipient_statuses]
+    assert payout_workflow_state(payout, recipients) == expected
+
+
+def test_payout_workflow_state_rejects_unknown_recipient_status():
+    payout = Payout(status=PayoutStatus.sent.value)
+    with pytest.raises(ValueError, match="unsupported recipient status"):
+        payout_workflow_state(payout, [PayoutRecipient(status="unexpected")])
 
 
 def _events(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
@@ -708,6 +736,95 @@ async def test_mark_paid_service(session_factory, monkeypatch: pytest.MonkeyPatc
         assert recipient.status == RecipientStatus.paid.value
         assert recipient.paid_by_admin_id == 123
     assert events == [("payout_recipients_changed", {"payout_id": payout.id, "reason": "mark_paid"})]
+
+
+@pytest.mark.asyncio
+async def test_mark_paid_rejects_stale_snapshot_version_without_mutation(session_factory):
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 111, "user")
+        payout = await create_payout(session, actor_telegram_id=123, payload=_payout_payload())
+        [recipient] = await add_recipients(session, payout, [user.id])
+        recipient.status = RecipientStatus.payment_received.value
+        recipient.payment_profile_snapshot = {"raw_payment_details": "new details"}
+        recipient.payment_snapshot_version = 2
+        await session.commit()
+    async with session_factory() as session:
+        recipient = await session.get(PayoutRecipient, recipient.id)
+        recipient_id = recipient.id
+        with pytest.raises(SnapshotVersionConflict):
+            await mark_paid(
+                session,
+                recipient,
+                actor_telegram_id=123,
+                expected_snapshot_version=1,
+            )
+        await session.rollback()
+    async with session_factory() as session:
+        unchanged = await session.get(PayoutRecipient, recipient_id)
+        assert unchanged.status == RecipientStatus.payment_received.value
+        assert unchanged.payment_snapshot_version == 2
+        assert unchanged.payment_profile_snapshot == {"raw_payment_details": "new details"}
+
+
+@pytest.mark.asyncio
+async def test_profile_edit_updates_only_confirmed_unpaid_active_snapshots(session_factory):
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 111, "user")
+        await upsert_payment_profile(session, user, "old details")
+        active_payout = await create_payout(session, actor_telegram_id=123, payload=_payout_payload())
+        [active] = await add_recipients(session, active_payout, [user.id])
+        active_payout.status = PayoutStatus.sent.value
+        active.status = RecipientStatus.payment_received.value
+        active.payment_profile_snapshot = {"raw_payment_details": "old details"}
+        active.payment_snapshot_version = 1
+        second_active_payout = await create_payout(session, actor_telegram_id=123, payload=_payout_payload())
+        [second_active] = await add_recipients(session, second_active_payout, [user.id])
+        second_active_payout.status = PayoutStatus.partially_failed.value
+        second_active.status = RecipientStatus.payment_received.value
+        second_active.payment_profile_snapshot = {"raw_payment_details": "old details"}
+        second_active.payment_snapshot_version = 1
+        paid_payout = await create_payout(session, actor_telegram_id=123, payload=_payout_payload())
+        [paid] = await add_recipients(session, paid_payout, [user.id])
+        paid_payout.status = PayoutStatus.sent.value
+        paid.status = RecipientStatus.paid.value
+        paid.payment_profile_snapshot = {"raw_payment_details": "old details"}
+        paid.payment_snapshot_version = 1
+        closed_payout = await create_payout(session, actor_telegram_id=123, payload=_payout_payload())
+        [closed] = await add_recipients(session, closed_payout, [user.id])
+        closed_payout.status = PayoutStatus.completed.value
+        closed.status = RecipientStatus.payment_received.value
+        closed.payment_profile_snapshot = {"raw_payment_details": "old details"}
+        closed.payment_snapshot_version = 1
+        cancelled_payout = await create_payout(session, actor_telegram_id=123, payload=_payout_payload())
+        [cancelled] = await add_recipients(session, cancelled_payout, [user.id])
+        cancelled_payout.status = PayoutStatus.cancelled.value
+        cancelled.status = RecipientStatus.payment_received.value
+        cancelled.payment_profile_snapshot = {"raw_payment_details": "old details"}
+        cancelled.payment_snapshot_version = 1
+        await session.commit()
+    async with session_factory() as session:
+        user = await session.get(type(user), user.id)
+        await save_profile_and_snapshot(session, user=user, payload="new details", active_recipient=None)
+        await session.commit()
+    async with session_factory() as session:
+        user = await session.get(type(user), user.id)
+        await save_profile_and_snapshot(session, user=user, payload="new details", active_recipient=None)
+        await session.commit()
+    async with session_factory() as session:
+        updated = await session.get(PayoutRecipient, active.id)
+        updated_second = await session.get(PayoutRecipient, second_active.id)
+        unchanged_paid = await session.get(PayoutRecipient, paid.id)
+        unchanged_closed = await session.get(PayoutRecipient, closed.id)
+        unchanged_cancelled = await session.get(PayoutRecipient, cancelled.id)
+        assert updated.payment_profile_snapshot == {"raw_payment_details": "new details"}
+        assert updated.payment_snapshot_version == 2
+        assert updated.payment_snapshot_updated_at is not None
+        assert updated.status == RecipientStatus.payment_received.value
+        assert updated_second.payment_profile_snapshot == {"raw_payment_details": "new details"}
+        assert updated_second.payment_snapshot_version == 2
+        assert unchanged_paid.payment_profile_snapshot == {"raw_payment_details": "old details"}
+        assert unchanged_closed.payment_profile_snapshot == {"raw_payment_details": "old details"}
+        assert unchanged_cancelled.payment_profile_snapshot == {"raw_payment_details": "old details"}
 
 
 @pytest.mark.asyncio

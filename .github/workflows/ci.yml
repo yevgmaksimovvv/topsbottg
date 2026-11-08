@@ -55,6 +55,8 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Run pytest
+        env:
+          POSTGRES_TEST_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/topsbottg
         run: uv run --locked python -m pytest -q
 
       - name: Run Ruff

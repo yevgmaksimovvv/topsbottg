@@ -60,6 +60,9 @@ test("responsive Mini App and payout workflows", async (t) => {
     {
       id: 38,
       status: "sent",
+      workflow_state: "awaiting_confirmation",
+      paid_recipient_count: 0,
+      recipient_count: 1,
       period_start_day: 1,
       period_start_month: 11,
       period_end_day: 7,
@@ -69,6 +72,9 @@ test("responsive Mini App and payout workflows", async (t) => {
     {
       id: 40,
       status: "draft",
+      workflow_state: "draft",
+      paid_recipient_count: 0,
+      recipient_count: 0,
       period_start_day: 8,
       period_start_month: 11,
       period_end_day: 14,
@@ -78,6 +84,9 @@ test("responsive Mini App and payout workflows", async (t) => {
     {
       id: 37,
       status: "sent",
+      workflow_state: "awaiting_confirmation",
+      paid_recipient_count: 0,
+      recipient_count: 1,
       period_start_day: 25,
       period_start_month: 10,
       period_end_day: 31,
@@ -100,6 +109,7 @@ test("responsive Mini App and payout workflows", async (t) => {
   let sendCalls = 0;
   const sentUserIds = [];
   let markPaidCalls = 0;
+  let staleMarkPaid = false;
   let createPayoutCalls = 0;
   const failedPayoutDetails = new Set();
   let server;
@@ -178,7 +188,17 @@ test("responsive Mini App and payout workflows", async (t) => {
         sendCalls += 1;
         sentUserIds.push(req.postDataJSON().user_ids);
       }
-      if (method === "POST" && path.endsWith("/mark-paid")) markPaidCalls += 1;
+      if (method === "POST" && path.endsWith("/mark-paid")) {
+        markPaidCalls += 1;
+        if (staleMarkPaid) {
+          staleMarkPaid = false;
+          return route.fulfill({
+            status: 409,
+            contentType: "application/json",
+            body: JSON.stringify({ detail: "payment_details_changed" }),
+          });
+        }
+      }
       const requestQueue = delayedRequests.get(path);
       const delayedRequest = requestQueue?.shift();
       if (requestQueue && !requestQueue.length) delayedRequests.delete(path);
@@ -236,6 +256,9 @@ test("responsive Mini App and payout workflows", async (t) => {
         data = {
           id: payoutId,
           status: "draft",
+          workflow_state: "draft",
+          paid_recipient_count: 0,
+          recipient_count: 0,
           period_start_day: body.period_start_day,
           period_start_month: body.period_start_month,
           period_end_day: body.period_end_day,
@@ -269,6 +292,8 @@ test("responsive Mini App and payout workflows", async (t) => {
             `Получатель ${userId}`,
           status: "sent",
         }));
+        payout.workflow_state = "awaiting_confirmation";
+        payout.recipient_count = sentRecipients.length;
         data = { payout, recipients: sentRecipients };
       } else if (path.endsWith("/mark-paid")) {
         const id = Number(path.split("/").at(-2));
@@ -285,6 +310,7 @@ test("responsive Mini App and payout workflows", async (t) => {
     });
 
     await page.goto(`http://127.0.0.1:${server.address().port}/miniapp/`);
+    await mkdir(evidence, { recursive: true });
     await page
       .locator('[data-screen="composer"]')
       .waitFor({ state: "visible" });
@@ -421,9 +447,36 @@ test("responsive Mini App and payout workflows", async (t) => {
       ) < 3500,
     );
     await editor.fill("Длинный текст 🙂\n".repeat(50));
-    await page.locator('[data-action="toggle-preview"]').click();
+    await page.locator("#period-start").fill("31.04");
+    assert.equal(
+      await page.locator("#period-start").evaluate((node) => node === document.activeElement),
+      true,
+    );
+    await page.locator("#period-start").fill("01.11");
     await page.locator("#period-end").fill("08.11");
-    assert.match(await editor.inputValue(), /Длинный текст/);
+    assert.equal(
+      await page.locator("#period-end").evaluate((node) => node !== document.activeElement),
+      true,
+    );
+    await page.locator('[data-action="toggle-preview"]').click();
+    assert.equal(await page.locator("#preview-dialog").evaluate((dialog) => dialog.open), true);
+    assert.ok(await page.locator("#preview").evaluate((node) => node.scrollHeight > node.clientHeight));
+    assert.ok((await page.locator("#preview").innerText()).length > 1000);
+    await page.screenshot({ path: resolve(evidence, "light-preview-dialog.png") });
+    await page.evaluate(() => {
+      const webApp = window.Telegram.WebApp;
+      webApp.colorScheme = "dark";
+      for (const callback of webApp.__callbacks.themeChanged || []) callback();
+    });
+    await page.screenshot({ path: resolve(evidence, "dark-preview-dialog.png") });
+    await page.evaluate(() => {
+      const webApp = window.Telegram.WebApp;
+      webApp.colorScheme = "light";
+      for (const callback of webApp.__callbacks.themeChanged || []) callback();
+    });
+    await page.locator('[data-action="close-preview"]').click();
+    assert.equal(await page.locator('[data-action="toggle-preview"]').evaluate((node) => node === document.activeElement), true);
+    assert.ok((await editor.inputValue()).length > 100);
     await page.locator("#period-end").fill("07.11");
     await page.locator('[data-action="create-payout"]').click();
     await page.locator("#create-success").waitFor({ state: "visible" });
@@ -590,18 +643,26 @@ test("responsive Mini App and payout workflows", async (t) => {
     await sendButton.click();
     const sendDialog = page.locator("#confirm-dialog");
     assert.equal(await sendDialog.isVisible(), true);
-    assert.match(
-      await page.locator("#dialog-content").innerText(),
-      /Выплата #39[\s\S]*Получателей: 2/,
-    );
-    assert.match(
-      await page.locator("#dialog-warning").innerText(),
-      /реальные сообщения/,
-    );
+    assert.equal(await page.locator("#dialog-title").innerText(), "\u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u044c \u0440\u0430\u0441\u0441\u044b\u043b\u043a\u0443");
+    assert.equal(await page.locator("#dialog-content").innerText(), "\u0412\u044b\u043f\u043b\u0430\u0442\u0430: #39\n\u041f\u0435\u0440\u0438\u043e\u0434: 01.11 \u2013 07.11\n\u041f\u043e\u043b\u0443\u0447\u0430\u0442\u0435\u043b\u0435\u0439: 2");
+    assert.equal(await page.locator("#dialog-warning").isVisible(), false);
+    assert.equal(await page.locator(".dialog-close").isVisible(), false);
+    assert.equal(await page.locator("#dialog-confirm").innerText(), "\u0420\u0430\u0437\u043e\u0441\u043b\u0430\u0442\u044c 2 \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044f\u043c");
+    await page.screenshot({ path: resolve(evidence, "light-broadcast-confirm.png") });
+    await page.evaluate(() => {
+      const webApp = window.Telegram.WebApp;
+      webApp.colorScheme = "dark";
+      for (const callback of webApp.__callbacks.themeChanged || []) callback();
+    });
+    await page.screenshot({ path: resolve(evidence, "dark-broadcast-confirm.png") });
+    await page.evaluate(() => {
+      const webApp = window.Telegram.WebApp;
+      webApp.colorScheme = "light";
+      for (const callback of webApp.__callbacks.themeChanged || []) callback();
+    });
     assert.equal(
       await page
-        .locator("[data-dialog-cancel]")
-        .first()
+        .locator(".dialog-actions [data-dialog-cancel]")
         .evaluate((element) => element === document.activeElement),
       true,
     );
@@ -623,6 +684,9 @@ test("responsive Mini App and payout workflows", async (t) => {
     await page.locator('.payout-row[data-payout-id="38"]').click();
     await page.locator('[data-mobile-view="recipients"]').click();
     await page.locator("[data-expand-recipient='501']").click();
+    assert.equal(await page.locator("[data-recipient-details='501'] .recipient-detail-name").count(), 0);
+    assert.equal(await page.locator('[data-recipient-row="501"] .recipient-name').count(), 1);
+    assert.equal(await page.locator('[data-recipient-row="501"] .badge').innerText(), "Готов к оплате");
     assert.equal(await page.locator("[data-expand-recipient='501']").getAttribute("aria-expanded"), "true", await page.locator("[data-recipient-row='501']").evaluate((node) => node.outerHTML));
     await page.locator("[data-filter='problems']").click();
     assert.equal(await page.locator("[data-recipient-row]").count(), 1);
@@ -967,7 +1031,7 @@ test("responsive Mini App and payout workflows", async (t) => {
     await paymentSuccessStarted;
     assert.equal(
       await page.locator('[data-recipient-row="501"] .badge').innerText(),
-      "Данные подтверждены · к оплате",
+      "\u0413\u043e\u0442\u043e\u0432 \u043a \u043e\u043f\u043b\u0430\u0442\u0435",
     );
     await page.keyboard.press("Escape");
     await selectPayout(40);
@@ -1215,6 +1279,60 @@ test("responsive Mini App and payout workflows", async (t) => {
     assert.match(await page.locator("#selection-payout-context").innerText(), /#41/);
     assert.match(await page.locator("#recipients-context").innerText(), /#41/);
 
+    await page.locator('[data-mobile-view="payouts"]').click();
+    const delayedClearRefresh = delayNextRequest("/api/admin/payouts/41");
+    const delayedClearStarted = page.waitForRequest(
+      (request) => new URL(request.url()).pathname === "/api/admin/payouts/41",
+    );
+    await page.evaluate(() => window.__adminEvents.dispatchEvent(
+      new MessageEvent("payout_changed", { data: JSON.stringify({ payout_id: 41 }) }),
+    ));
+    await delayedClearStarted;
+    await page.locator('[data-action="clear-payout"]').click();
+    assert.equal((await readPayoutState()).selectedPayoutId, 0);
+    assert.equal(await page.locator("#recipients-state").innerText(), "Выберите выплату в истории Открыть историю");
+    assert.equal(await page.locator("#recipient-summary").isVisible(), false);
+    assert.equal(await page.locator("#recipient-filters").isVisible(), false);
+    assert.equal(await page.locator("#recipients-list").isVisible(), false);
+    delayedClearRefresh.release();
+    const delayedClearResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/admin/payouts/41",
+    );
+    await delayedClearResponse;
+    await page.evaluate(() => window.__adminEvents.dispatchEvent(
+      new MessageEvent("payout_recipients_changed", { data: JSON.stringify({ payout_id: 41 }) }),
+    ));
+    await page.waitForTimeout(30);
+    assert.equal((await readPayoutState()).selectedPayoutId, 0);
+    await page.locator('[data-mobile-view="recipients"]').click();
+    await page.locator('[data-action="open-history"]').click();
+    assert.equal(await page.locator('.nav-button.active').getAttribute("data-mobile-view"), "payouts");
+
+    historicalRecipients = historicalRecipients.map((recipient) => recipient.id === 501
+      ? { ...recipient, status: "payment_received", payment_snapshot_version: 1, payment_snapshot_updated_at: null }
+      : recipient);
+    await selectPayout(38);
+    await page.locator('[data-mobile-view="recipients"]').click();
+    await page.locator("[data-expand-recipient='501']").click();
+    staleMarkPaid = true;
+    await page.locator('[data-action="mark-paid"]').click();
+    historicalRecipients = historicalRecipients.map((recipient) => recipient.id === 501
+      ? { ...recipient, payment_snapshot_version: 2, payment_snapshot_updated_at: "2026-11-08T12:00:00Z", payment_profile_snapshot: { raw_payment_details: "Updated details" } }
+      : recipient);
+    await page.evaluate(() => window.__adminEvents.dispatchEvent(
+      new MessageEvent("payout_recipients_changed", { data: JSON.stringify({ payout_id: 38 }) }),
+    ));
+    await page.locator("#dialog-confirm").click();
+    await page.waitForFunction(() => document.querySelector('[data-recipient-row="501"] .field-error')?.textContent.includes("Реквизиты изменились"));
+    assert.equal(await page.locator('[data-recipient-row="501"] .badge').innerText(), "Готов к оплате");
+    assert.match(await page.locator("[data-recipient-details='501']").innerText(), /Updated details/);
+    assert.match(await page.locator("[data-recipient-details='501']").innerText(), /Реквизиты обновлены/);
+    assert.equal(await page.locator("[data-expand-recipient='501']").getAttribute("aria-expanded"), "true");
+    await page.evaluate(async () => {
+      const { clearNotification } = await import("/miniapp/js/store.js");
+      clearNotification();
+    });
+
     await mkdir(evidence, { recursive: true });
     for (const theme of ["light", "dark"]) {
       await page.evaluate((scheme) => {
@@ -1224,12 +1342,16 @@ test("responsive Mini App and payout workflows", async (t) => {
           callback();
       }, theme);
       for (const [width, height] of [
+        [320, 740],
+        [360, 800],
         [390, 844],
+        [768, 900],
         [1024, 768],
         [1440, 900],
       ]) {
         await page.setViewportSize({ width, height });
         await page.evaluate(() => window.scrollTo(0, 0));
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
         for (const tab of ["composer", "users", "recipients", "payouts"]) {
           await page.locator(`[data-mobile-view="${tab}"]`).click();
           await page.screenshot({
@@ -1240,7 +1362,7 @@ test("responsive Mini App and payout workflows", async (t) => {
     }
     assert.deepEqual(pageErrors, []);
     assert.equal(sendCalls, 3);
-    assert.equal(markPaidCalls, 3);
+    assert.equal(markPaidCalls, 4);
     await t.diagnostic(`Mobile, tablet, and desktop light/dark screenshots saved to ${evidence}`);
     await context.close();
   } finally {

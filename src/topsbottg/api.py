@@ -34,6 +34,7 @@ from topsbottg.services import (
     ADMIN_EVENT_PING,
     ADMIN_EVENTS_KEEPALIVE_SECONDS,
     ADMIN_EVENTS_TOKEN_TTL_SECONDS,
+    SnapshotVersionConflict,
     add_recipients,
     cancel_payout,
     cancel_recipient,
@@ -46,12 +47,14 @@ from topsbottg.services import (
     get_payment_profile_for_admin_reveal,
     get_payout,
     get_payout_recipients,
+    get_payout_recipients_for_payouts,
     get_user_by_id,
     issue_admin_events_token,
     list_payouts,
     list_users,
     log_audit,
     mark_paid,
+    payout_workflow_state,
     retry_failed_recipient,
     send_selected_payout,
     set_payout_sending,
@@ -130,7 +133,8 @@ def serialize_payment_reveal(user: User, profile: PaymentProfile) -> PaymentProf
     )
 
 
-def serialize_payout(payout: Payout) -> PayoutOut:
+def serialize_payout(payout: Payout, recipients: list[PayoutRecipient] | None = None) -> PayoutOut:
+    recipients = recipients or []
     return PayoutOut(
         id=payout.id,
         period_start_day=payout.period_start_day,
@@ -147,6 +151,9 @@ def serialize_payout(payout: Payout) -> PayoutOut:
         message_before_period=payout.message_before_period,
         message_after_period=payout.message_after_period,
         status=payout.status,
+        workflow_state=payout_workflow_state(payout, recipients),
+        paid_recipient_count=sum(recipient.status == "paid" for recipient in recipients),
+        recipient_count=len(recipients),
         created_by_telegram_id=payout.created_by_telegram_id,
         created_at=payout.created_at,
         updated_at=payout.updated_at,
@@ -154,7 +161,7 @@ def serialize_payout(payout: Payout) -> PayoutOut:
 
 
 def serialize_payout_snapshot(payout: Payout, recipients: list[PayoutRecipient]) -> dict[str, object]:
-    payout_out = serialize_payout(payout)
+    payout_out = serialize_payout(payout, recipients)
     return {
         "detail": {"payout": payout_out},
         "payout": payout_out,
@@ -187,6 +194,8 @@ def serialize_recipient(recipient: PayoutRecipient) -> RecipientOut:
         paid_by_admin_id=recipient.paid_by_admin_id,
         paid_note=recipient.paid_note,
         payment_profile_snapshot=recipient.payment_profile_snapshot,
+        payment_snapshot_version=recipient.payment_snapshot_version,
+        payment_snapshot_updated_at=recipient.payment_snapshot_updated_at,
         reply=reply,
     )
 
@@ -465,7 +474,16 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             "Админ запросил список выплат",
             actor_telegram_id=actor_telegram_id,
         )
-        payouts = [serialize_payout(payout) for payout in await list_payouts(session)]
+        payout_rows = await list_payouts(session)
+        grouped_recipients: dict[int, list[PayoutRecipient]] = {}
+        for recipient in await get_payout_recipients_for_payouts(
+            session, [payout.id for payout in payout_rows]
+        ):
+            grouped_recipients.setdefault(recipient.payout_id, []).append(recipient)
+        payouts = [
+            serialize_payout(payout, grouped_recipients.get(payout.id, []))
+            for payout in payout_rows
+        ]
         log_event(
             logger,
             "INFO",
@@ -536,7 +554,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         payout = await get_payout(session, payout_id)
         if payout is None:
             raise HTTPException(status_code=404, detail="payout not found")
-        return {"payout": serialize_payout(payout)}
+        return {"payout": serialize_payout(payout, await get_payout_recipients(session, payout_id))}
 
     @app.patch("/api/admin/payouts/{payout_id}")
     async def admin_update_payout(
@@ -588,7 +606,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             actor_telegram_id=telegram_id,
             payout_id=payout.id,
         )
-        return serialize_payout(payout)
+        return serialize_payout(payout, await get_payout_recipients(session, payout_id))
 
     @app.post("/api/admin/payouts/{payout_id}/recipients")
     async def admin_add_recipients(
@@ -697,7 +715,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             payout_id=payout.id,
             result_status=payout.status,
         )
-        return serialize_payout(payout)
+        return serialize_payout(payout, await get_payout_recipients(session, payout_id))
 
     @app.post("/api/admin/payouts/{payout_id}/send-selected")
     async def admin_send_selected_payout(
@@ -778,7 +796,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             payout_id=payout.id,
             result_status=payout.status,
         )
-        return serialize_payout(payout)
+        return serialize_payout(payout, await get_payout_recipients(session, payout_id))
 
     @app.post("/api/admin/payouts/{payout_id}/cancel")
     async def admin_cancel_payout(
@@ -813,7 +831,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             payout_id=payout.id,
             result_status=payout.status,
         )
-        return serialize_payout(payout)
+        return serialize_payout(payout, await get_payout_recipients(session, payout_id))
 
     @app.post("/api/admin/payouts/{payout_id}/recipients/{recipient_id}/retry")
     async def admin_retry_recipient(
@@ -918,7 +936,10 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
                 actor_telegram_id=telegram_id,
                 paid_at=payload.paid_at,
                 paid_note=payload.paid_note,
+                expected_snapshot_version=payload.expected_snapshot_version,
             )
+        except SnapshotVersionConflict as exc:
+            raise HTTPException(status_code=409, detail="payment_details_changed") from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         await session.commit()

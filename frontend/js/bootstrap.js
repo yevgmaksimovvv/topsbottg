@@ -18,6 +18,7 @@ import {
   loadPayouts,
   loadUsers,
   markPaid,
+  clearPayoutSelection,
   selectPayout,
   startAdminEvents,
   stopAdminEvents,
@@ -30,10 +31,16 @@ import { parsePeriodInput, plural } from "./utils.js";
 
 let lastFocusedElement = null;
 let goSelectionInFlight = false;
+const periodComposing = new WeakSet();
 
 function bindPeriodInput(id, stateKey) {
   const input = document.getElementById(id);
-  input.addEventListener("input", () => {
+  input.addEventListener("compositionstart", () => periodComposing.add(input));
+  input.addEventListener("compositionend", () => {
+    periodComposing.delete(input);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  input.addEventListener("input", (event) => {
     const caret = input.selectionStart ?? input.value.length;
     const digitCount = input.value.slice(0, caret).replace(/\D/g, "").length;
     const digits = input.value.replace(/\D/g, "").slice(0, 4);
@@ -47,10 +54,9 @@ function bindPeriodInput(id, stateKey) {
     input.setSelectionRange(nextCaret, nextCaret);
     state.composer[stateKey] = formatted;
     const error = document.getElementById(`${id}-error`);
-    error.textContent =
-      formatted.length === 5 && !parsePeriodInput(formatted)
-        ? "Проверьте дату."
-        : "";
+    const validCompleteDate = formatted.length === 5 && Boolean(parsePeriodInput(formatted));
+    error.textContent = formatted.length === 5 && !validCompleteDate ? "\u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0434\u0430\u0442\u0443." : "";
+    if (!event.isComposing && !periodComposing.has(input) && validCompleteDate) input.blur();
     document.getElementById("protected-period").textContent =
       `${state.composer.periodStart || "ДД.ММ"} – ${state.composer.periodEnd || "ДД.ММ"}`;
     const preview = document.getElementById("preview");
@@ -88,6 +94,7 @@ function showConfirmation({
   title,
   content,
   warning = "",
+  hideClose = false,
   confirmLabel,
   focusFallback = "",
   onConfirm,
@@ -103,6 +110,8 @@ function showConfirmation({
   const confirmButton = dialog.querySelector("#dialog-confirm");
   confirmButton.textContent = confirmLabel;
   confirmButton.disabled = false;
+  const closeButton = dialog.querySelector(".dialog-close");
+  if (closeButton) closeButton.classList.toggle("hidden", hideClose);
   dialog.querySelectorAll("[data-dialog-cancel]").forEach((button) => {
     button.onclick = () => dialog.close("cancel");
   });
@@ -136,7 +145,7 @@ function showConfirmation({
     { once: true },
   );
   dialog.showModal();
-  dialog.querySelector("[data-dialog-cancel]").focus();
+  dialog.querySelector(".dialog-actions [data-dialog-cancel]").focus();
 }
 
 function bindEvents() {
@@ -178,9 +187,34 @@ function bindEvents() {
     const action = event.target.closest("[data-action]");
     if (action) {
       switch (action.dataset.action) {
-        case "toggle-preview":
-          state.previewOpen = !state.previewOpen;
-          renderApp();
+        case "toggle-preview": {
+          const previewDialog = document.getElementById("preview-dialog");
+          if (!previewDialog.open) {
+            const backButton = telegramWebApp()?.BackButton;
+            const closePreview = () => { if (previewDialog.open) previewDialog.close(); };
+            previewDialog.addEventListener("close", () => {
+              state.previewOpen = false;
+              backButton?.offClick?.(closePreview);
+              backButton?.hide?.();
+              renderApp();
+            }, { once: true });
+            state.previewOpen = true;
+            renderApp();
+            previewDialog.showModal();
+            backButton?.onClick?.(closePreview);
+            backButton?.show?.();
+          }
+          return;
+        }
+        case "close-preview":
+          document.getElementById("preview-dialog")?.close();
+          return;
+        case "clear-payout":
+          clearPayoutSelection();
+          return;
+        case "open-history":
+          state.activeMobileView = "payouts";
+          renderNavigation();
           return;
         case "create-payout":
           await createPayout();
@@ -218,7 +252,9 @@ function bindEvents() {
           return;
         case "send-payout": {
           const payout = state.selectedPayoutDetail?.payout;
-          const count = state.selectedUsers.size;
+          const recipientIds = [...state.selectedUsers];
+          const payoutId = Number(state.selectedPayoutId);
+          const count = recipientIds.length;
           if (
             !canUseApi() ||
             payout?.status !== "draft" ||
@@ -227,20 +263,15 @@ function bindEvents() {
           )
             return;
           showConfirmation({
-            title: "Подтвердить рассылку?",
-            content: `Выплата #${payout.id}\nПериод: ${payoutPeriodLabel(payout)}\nПолучателей: ${count}`,
-            warning: "Будут отправлены реальные сообщения в Telegram.",
-            confirmLabel: `Разослать ${count} ${plural(count, "человеку", "людям", "людям")}`,
+            title: "\u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u044c \u0440\u0430\u0441\u0441\u044b\u043b\u043a\u0443",
+            content: `\u0412\u044b\u043f\u043b\u0430\u0442\u0430: #${payout.id}\n\u041f\u0435\u0440\u0438\u043e\u0434: ${payoutPeriodLabel(payout)}\n\u041f\u043e\u043b\u0443\u0447\u0430\u0442\u0435\u043b\u0435\u0439: ${count}`,
+            hideClose: true,
+            confirmLabel: `\u0420\u0430\u0437\u043e\u0441\u043b\u0430\u0442\u044c ${count} \u043f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044f\u043c`,
             onConfirm: () => {
               const current = state.selectedPayoutDetail?.payout;
-              if (
-                Number(state.selectedPayoutId) !== Number(payout.id) ||
-                current?.status !== "draft" ||
-                !state.selectedUsers.size ||
-                state.loading.sendPayout
-              )
-                return;
-              return sendPayout();
+              const stillSelected = [...state.selectedUsers];
+              if (Number(state.selectedPayoutId) !== payoutId || Number(payout.id) !== payoutId || current?.status !== "draft" || state.loading.sendPayout || stillSelected.length !== recipientIds.length || recipientIds.some((id) => !state.selectedUsers.has(id))) return;
+              return sendPayout(recipientIds);
             },
           });
           return;
@@ -273,7 +304,7 @@ function bindEvents() {
             content: `${recipient.full_name}\nВыплата #${payout.id} · ${payoutPeriodLabel(payout)}`,
             confirmLabel: "Подтвердить оплату",
             focusFallback: `[data-expand-recipient="${Number(recipient.id)}"]`,
-            onConfirm: () => markPaid(Number(recipient.id)),
+            onConfirm: () => markPaid(Number(recipient.id), Number(recipient.payment_snapshot_version || 0)),
           });
           return;
         }

@@ -192,11 +192,12 @@ async def _start_payment_details_flow(
     *,
     actor_telegram_id: int,
     active_recipient_id: int | None = None,
+    confirm_active_recipient: bool = True,
     prompt_text: str | None = None,
     edit_message: bool = False,
     log_edit_failure: bool = False,
 ) -> None:
-    if active_recipient_id is None:
+    if active_recipient_id is None and confirm_active_recipient:
         async with session_factory() as session:
             user = await get_or_create_user(session, actor_telegram_id)
             active_recipient = await get_latest_active_recipient(session, user.id)
@@ -225,6 +226,8 @@ async def _start_payment_details_flow(
     await state.clear()
     await state.set_state(RegistrationFSM.payment_details)
     await state.update_data(active_recipient_id=active_recipient_id)
+    if not confirm_active_recipient:
+        await state.update_data(confirm_active_recipient=False)
     text = prompt_text or payment_details_message()
     if edit_message:
         if message is None:
@@ -265,14 +268,15 @@ async def _save_payment_details(
         return
     data = await state.get_data()
     active_recipient_id = data.get("active_recipient_id")
+    confirm_active_recipient = data.get("confirm_active_recipient", True)
     async with session_factory() as session:
         user = await get_or_create_user(session, message.from_user.id)
         active_recipient = None
-        if active_recipient_id is not None:
+        if confirm_active_recipient and active_recipient_id is not None:
             active_recipient = await session.get(PayoutRecipient, active_recipient_id)
             if active_recipient is not None and active_recipient.user_id != user.id:
                 active_recipient = None
-        if active_recipient is None:
+        if confirm_active_recipient and active_recipient is None:
             active_recipient = await get_latest_active_recipient(session, user.id)
         await save_profile_and_snapshot(
             session,
@@ -457,7 +461,13 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
 
     @router.message(F.text == CHANGE_PAYMENT_DETAILS_BUTTON_TEXT)
     async def change_payment_details(message: Message, state: FSMContext):
-        await _start_payment_details_flow(message, state, session_factory, actor_telegram_id=message.from_user.id)
+        await _start_payment_details_flow(
+            message,
+            state,
+            session_factory,
+            actor_telegram_id=message.from_user.id,
+            confirm_active_recipient=False,
+        )
 
     @router.message(RegistrationFSM.payment_details, F.text)
     async def payment_details(message: Message, state: FSMContext):

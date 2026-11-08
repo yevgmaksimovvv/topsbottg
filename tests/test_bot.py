@@ -13,7 +13,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, WebAppInfo
 from sqlalchemy import select
 
-from topsbottg.bot import build_router, main_keyboard
+from topsbottg.bot import CHANGE_PAYMENT_DETAILS_BUTTON_TEXT, build_router, main_keyboard
 from topsbottg.models import PaymentProfile, PayoutStatus, RecipientStatus, User
 from topsbottg.services import (
     add_recipients,
@@ -762,6 +762,30 @@ async def test_change_payment_details_same_telegram_user(session_factory, settin
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_change_payment_details_does_not_confirm_pending_recipient(session_factory, settings):
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 111, "Пользователь")
+        payout = await create_payout(session, actor_telegram_id=123, payload=_payout_payload())
+        payout.status = PayoutStatus.sending.value
+        [recipient] = await add_recipients(session, payout, [user.id])
+        recipient.status = RecipientStatus.sent.value
+        await session.commit()
+
+    bot, _ = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "/start", 1))
+    await dispatcher.feed_update(bot, _make_update(bot, 111, CHANGE_PAYMENT_DETAILS_BUTTON_TEXT, 2))
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "Владелец\n+79990000001\nБанк", 3))
+
+    async with session_factory() as session:
+        db_recipient = await session.get(type(recipient), recipient.id)
+        assert db_recipient is not None
+        assert db_recipient.status == RecipientStatus.sent.value
+        assert db_recipient.payment_profile_snapshot is None
+
+
 async def test_my_data_shows_raw_payment_details(session_factory, settings):
     async with session_factory() as session:
         user = await get_or_create_user(session, 111, "Иван Иванов")

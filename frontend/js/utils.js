@@ -84,5 +84,5 @@ export function formatPayoutPeriodLabel(
 ) {
   const start = `${String(startDay).padStart(2, "0")}.${String(startMonth).padStart(2, "0")}`;
   const end = `${String(endDay).padStart(2, "0")}.${String(endMonth).padStart(2, "0")}`;
-  return start === end ? start : `${start} – ${end}`;
+  return `${start} \u2013 ${end}`;
 }

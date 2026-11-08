@@ -639,6 +639,28 @@ async def test_mark_paid_endpoint(client, session_factory, admin_init_data):
 
 
 @pytest.mark.asyncio
+async def test_mark_paid_endpoint_rejects_stale_snapshot_version(client, session_factory, admin_init_data):
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 111, "Иван Иванов")
+        payout = await create_payout(session, actor_telegram_id=123, payload=_payout_payload())
+        [recipient] = await add_recipients(session, payout, [user.id])
+        recipient.status = RecipientStatus.payment_received.value
+        recipient.payment_profile_snapshot = {"raw_payment_details": "current"}
+        recipient.payment_snapshot_version = 2
+        await session.commit()
+    response = await client.post(
+        f"/api/admin/payouts/{payout.id}/recipients/{recipient.id}/mark-paid",
+        headers={"X-Telegram-Init-Data": admin_init_data},
+        json={"expected_snapshot_version": 1},
+    )
+    assert response.status_code == 409
+    async with session_factory() as session:
+        unchanged = await session.get(type(recipient), recipient.id)
+        assert unchanged.status == RecipientStatus.payment_received.value
+        assert unchanged.payment_snapshot_version == 2
+
+
+@pytest.mark.asyncio
 async def test_payout_validation_rejects_bad_dates_and_preserves_literal_braces(
     client,
     session_factory,
