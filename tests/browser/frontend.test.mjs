@@ -19,6 +19,7 @@ const mime = {
 test("responsive Mini App and payout workflows", async (t) => {
   let users = [];
   let recipients = [];
+  let renamedUserId = null;
   let historicalRecipients = [
     {
       id: 501,
@@ -65,6 +66,15 @@ test("responsive Mini App and payout workflows", async (t) => {
       period_label: "01.11 – 07.11",
     },
     {
+      id: 40,
+      status: "draft",
+      period_start_day: 8,
+      period_start_month: 11,
+      period_end_day: 14,
+      period_end_month: 11,
+      period_label: "08.11 – 14.11",
+    },
+    {
       id: 37,
       status: "sent",
       period_start_day: 25,
@@ -76,6 +86,7 @@ test("responsive Mini App and payout workflows", async (t) => {
   ];
   const requestLog = [];
   let sendCalls = 0;
+  const sentUserIds = [];
   let markPaidCalls = 0;
   let server;
   let browser;
@@ -179,7 +190,7 @@ test("responsive Mini App and payout workflows", async (t) => {
             { length: Math.min(50, 120 - offset) },
             (_, index) => ({
               id: offset + index + 1,
-              full_name: `Пользователь ${offset + index + 1} с длинной фамилией для плотного списка`,
+              full_name: `${renamedUserId === offset + index + 1 ? "Новое ФИО" : "Пользователь"} ${offset + index + 1} с длинной фамилией для плотного списка`,
             }),
           );
           data = { items, offset, has_more: offset + items.length < 120 };
@@ -209,6 +220,7 @@ test("responsive Mini App and payout workflows", async (t) => {
             : recipients;
       } else if (path.endsWith("/send-selected")) {
         sendCalls += 1;
+        sentUserIds.push(req.postDataJSON().user_ids);
         await new Promise((done) => setTimeout(done, 100));
         const payout = payouts.find(
           (item) => item.id === Number(path.split("/").at(-2)),
@@ -250,6 +262,9 @@ test("responsive Mini App and payout workflows", async (t) => {
       ["Создать", "Выбор", "Получатели", "История"],
     );
 
+    await page.locator('[data-mobile-view="users"]').click();
+    await page.locator('[data-action="load-more-users"]').click();
+    await page.locator('input[data-user-id="100"]').waitFor();
     for (const [width, height] of [
       [320, 640],
       [360, 780],
@@ -259,6 +274,23 @@ test("responsive Mini App and payout workflows", async (t) => {
       [1440, 900],
     ]) {
       await page.setViewportSize({ width, height });
+      await page.evaluate(() => window.scrollTo(0, 0));
+      const navBounds = await page.locator(".bottom-nav").evaluate((nav) => {
+        const rect = nav.getBoundingClientRect();
+        return {
+          top: rect.top,
+          bottom: rect.bottom,
+          headerBottom: document.querySelector(".app-header").getBoundingClientRect().bottom,
+          workspaceTop: document.querySelector(".workspace").getBoundingClientRect().top,
+          scrollY,
+        };
+      });
+      assert.equal(navBounds.scrollY, 0);
+      assert.ok(navBounds.top >= 0 && navBounds.bottom <= height, `navigation outside viewport at ${width}x${height}: ${JSON.stringify(navBounds)}`);
+      if (width >= 760) {
+        assert.ok(navBounds.top >= navBounds.headerBottom - 1, `navigation must follow header at ${width}px`);
+        assert.ok(navBounds.bottom <= navBounds.workspaceTop + 1, `navigation must precede workspace at ${width}px`);
+      }
       for (const tab of ["composer", "users", "recipients", "payouts"]) {
         await page.locator(`[data-mobile-view="${tab}"]`).click();
         assert.equal(
@@ -353,6 +385,13 @@ test("responsive Mini App and payout workflows", async (t) => {
     );
     await page.locator('[data-action="go-selection"]').click();
 
+    const initiallyDisabledSend = page.locator('[data-action="send-payout"]');
+    assert.equal(await initiallyDisabledSend.isDisabled(), true);
+    await initiallyDisabledSend.evaluate((button) =>
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    );
+    assert.equal(await page.locator("#confirm-dialog").isVisible(), false);
+
     await page.locator("#users-search").fill("ФИО сохраняется");
     await page.waitForTimeout(350);
     assert.equal(await page.locator("[data-user-row]").count(), 1);
@@ -384,6 +423,48 @@ test("responsive Mini App and payout workflows", async (t) => {
     assert.equal(await page.locator("input[data-user-id]").count(), 100);
     await page.locator('input[data-user-id="1"]').check();
     await page.locator('input[data-user-id="2"]').check();
+    await page.locator('[data-mobile-view="payouts"]').click();
+    await page.locator('[data-payout-id="40"]').click();
+    await page.locator('[data-mobile-view="users"]').click();
+    assert.equal(await page.locator("#selected-count").innerText(), "0 получателей");
+    await page.locator('input[data-user-id="2"]').check();
+    await page.locator('input[data-user-id="3"]').check();
+    const assertVisibleSelection = async (expected) => {
+      const observed = await page.locator("input[data-user-id]").evaluateAll((inputs) =>
+        inputs.filter((input) => input.checked).map((input) => Number(input.dataset.userId)),
+      );
+      assert.deepEqual(observed, expected);
+      const classes = await page.locator("[data-user-row]").evaluateAll((rows) =>
+        rows.filter((row) => row.classList.contains("selected")).map((row) => Number(row.dataset.userRow)),
+      );
+      assert.deepEqual(classes, expected);
+      assert.equal(await page.locator("#selected-count").innerText(), `${expected.length} ${expected.length === 1 ? "получатель" : "получателя"}`);
+    };
+    await assertVisibleSelection([2, 3]);
+    await page.locator('[data-mobile-view="payouts"]').click();
+    await page.locator('[data-payout-id="39"]').click();
+    await page.locator('[data-mobile-view="users"]').click();
+    await assertVisibleSelection([1, 2]);
+    const selectedCheckbox = page.locator('input[data-user-id="1"]');
+    renamedUserId = 1;
+    await page.evaluate(() =>
+      window.__adminEvents.dispatchEvent(
+        new MessageEvent("users_changed", { data: "{}" }),
+      ),
+    );
+    await page.waitForFunction(() =>
+      document.querySelector('[data-user-row="1"] .user-name')?.textContent.startsWith("Новое ФИО"),
+    );
+    assert.equal(await selectedCheckbox.isChecked(), true);
+    assert.equal(await selectedCheckbox.evaluate((checkbox) => checkbox === document.querySelector('input[data-user-id="1"]')), true);
+    await page.locator('[data-mobile-view="payouts"]').click();
+    await page.locator('[data-payout-id="40"]').click();
+    await page.locator('[data-mobile-view="users"]').click();
+    await assertVisibleSelection([2, 3]);
+    await page.locator('[data-mobile-view="payouts"]').click();
+    await page.locator('[data-payout-id="39"]').click();
+    await page.locator('[data-mobile-view="users"]').click();
+    await assertVisibleSelection([1, 2]);
 
     await page.setViewportSize({ width: 390, height: 420 });
     await page.locator("#users-search").focus();
@@ -450,27 +531,45 @@ test("responsive Mini App and payout workflows", async (t) => {
     await page.locator("#dialog-confirm").dblclick();
     await page.waitForTimeout(200);
     assert.equal(sendCalls, 1);
+    assert.deepEqual(sentUserIds[0], [1, 2]);
 
     await page.locator('[data-mobile-view="payouts"]').click();
     await page.locator('[data-payout-id="38"]').click();
     await page.locator('[data-mobile-view="recipients"]').click();
     await page.locator("[data-expand-recipient='501']").click();
+    assert.equal(await page.locator("[data-expand-recipient='501']").getAttribute("aria-expanded"), "true", await page.locator("[data-recipient-row='501']").evaluate((node) => node.outerHTML));
     await page.locator("[data-filter='problems']").click();
     assert.equal(await page.locator("[data-recipient-row]").count(), 1);
     await page.locator("[data-filter='all']").click();
+    assert.equal(await page.locator("[data-expand-recipient='501']").getAttribute("aria-expanded"), "true");
+    assert.equal(await page.locator("[data-recipient-details='501']").evaluate((node) => node.classList.contains("hidden")), false, await page.locator("[data-recipient-row='501']").evaluate((node) => node.outerHTML));
+    const retainedNodes = await page.evaluate(() => {
+      window.__recipientNode501 = document.querySelector('[data-recipient-row="501"]');
+      window.__recipientNode502 = document.querySelector('[data-recipient-row="502"]');
+      window.__recipientNode503 = document.querySelector('[data-recipient-row="503"]');
+      window.__recipientOrderBefore = [...document.querySelectorAll("[data-recipient-row]")].map((row) => row.dataset.recipientRow);
+      return true;
+    });
+    assert.equal(retainedNodes, true);
+    await page.locator('[data-copy-recipient="501"]').focus();
     assert.match(
       await page.locator("[data-recipient-details='501'] pre").innerText(),
       /^Сбербанк/,
     );
     await page.locator("[data-copy-recipient='501']").click();
+    await page.waitForFunction(async () =>
+      (await navigator.clipboard.readText()).startsWith("Сбербанк"),
+    );
     assert.match(
       await page.evaluate(() => navigator.clipboard.readText()),
       /^Сбербанк/,
     );
     await page.evaluate(() => window.scrollTo(0, 80));
-    historicalRecipients = historicalRecipients.map((recipient) =>
-      recipient.id === 502 ? { ...recipient, status: "pending" } : recipient,
-    );
+    historicalRecipients = historicalRecipients
+      .filter((recipient) => recipient.id !== 729)
+      .map((recipient) =>
+        recipient.id === 502 ? { ...recipient, status: "paid" } : recipient,
+      );
     await page.evaluate(() =>
       window.__adminEvents.dispatchEvent(
         new MessageEvent("payout_recipients_changed", {
@@ -481,11 +580,36 @@ test("responsive Mini App and payout workflows", async (t) => {
     await page.waitForFunction(
       () =>
         document.querySelector('[data-recipient-row="502"] .badge')
-          ?.textContent === "Ожидает отправки",
+          ?.textContent === "Выплачено",
     );
     assert.equal(
       await page.locator("[data-filter='all']").getAttribute("aria-pressed"),
       "true",
+    );
+    assert.equal(
+      await page.evaluate(() => document.querySelector('[data-recipient-row="501"]') === window.__recipientNode501),
+      true,
+    );
+    assert.equal(
+      await page.evaluate(() => document.querySelector('[data-recipient-row="503"]') === window.__recipientNode503),
+      true,
+    );
+    assert.equal(
+      await page.evaluate(() => document.querySelector('[data-recipient-row="502"]') === window.__recipientNode502),
+      true,
+    );
+    assert.equal(await page.locator('[data-recipient-row="729"]').count(), 0);
+    assert.deepEqual(
+      await page.locator("#recipient-summary .stat strong").allTextContents(),
+      ["32", "1", "2", "0"],
+    );
+    assert.ok(
+      (await page.locator("[data-recipient-row]").evaluateAll((rows) => rows.map((row) => row.dataset.recipientRow).indexOf("502"))) >
+        (await page.evaluate(() => window.__recipientOrderBefore.indexOf("502"))),
+    );
+    assert.equal(
+      await page.locator('[data-copy-recipient="501"]').evaluate((element) => element === document.activeElement),
+      true,
     );
     assert.equal(
       await page
@@ -520,17 +644,25 @@ test("responsive Mini App and payout workflows", async (t) => {
         for (const callback of webApp.__callbacks.themeChanged || [])
           callback();
       }, theme);
-      for (const tab of ["composer", "users", "recipients", "payouts"]) {
-        await page.locator(`[data-mobile-view="${tab}"]`).click();
-        await page.screenshot({
-          path: resolve(evidence, `${theme}-${tab}.png`),
-        });
+      for (const [width, height] of [
+        [390, 844],
+        [1024, 768],
+        [1440, 900],
+      ]) {
+        await page.setViewportSize({ width, height });
+        await page.evaluate(() => window.scrollTo(0, 0));
+        for (const tab of ["composer", "users", "recipients", "payouts"]) {
+          await page.locator(`[data-mobile-view="${tab}"]`).click();
+          await page.screenshot({
+            path: resolve(evidence, `${theme}-${width}-${tab}.png`),
+          });
+        }
       }
     }
     assert.deepEqual(pageErrors, []);
     assert.equal(sendCalls, 1);
     assert.equal(markPaidCalls, 1);
-    await t.diagnostic(`390px light/dark screenshots saved to ${evidence}`);
+    await t.diagnostic(`Mobile, tablet, and desktop light/dark screenshots saved to ${evidence}`);
     await context.close();
   } finally {
     await browser?.close();

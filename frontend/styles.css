@@ -671,7 +671,7 @@ textarea::placeholder {
   .bottom-nav {
     position: static;
     width: min(calc(100% - 32px), 760px);
-    margin: 12px auto 24px;
+    margin: 12px auto 0;
     border: 1px solid var(--border);
     border-radius: 12px;
     min-height: 64px;

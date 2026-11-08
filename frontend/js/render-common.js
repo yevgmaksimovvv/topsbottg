@@ -50,11 +50,17 @@ export function renderActionState() {
     b.disabled = !canUseApi() || state.loading.createPayout;
   }
   const send = document.querySelector('[data-action="send-payout"]');
-  if (send)
-    send.disabled = state.loading.sendPayout || !state.selectedUsers.size;
+  const payoutIsDraft =
+    state.selectedPayoutDetail?.payout?.status === "draft";
+  const canSend =
+    canUseApi() &&
+    payoutIsDraft &&
+    state.selectedUsers.size > 0 &&
+    !state.loading.sendPayout;
+  if (send) send.disabled = !canSend;
   $("selection-bar")?.classList.toggle(
     "hidden",
-    state.activeMobileView !== "users" || !state.selectedUsers.size,
+    state.activeMobileView !== "users" || !canSend,
   );
 }
 export function renderPreview() {

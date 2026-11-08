@@ -16,6 +16,55 @@
         <h1 id="screen-title">Новая выплата</h1>
         <div id="auth-state" class="hidden"></div>
       </header>
+      <nav class="bottom-nav" aria-label="Разделы">
+        <button
+          type="button"
+          data-mobile-view="composer"
+          class="nav-button active"
+          aria-pressed="true"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"></circle>
+            <path d="M12 8v8M8 12h8"></path></svg
+          ><span>Создать</span>
+        </button>
+        <button
+          type="button"
+          data-mobile-view="users"
+          class="nav-button"
+          aria-pressed="false"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M10 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM20 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
+            ></path></svg
+          ><span>Выбор</span>
+        </button>
+        <button
+          type="button"
+          data-mobile-view="recipients"
+          class="nav-button"
+          aria-pressed="false"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="m9 11 3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"
+            ></path></svg
+          ><span>Получатели</span>
+        </button>
+        <button
+          type="button"
+          data-mobile-view="payouts"
+          class="nav-button"
+          aria-pressed="false"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M3 12a9 9 0 1 0 2.64-6.36L3 8M3 3v5h5M12 7v5l3 2"
+            ></path></svg
+          ><span>История</span>
+        </button>
+      </nav>
       <div id="auth-banner" class="notice hidden" role="status"></div>
       <div
         id="toast"
@@ -257,55 +306,6 @@
           Разослать
         </button>
       </aside>
-      <nav class="bottom-nav" aria-label="Разделы">
-        <button
-          type="button"
-          data-mobile-view="composer"
-          class="nav-button active"
-          aria-pressed="true"
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="12" r="9"></circle>
-            <path d="M12 8v8M8 12h8"></path></svg
-          ><span>Создать</span>
-        </button>
-        <button
-          type="button"
-          data-mobile-view="users"
-          class="nav-button"
-          aria-pressed="false"
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M10 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM20 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
-            ></path></svg
-          ><span>Выбор</span>
-        </button>
-        <button
-          type="button"
-          data-mobile-view="recipients"
-          class="nav-button"
-          aria-pressed="false"
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="m9 11 3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"
-            ></path></svg
-          ><span>Получатели</span>
-        </button>
-        <button
-          type="button"
-          data-mobile-view="payouts"
-          class="nav-button"
-          aria-pressed="false"
-        >
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M3 12a9 9 0 1 0 2.64-6.36L3 8M3 3v5h5M12 7v5l3 2"
-            ></path></svg
-          ><span>История</span>
-        </button>
-      </nav>
     </main>
 
     <dialog

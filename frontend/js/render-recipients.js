@@ -133,10 +133,71 @@ export function renderRecipientsInto() {
               : "";
   }
   const payoutStatus = state.selectedPayoutDetail?.payout?.status || "";
-  root.innerHTML = visibleRecipients()
-    .map((recipient) => renderRow(recipient, payoutStatus))
-    .join("");
-  if (state.activeMobileView === "recipients")
+  const payoutId = String(state.selectedPayoutId ?? "");
+  const filter = state.recipientFilter;
+  const rebuild =
+    root.dataset.renderPayoutId !== payoutId ||
+    root.dataset.renderFilter !== filter;
+  if (rebuild) root.replaceChildren();
+
+  const recipients = visibleRecipients();
+  const wanted = new Set(recipients.map((recipient) => String(Number(recipient.id))));
+  for (const row of [...root.querySelectorAll(":scope > [data-recipient-row]")]) {
+    if (!wanted.has(row.dataset.recipientRow)) row.remove();
+  }
+
+  recipients.forEach((recipient, index) => {
+    const id = String(Number(recipient.id));
+    let row = root.querySelector(`[data-recipient-row="${id}"]`);
+    const markup = renderRow(recipient, payoutStatus);
+    const signature = JSON.stringify({
+      recipient,
+      payoutStatus,
+      expanded: state.expandedRecipients.has(Number(id)),
+      operationError: state.recipientOperationError[id] || "",
+      markPaidLoading:
+        state.loading.markPaid && state.loadingRecipientId === Number(id),
+    });
+    if (!row) {
+      const template = document.createElement("template");
+      template.innerHTML = markup;
+      row = template.content.firstElementChild;
+      root.append(row);
+    } else if (row.dataset.renderSignature !== signature) {
+      const active = row.contains(document.activeElement)
+        ? document.activeElement
+        : null;
+      const focusKey = active
+        ? [...active.attributes]
+            .filter((attribute) => attribute.name.startsWith("data-"))
+            .map((attribute) => [attribute.name, attribute.value])
+        : [];
+      const selection =
+        active && "selectionStart" in active
+          ? [active.selectionStart, active.selectionEnd]
+          : null;
+      row.innerHTML = markup.slice(markup.indexOf(">") + 1, markup.lastIndexOf("</article>"));
+      if (focusKey.length) {
+        const selector = focusKey
+          .map(([name, value]) => `[${name}="${CSS.escape(value)}"]`)
+          .join("");
+        const replacement = row.querySelector(selector);
+        replacement?.focus();
+        if (selection && replacement && "setSelectionRange" in replacement)
+          replacement.setSelectionRange(...selection);
+      }
+    }
+    row.querySelector("[data-expand-recipient]")?.setAttribute(
+      "aria-expanded",
+      String(state.expandedRecipients.has(Number(id))),
+    );
+    row.dataset.renderSignature = signature;
+    const current = root.children[index];
+    if (current !== row) root.insertBefore(row, current || null);
+  });
+  root.dataset.renderPayoutId = payoutId;
+  root.dataset.renderFilter = filter;
+  if (state.activeMobileView === "recipients" && window.scrollY !== scrollY)
     window.scrollTo({ top: scrollY, behavior: "instant" });
 }
 

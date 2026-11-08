@@ -43,11 +43,43 @@ export function renderUsersInto() {
   ) {
     root.innerHTML = list.map((u) => userMarkup(u, locked)).join("");
   }
+  for (const user of list) {
+    const id = Number(user.id);
+    const row = root.querySelector(`[data-user-row="${id}"]`);
+    const checkbox = row?.querySelector("input[data-user-id]");
+    const selected = state.selectedUsers.has(id);
+    if (checkbox) checkbox.checked = selected;
+    row?.classList.toggle("selected", selected);
+    const name = row?.querySelector(".user-name");
+    if (name && name.textContent !== (user.full_name || ""))
+      name.textContent = user.full_name || "";
+    if (checkbox) {
+      checkbox.disabled = locked;
+      checkbox.setAttribute(
+        "aria-label",
+        `Выбрать ${user.full_name || ""}`,
+      );
+    }
+  }
   root.dataset.userIds = ids.join(",");
   root.dataset.locked = String(locked);
+  root.dataset.payoutId = String(state.selectedPayoutId ?? "");
+  root.dataset.selectedUsers = [...state.selectedUsers].sort((a, b) => a - b).join(",");
   const count = $("selected-count");
   if (count)
     count.textContent = `${state.selectedUsers.size} ${plural(state.selectedUsers.size, "получатель", "получателя", "получателей")}`;
+  const send = document.querySelector('[data-action="send-payout"]');
+  if (send)
+    send.disabled =
+      locked ||
+      state.selectedUsers.size === 0 ||
+      state.loading.sendPayout;
+  $("selection-bar")?.classList.toggle(
+    "hidden",
+    state.activeMobileView !== "users" ||
+      locked ||
+      state.selectedUsers.size === 0,
+  );
   document
     .querySelector('[data-action="load-more-users"]')
     ?.classList.toggle("hidden", !state.usersHasMore);

@@ -56,6 +56,7 @@ export async function createPayout() {
     });
     state.selectedUsers.clear();
     state.selectedPayoutId = payout.id;
+    state.selectedUsersByPayout.set(Number(payout.id), new Set());
     state.selectedPayoutDetail = { payout };
     state.recipients = [];
     upsertPayoutInList(payout);
@@ -90,15 +91,23 @@ export async function sendPayout() {
     state.loading.sendPayout ||
     !canUseApi() ||
     !state.selectedPayoutId ||
+    state.selectedPayoutDetail?.payout?.status !== "draft" ||
     !state.selectedUsers.size
   )
     return;
+  const id = Number(state.selectedPayoutId);
+  const ids = [...state.selectedUsers];
+  if (!ids.length || Number(state.selectedPayoutId) !== id) return;
   sendInFlight = true;
   setLoading("sendPayout", true);
   renderApp();
   try {
-    const id = Number(state.selectedPayoutId),
-      ids = [...state.selectedUsers];
+    if (
+      Number(state.selectedPayoutId) !== id ||
+      state.selectedPayoutDetail?.payout?.status !== "draft" ||
+      state.loading.sendPayout !== true
+    )
+      return;
     const snapshot = await api(`/admin/payouts/${id}/send-selected`, {
       method: "POST",
       body: JSON.stringify({ user_ids: ids }),

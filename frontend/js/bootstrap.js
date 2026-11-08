@@ -59,6 +59,30 @@ function bindPeriodInput(id, stateKey) {
   });
 }
 
+async function copyRecipientPaymentDetails(recipientId) {
+  const recipient = state.recipients.find(
+    (item) => Number(item.id) === Number(recipientId),
+  );
+  const snapshot = recipient?.payment_profile_snapshot;
+  const text =
+    typeof snapshot === "string"
+      ? snapshot
+      : (snapshot?.raw_payment_details ??
+        (snapshot
+          ? Object.entries(snapshot)
+              .filter(([, value]) => value != null && value !== "")
+              .map(([key, value]) => `${key}: ${value}`)
+              .join("\n")
+          : ""));
+  try {
+    await navigator.clipboard.writeText(text);
+    setToast("Платёжные данные скопированы.", "success");
+  } catch {
+    setToast("Не удалось скопировать. Выделите данные вручную.", "warning");
+  }
+  renderApp();
+}
+
 function showConfirmation({
   title,
   content,
@@ -115,6 +139,21 @@ function showConfirmation({
 }
 
 function bindEvents() {
+  document.getElementById("recipients-list")?.addEventListener("click", (event) => {
+    const copyButton = event.target.closest?.("[data-copy-recipient]");
+    if (copyButton) {
+      event.stopPropagation();
+      void copyRecipientPaymentDetails(copyButton.dataset.copyRecipient);
+      return;
+    }
+    const expander = event.target.closest?.("[data-expand-recipient]");
+    if (!expander) return;
+    const id = Number(expander.dataset.expandRecipient);
+    state.expandedRecipients.has(id)
+      ? state.expandedRecipients.delete(id)
+      : state.expandedRecipients.add(id);
+    renderRecipients();
+  });
   document.addEventListener("input", (event) => {
     if (event.target.id !== "users-search") return;
     state.usersSearch = event.target.value;
@@ -152,13 +191,29 @@ function bindEvents() {
         case "send-payout": {
           const payout = state.selectedPayoutDetail?.payout;
           const count = state.selectedUsers.size;
-          if (!payout || !count || state.loading.sendPayout) return;
+          if (
+            !canUseApi() ||
+            payout?.status !== "draft" ||
+            !count ||
+            state.loading.sendPayout
+          )
+            return;
           showConfirmation({
             title: "Подтвердить рассылку?",
             content: `Выплата #${payout.id}\nПериод: ${payoutPeriodLabel(payout)}\nПолучателей: ${count}`,
             warning: "Будут отправлены реальные сообщения в Telegram.",
             confirmLabel: `Разослать ${count} ${plural(count, "человеку", "людям", "людям")}`,
-            onConfirm: sendPayout,
+            onConfirm: () => {
+              const current = state.selectedPayoutDetail?.payout;
+              if (
+                Number(state.selectedPayoutId) !== Number(payout.id) ||
+                current?.status !== "draft" ||
+                !state.selectedUsers.size ||
+                state.loading.sendPayout
+              )
+                return;
+              return sendPayout();
+            },
           });
           return;
         }
@@ -208,42 +263,6 @@ function bindEvents() {
     }
     if (event.target.closest("input[data-user-id]")) return;
 
-    const expander = event.target.closest("[data-expand-recipient]");
-    if (expander) {
-      const id = Number(expander.dataset.expandRecipient);
-      state.expandedRecipients.has(id)
-        ? state.expandedRecipients.delete(id)
-        : state.expandedRecipients.add(id);
-      renderRecipients();
-      return;
-    }
-
-    const copyButton = event.target.closest("[data-copy-recipient]");
-    if (copyButton) {
-      const recipient = state.recipients.find(
-        (item) => Number(item.id) === Number(copyButton.dataset.copyRecipient),
-      );
-      const snapshot = recipient?.payment_profile_snapshot;
-      const text =
-        typeof snapshot === "string"
-          ? snapshot
-          : (snapshot?.raw_payment_details ??
-            (snapshot
-              ? Object.entries(snapshot)
-                  .filter(([, value]) => value != null && value !== "")
-                  .map(([key, value]) => `${key}: ${value}`)
-                  .join("\n")
-              : ""));
-      try {
-        await navigator.clipboard.writeText(text);
-        setToast("Платёжные данные скопированы.", "success");
-      } catch {
-        setToast("Не удалось скопировать. Выделите данные вручную.", "warning");
-      }
-      renderApp();
-      return;
-    }
-
     const filter = event.target.closest("[data-filter]");
     if (filter) {
       state.recipientFilter = filter.dataset.filter;
@@ -255,6 +274,15 @@ function bindEvents() {
     const checkbox = event.target.closest?.("input[data-user-id]");
     if (!checkbox) return;
     const id = Number(checkbox.dataset.userId);
+    if (
+      !canUseApi() ||
+      state.selectedPayoutDetail?.payout?.status !== "draft" ||
+      state.loading.sendPayout
+    ) {
+      checkbox.checked = false;
+      checkbox.closest(".user-row")?.classList.remove("selected");
+      return;
+    }
     checkbox.checked
       ? state.selectedUsers.add(id)
       : state.selectedUsers.delete(id);
