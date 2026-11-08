@@ -16,7 +16,7 @@ FAILURE_LOG="$PROJECT_DIR/.deploy-failures.log"
 
 log() { printf '[deploy] %s\n' "$*"; }
 fail() {
-  log "ERROR: $*" >&2
+  log "ERROR: phase=$DEPLOY_PHASE $*" >&2
   if [[ -d "$PROJECT_DIR" ]]; then
     touch "$FAILURE_LOG" 2>/dev/null || true
     chmod 600 "$FAILURE_LOG" 2>/dev/null || true
