@@ -46,6 +46,11 @@ export async function createPayout() {
   if (state.loading.createPayout || !canUseApi()) return;
   const payload = validate();
   if (!payload) return;
+  const startingPayoutId = Number(state.selectedPayoutId || 0);
+  const startingView = state.activeMobileView;
+  const isStartingContextCurrent = () =>
+    Number(state.selectedPayoutId || 0) === startingPayoutId &&
+    state.activeMobileView === startingView;
   setLoading("createPayout", true);
   renderApp();
   clearError();
@@ -54,11 +59,13 @@ export async function createPayout() {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    state.selectedUsers.clear();
-    state.selectedPayoutId = payout.id;
     state.selectedUsersByPayout.set(Number(payout.id), new Set());
-    state.selectedPayoutDetail = { payout };
-    state.recipients = [];
+    if (isStartingContextCurrent()) {
+      state.selectedUsers.clear();
+      state.selectedPayoutId = payout.id;
+      state.selectedPayoutDetail = { payout };
+      state.recipients = [];
+    }
     upsertPayoutInList(payout);
     setToast(`Выплата #${payout.id} создана.`, "success");
     const c = $("create-success");
@@ -74,7 +81,7 @@ export async function createPayout() {
     c.append(text, button);
     c.classList.remove("hidden");
     void scheduleAdminStateRefresh({
-      selected: true,
+      selected: isStartingContextCurrent(),
       payouts: true,
       silent: true,
     });
@@ -97,13 +104,15 @@ export async function sendPayout() {
     return;
   const id = Number(state.selectedPayoutId);
   const ids = [...state.selectedUsers];
-  if (!ids.length || Number(state.selectedPayoutId) !== id) return;
+  const submittedUsers = new Set(ids);
+  const isCurrentPayout = () => Number(state.selectedPayoutId) === id;
+  if (!ids.length || !isCurrentPayout()) return;
   sendInFlight = true;
   setLoading("sendPayout", true);
   renderApp();
   try {
     if (
-      Number(state.selectedPayoutId) !== id ||
+      !isCurrentPayout() ||
       state.selectedPayoutDetail?.payout?.status !== "draft" ||
       state.loading.sendPayout !== true
     )
@@ -113,21 +122,28 @@ export async function sendPayout() {
       body: JSON.stringify({ user_ids: ids }),
     });
     const payout = snapshot?.detail?.payout || snapshot?.payout;
-    if (payout) {
-      state.selectedPayoutDetail = { payout };
-      upsertPayoutInList(payout);
+    if (payout) upsertPayoutInList(payout);
+    const savedSelection = new Set(
+      state.selectedUsersByPayout.get(id) || submittedUsers,
+    );
+    submittedUsers.forEach((userId) => savedSelection.delete(userId));
+    state.selectedUsersByPayout.set(id, savedSelection);
+    if (isCurrentPayout()) {
+      state.selectedPayoutDetail = payout
+        ? { payout }
+        : state.selectedPayoutDetail;
+      state.recipients = snapshot?.recipients || [];
+      submittedUsers.forEach((userId) => state.selectedUsers.delete(userId));
+      state.selectedUsersByPayout.set(id, new Set(state.selectedUsers));
     }
-    state.recipients = snapshot?.recipients || [];
-    state.selectedUsers.clear();
-    state.selectedUsersByPayout.set(id, new Set());
-    setToast("Рассылка запущена.", "success");
+    setToast(`Рассылка для выплаты #${id} запущена.`, "success");
     void scheduleAdminStateRefresh({
-      selected: true,
+      selected: isCurrentPayout(),
       payouts: true,
       silent: true,
     });
   } catch (e) {
-    setError(`Не удалось запустить рассылку: ${e.message}`);
+    setError(`Не удалось запустить рассылку для выплаты #${id}: ${e.message}`);
   } finally {
     sendInFlight = false;
     setLoading("sendPayout", false);

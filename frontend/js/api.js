@@ -32,6 +32,7 @@ let adminEventsRecoveryUsed = false;
 let adminEventsWarningShown = false;
 const selectedRefreshPromises = new Map();
 let payoutsRefreshPromise = null;
+let markPaidInFlight = false;
 
 function isJsonResponse(response) {
   const contentType = response.headers.get("content-type") || "";
@@ -305,13 +306,40 @@ export function scheduleSelectedPayoutRefresh({ silent = true } = {}) {
   if (!state.initData || !state.selectedPayoutId) return Promise.resolve();
   const payoutId = Number(state.selectedPayoutId);
   const existing = selectedRefreshPromises.get(payoutId);
-  if (existing) return existing;
-  const promise = refreshSelectedPayout({ silent }).finally(() => {
-    if (selectedRefreshPromises.get(payoutId) === promise)
-      selectedRefreshPromises.delete(payoutId);
-  });
-  selectedRefreshPromises.set(payoutId, promise);
-  return promise;
+  if (
+    existing &&
+    existing.requestId === state.selectedPayoutRequestId
+  ) {
+    existing.repeatRequested = true;
+    return existing.promise;
+  }
+
+  const entry = {
+    requestId: null,
+    repeatRequested: false,
+    promise: null,
+  };
+  const request = refreshSelectedPayout({ silent });
+  entry.requestId = state.selectedPayoutRequestId;
+  entry.promise = request
+    .then(() => {
+      if (
+        entry.repeatRequested &&
+        entry.requestId === state.selectedPayoutRequestId &&
+        Number(state.selectedPayoutId) === payoutId
+      ) {
+        if (selectedRefreshPromises.get(payoutId) === entry)
+          selectedRefreshPromises.delete(payoutId);
+        return scheduleSelectedPayoutRefresh({ silent });
+      }
+      return undefined;
+    })
+    .finally(() => {
+      if (selectedRefreshPromises.get(payoutId) === entry)
+        selectedRefreshPromises.delete(payoutId);
+    });
+  selectedRefreshPromises.set(payoutId, entry);
+  return entry.promise;
 }
 
 export function schedulePayoutsRefresh({ silent = true } = {}) {
@@ -490,27 +518,48 @@ async function selectPayout(id) {
 
 async function markPaid(recipientId) {
   if (!canUseApi() || !state.selectedPayoutId) return;
-  if (state.loading.markPaid) return;
+  if (markPaidInFlight) return;
+  const payoutId = Number(state.selectedPayoutId);
+  const id = Number(recipientId);
+  const isCurrentPayout = () => Number(state.selectedPayoutId) === payoutId;
+  markPaidInFlight = true;
   setLoadingAndRender("markPaid", true);
-  state.loadingRecipientId = recipientId;
+  state.loadingRecipientId = id;
   renderApp();
   try {
     await api(
-      `/admin/payouts/${state.selectedPayoutId}/recipients/${recipientId}/mark-paid`,
+      `/admin/payouts/${payoutId}/recipients/${id}/mark-paid`,
       {
         method: "POST",
         body: JSON.stringify({}),
       },
     );
-    delete state.recipientOperationError[recipientId];
-    setToastAndRender("Получатель отмечен как выплаченный.");
-    await refreshSelectedPayout();
-    await loadPayouts();
+    if (isCurrentPayout()) {
+      delete state.recipientOperationError[id];
+      setToastAndRender(`Оплата получателя в выплате #${payoutId} отмечена.`);
+      await refreshSelectedPayout();
+    } else {
+      setToast(
+        `Оплата получателя в выплате #${payoutId} отмечена.`,
+        "success",
+      );
+      renderApp();
+    }
+    await schedulePayoutsRefresh({ silent: true });
   } catch (error) {
-    state.recipientOperationError[recipientId] =
-      error?.message || "Ошибка сервера";
-    setErrorAndRender(error.message || "Не удалось обновить статус");
+    const message = error?.message || "Ошибка сервера";
+    if (isCurrentPayout()) {
+      state.recipientOperationError[id] = message;
+      setErrorAndRender(message || "Не удалось обновить статус");
+    } else {
+      setToast(
+        `Не удалось отметить оплату в выплате #${payoutId}: ${message}`,
+        "error",
+      );
+      renderApp();
+    }
   } finally {
+    markPaidInFlight = false;
     state.loadingRecipientId = null;
     setLoadingAndRender("markPaid", false);
     renderApp();

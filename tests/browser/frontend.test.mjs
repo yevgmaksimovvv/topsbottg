@@ -19,6 +19,7 @@ const mime = {
 test("responsive Mini App and payout workflows", async (t) => {
   let users = [];
   let recipients = [];
+  let sentRecipients = [];
   let renamedUserId = null;
   let historicalRecipients = [
     {
@@ -91,12 +92,15 @@ test("responsive Mini App and payout workflows", async (t) => {
     const promise = new Promise((resolve) => {
       release = resolve;
     });
-    delayedRequests.set(path, promise);
+    const queue = delayedRequests.get(path) || [];
+    queue.push(promise);
+    delayedRequests.set(path, queue);
     return { release: (result = null) => release(result) };
   };
   let sendCalls = 0;
   const sentUserIds = [];
   let markPaidCalls = 0;
+  let createPayoutCalls = 0;
   let server;
   let browser;
 
@@ -169,9 +173,15 @@ test("responsive Mini App and payout workflows", async (t) => {
         method,
         search: url.searchParams.get("search") || "",
       });
-      const delayedRequest = delayedRequests.get(path);
+      if (method === "POST" && path.endsWith("/send-selected")) {
+        sendCalls += 1;
+        sentUserIds.push(req.postDataJSON().user_ids);
+      }
+      if (method === "POST" && path.endsWith("/mark-paid")) markPaidCalls += 1;
+      const requestQueue = delayedRequests.get(path);
+      const delayedRequest = requestQueue?.shift();
+      if (requestQueue && !requestQueue.length) delayedRequests.delete(path);
       if (delayedRequest) {
-        delayedRequests.delete(path);
         const result = await delayedRequest;
         if (result?.status) {
           return route.fulfill({
@@ -221,8 +231,9 @@ test("responsive Mini App and payout workflows", async (t) => {
         data = payouts;
       else if (path.endsWith("/admin/payouts") && method === "POST") {
         const body = req.postDataJSON();
+        const payoutId = createPayoutCalls++ === 0 ? 39 : 41;
         data = {
-          id: 39,
+          id: payoutId,
           status: "draft",
           period_start_day: body.period_start_day,
           period_start_month: body.period_start_month,
@@ -235,19 +246,15 @@ test("responsive Mini App and payout workflows", async (t) => {
         const id = Number(path.split("/").at(-1));
         data = { payout: payouts.find((payout) => payout.id === id) || null };
       } else if (path.endsWith("/recipients") && method === "GET") {
-        data =
-          Number(path.split("/").at(-2)) === 38
-            ? historicalRecipients
-            : recipients;
+        const payoutId = Number(path.split("/").at(-2));
+        data = payoutId === 38 ? historicalRecipients : payoutId === 39 ? sentRecipients : recipients;
       } else if (path.endsWith("/send-selected")) {
-        sendCalls += 1;
-        sentUserIds.push(req.postDataJSON().user_ids);
         await new Promise((done) => setTimeout(done, 100));
         const payout = payouts.find(
           (item) => item.id === Number(path.split("/").at(-2)),
         );
         payout.status = "sent";
-        recipients = req.postDataJSON().user_ids.map((userId, index) => ({
+        sentRecipients = req.postDataJSON().user_ids.map((userId, index) => ({
           id: 600 + index,
           user_id: userId,
           full_name:
@@ -255,9 +262,8 @@ test("responsive Mini App and payout workflows", async (t) => {
             `Получатель ${userId}`,
           status: "sent",
         }));
-        data = { payout, recipients };
+        data = { payout, recipients: sentRecipients };
       } else if (path.endsWith("/mark-paid")) {
-        markPaidCalls += 1;
         const id = Number(path.split("/").at(-2));
         historicalRecipients = historicalRecipients.map((recipient) =>
           recipient.id === id ? { ...recipient, status: "paid" } : recipient,
@@ -688,6 +694,22 @@ test("responsive Mini App and payout workflows", async (t) => {
             ?.textContent.includes(`Текущая: #${payoutId} ·`),
         id,
       );
+    const readPayoutState = () =>
+      page.evaluate(async () => {
+        const { state } = await import("/miniapp/js/store.js");
+        return {
+          selectedPayoutId: Number(state.selectedPayoutId),
+          detailPayoutId: Number(state.selectedPayoutDetail?.payout?.id || 0),
+          recipientIds: state.recipients.map((recipient) => Number(recipient.id)),
+          selectedUsers: [...state.selectedUsers].sort((a, b) => a - b),
+          selectedUsersByPayout40: [
+            ...(state.selectedUsersByPayout.get(40) || new Set()),
+          ].sort((a, b) => a - b),
+          markPaidErrorIds: Object.keys(state.recipientOperationError).map(Number),
+          markPaidLoading: state.loading.markPaid,
+          loadingRecipientId: state.loadingRecipientId,
+        };
+      });
 
     // A stale failure after a successful selection must not replace current state or toast.
     const staleFailure = delayNextRequest("/api/admin/payouts/38");
@@ -787,6 +809,289 @@ test("responsive Mini App and payout workflows", async (t) => {
     assert.equal(await page.locator('[data-recipient-row="940"]').count(), 1);
     assert.equal(await page.locator("#recipients-state").innerText(), "");
 
+    // Failed send for #39 reports its own payout and leaves #40's selection intact.
+    payouts.find((payout) => payout.id === 39).status = "draft";
+    await selectPayout(39);
+    await page.locator('[data-mobile-view="users"]').click();
+    await page.locator('input[data-user-id="1"]').check();
+    await page.locator('input[data-user-id="2"]').check();
+    const failedSend = delayNextRequest("/api/admin/payouts/39/send-selected");
+    const failedSendStarted = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        new URL(request.url()).pathname === "/api/admin/payouts/39/send-selected",
+    );
+    await page.locator('[data-action="send-payout"]').click();
+    await page.locator("#dialog-confirm").click();
+    await failedSendStarted;
+    await page.keyboard.press("Escape");
+    await selectPayout(40);
+    await waitForPayoutContext(40);
+    await page.locator('[data-mobile-view="users"]').click();
+    await assertVisibleSelection([2, 3]);
+    const failedSendResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/admin/payouts/39/send-selected",
+    );
+    failedSend.release({ status: 503, detail: "send failed" });
+    await failedSendResponse;
+    await page.waitForFunction(() =>
+      document.querySelector("#toast")?.textContent.includes("выплаты #39"),
+    );
+    assert.match(await page.locator("#toast").innerText(), /#39/);
+    assert.match(await page.locator("#recipients-context").innerText(), /Текущая: #40/);
+    assert.equal(await page.locator('[data-recipient-row="940"]').count(), 1);
+    assert.deepEqual((await readPayoutState()).selectedUsers, [2, 3]);
+    assert.equal((await readPayoutState()).selectedPayoutId, 40);
+    assert.equal((await readPayoutState()).detailPayoutId, 40);
+    assert.deepEqual((await readPayoutState()).recipientIds, [940]);
+    assert.equal(sendCalls, 2);
+
+    // A late successful send updates #39's history but not #40's recipients or selection.
+    await selectPayout(39);
+    await page.locator('[data-mobile-view="users"]').click();
+    await assertVisibleSelection([1, 2]);
+    const successfulSend = delayNextRequest("/api/admin/payouts/39/send-selected");
+    const successfulSendStarted = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        new URL(request.url()).pathname === "/api/admin/payouts/39/send-selected",
+    );
+    await page.locator('[data-action="send-payout"]').click();
+    await page.locator("#dialog-confirm").click();
+    await successfulSendStarted;
+    await page.keyboard.press("Escape");
+    await selectPayout(40);
+    await waitForPayoutContext(40);
+    await page.locator('[data-mobile-view="users"]').click();
+    await assertVisibleSelection([2, 3]);
+    const successfulSendResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/admin/payouts/39/send-selected",
+    );
+    successfulSend.release();
+    await successfulSendResponse;
+    await page.waitForFunction(() =>
+      document.querySelector("#toast")?.textContent.includes("для выплаты #39 запущена"),
+    );
+    assert.match(await page.locator("#recipients-context").innerText(), /Текущая: #40/);
+    assert.equal(await page.locator('[data-recipient-row="940"]').count(), 1);
+    assert.deepEqual(await page.locator("#recipient-summary .stat strong").allTextContents(), ["1", "0", "0", "0"]);
+    assert.deepEqual((await readPayoutState()).selectedUsers, [2, 3]);
+    assert.deepEqual((await readPayoutState()).selectedUsersByPayout40, [2, 3]);
+    assert.deepEqual((await readPayoutState()).recipientIds, [940]);
+    assert.equal((await readPayoutState()).detailPayoutId, 40);
+    assert.equal(payouts.find((payout) => payout.id === 39).status, "sent");
+    assert.equal(sendCalls, 3);
+    assert.deepEqual(sentUserIds.slice(-2), [[1, 2], [1, 2]]);
+
+    // Late payment success for #38 keeps #40 visible and does not optimistically change status.
+    historicalRecipients = historicalRecipients.map((recipient) =>
+      recipient.id === 501
+        ? { ...recipient, status: "payment_received" }
+        : recipient,
+    );
+    await selectPayout(38);
+    await page.locator('[data-mobile-view="recipients"]').click();
+    await page.locator("[data-expand-recipient='501']").click();
+    await page.locator('[data-action="mark-paid"]').click();
+    const latePaymentSuccess = delayNextRequest(
+      "/api/admin/payouts/38/recipients/501/mark-paid",
+    );
+    const paymentSuccessStarted = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        new URL(request.url()).pathname ===
+          "/api/admin/payouts/38/recipients/501/mark-paid",
+    );
+    await page.locator("#dialog-confirm").click();
+    await paymentSuccessStarted;
+    assert.equal(
+      await page.locator('[data-recipient-row="501"] .badge').innerText(),
+      "Данные подтверждены · к оплате",
+    );
+    await page.keyboard.press("Escape");
+    await selectPayout(40);
+    await waitForPayoutContext(40);
+    const paymentSuccessResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname ===
+          "/api/admin/payouts/38/recipients/501/mark-paid",
+    );
+    latePaymentSuccess.release();
+    await paymentSuccessResponse;
+    await page.waitForFunction(() =>
+      document.querySelector("#toast")?.textContent.includes("в выплате #38 отмечена"),
+    );
+    assert.match(await page.locator("#recipients-context").innerText(), /Текущая: #40/);
+    assert.deepEqual((await readPayoutState()).recipientIds, [940]);
+    assert.deepEqual((await readPayoutState()).selectedUsers, [2, 3]);
+    assert.equal((await readPayoutState()).detailPayoutId, 40);
+    assert.equal(historicalRecipients.find((recipient) => recipient.id === 501).status, "paid");
+    assert.equal((await readPayoutState()).markPaidErrorIds.includes(501), false);
+
+    // A late payment error is attributed to #38 without adding an error to #40's recipient state.
+    historicalRecipients = historicalRecipients.map((recipient) =>
+      recipient.id === 501
+        ? { ...recipient, status: "payment_received" }
+        : recipient,
+    );
+    await selectPayout(38);
+    await page.locator('[data-mobile-view="recipients"]').click();
+    await page.locator("[data-expand-recipient='501']").click();
+    await page.locator('[data-action="mark-paid"]').click();
+    const latePaymentFailure = delayNextRequest(
+      "/api/admin/payouts/38/recipients/501/mark-paid",
+    );
+    const paymentFailureStarted = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        new URL(request.url()).pathname ===
+          "/api/admin/payouts/38/recipients/501/mark-paid",
+    );
+    await page.locator("#dialog-confirm").click();
+    await paymentFailureStarted;
+    await page.keyboard.press("Escape");
+    await selectPayout(40);
+    await waitForPayoutContext(40);
+    const paymentFailureResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname ===
+          "/api/admin/payouts/38/recipients/501/mark-paid",
+    );
+    latePaymentFailure.release({ status: 503, detail: "payment failed" });
+    await paymentFailureResponse;
+    await page.waitForFunction(() =>
+      document.querySelector("#toast")?.textContent.includes("Не удалось отметить оплату в выплате #38"),
+    );
+    assert.doesNotMatch(await page.locator("#toast").innerText(), /выплате #40/);
+    assert.deepEqual((await readPayoutState()).recipientIds, [940]);
+    assert.deepEqual((await readPayoutState()).selectedUsers, [2, 3]);
+    assert.equal((await readPayoutState()).detailPayoutId, 40);
+    assert.equal((await readPayoutState()).markPaidErrorIds.includes(501), false);
+    assert.equal((await readPayoutState()).markPaidLoading, false);
+    assert.equal((await readPayoutState()).loadingRecipientId, null);
+    assert.equal(markPaidCalls, 3);
+
+    // An old #38 refresh cannot occupy the scheduler after a quick #38 → #40 → #38 switch.
+    await selectPayout(38);
+    await waitForPayoutContext(38);
+    const oldScheduled38 = delayNextRequest("/api/admin/payouts/38");
+    const oldRequestStarted = page.waitForRequest(
+      (request) =>
+        new URL(request.url()).pathname === "/api/admin/payouts/38",
+    );
+    await page.evaluate(() =>
+      window.__adminEvents.dispatchEvent(
+        new MessageEvent("payout_recipients_changed", {
+          data: JSON.stringify({ payout_id: 38 }),
+        }),
+      ),
+    );
+    await oldRequestStarted;
+    await selectPayout(40);
+    await selectPayout(38);
+    await waitForPayoutContext(38);
+    const detailRequestsBeforeSse = requestLog.filter(
+      ({ path, method }) => path === "/api/admin/payouts/38" && method === "GET",
+    ).length;
+    historicalRecipients = historicalRecipients.map((recipient) =>
+      recipient.id === 501
+        ? { ...recipient, full_name: "Получатель обновлён по SSE", status: "paid" }
+        : recipient,
+    );
+    const sseRefresh = delayNextRequest("/api/admin/payouts/38");
+    const firstSseRefresh = page.waitForRequest(
+      (request) =>
+        new URL(request.url()).pathname === "/api/admin/payouts/38",
+    );
+    await page.evaluate(() =>
+      window.__adminEvents.dispatchEvent(
+        new MessageEvent("payout_recipients_changed", {
+          data: JSON.stringify({ payout_id: 38 }),
+        }),
+      ),
+    );
+    await firstSseRefresh;
+    const secondSseRefresh = page.waitForRequest(
+      (request) =>
+        new URL(request.url()).pathname === "/api/admin/payouts/38",
+    );
+    await page.evaluate(() =>
+      window.__adminEvents.dispatchEvent(
+        new MessageEvent("payout_recipients_changed", {
+          data: JSON.stringify({ payout_id: 38 }),
+        }),
+      ),
+    );
+    const sseRefreshResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/admin/payouts/38",
+    );
+    sseRefresh.release();
+    await sseRefreshResponse;
+    await secondSseRefresh;
+    await page.waitForFunction(() =>
+      document.querySelector('[data-recipient-row="501"] .recipient-name')
+        ?.textContent.includes("Получатель обновлён по SSE"),
+    );
+    const oldRefreshResponse = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/admin/payouts/38",
+    );
+    oldScheduled38.release({ status: 503, detail: "obsolete refresh" });
+    await oldRefreshResponse;
+    assert.ok(
+      requestLog.filter(
+        ({ path, method }) => path === "/api/admin/payouts/38" && method === "GET",
+      ).length >= detailRequestsBeforeSse + 2,
+    );
+    assert.equal(await page.locator("#recipients-state").innerText(), "");
+    assert.match(await page.locator('[data-recipient-row="501"] .badge').innerText(), /Выплачено/);
+    assert.deepEqual((await readPayoutState()).recipientIds[0], 501);
+    assert.equal(sendCalls, 3);
+    assert.equal(markPaidCalls, 3);
+
+    // A late create response adds history without replacing the payout selected meanwhile.
+    await page.locator('[data-mobile-view="composer"]').click();
+    await page.locator("#period-start").fill("15.11");
+    await page.locator("#period-end").fill("21.11");
+    const delayedCreate = delayNextRequest("/api/admin/payouts");
+    const createStarted = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        new URL(request.url()).pathname === "/api/admin/payouts",
+    );
+    await page.locator('[data-action="create-payout"]').click();
+    await createStarted;
+    await selectPayout(40);
+    await waitForPayoutContext(40);
+    const createResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/admin/payouts",
+    );
+    delayedCreate.release();
+    await createResponse;
+    await page.waitForFunction(() =>
+      document.querySelector("#toast")?.textContent.includes("Выплата #41 создана"),
+    );
+    assert.match(await page.locator("#recipients-context").innerText(), /Текущая: #40/);
+    assert.deepEqual((await readPayoutState()).selectedUsers, [2, 3]);
+    assert.equal((await readPayoutState()).selectedPayoutId, 40);
+    assert.equal((await readPayoutState()).detailPayoutId, 40);
+    assert.equal(payouts.some((payout) => payout.id === 41), true);
+    assert.equal(
+      requestLog.filter(
+        ({ path, method }) => path === "/api/admin/payouts" && method === "POST",
+      ).length,
+      2,
+    );
+
     await mkdir(evidence, { recursive: true });
     for (const theme of ["light", "dark"]) {
       await page.evaluate((scheme) => {
@@ -811,8 +1116,8 @@ test("responsive Mini App and payout workflows", async (t) => {
       }
     }
     assert.deepEqual(pageErrors, []);
-    assert.equal(sendCalls, 1);
-    assert.equal(markPaidCalls, 1);
+    assert.equal(sendCalls, 3);
+    assert.equal(markPaidCalls, 3);
     await t.diagnostic(`Mobile, tablet, and desktop light/dark screenshots saved to ${evidence}`);
     await context.close();
   } finally {
