@@ -110,6 +110,20 @@ else
   log "Reusing isolated release worktree for $DEPLOY_SHA."
 fi
 
+DEPLOY_PHASE="frontend-permissions"
+frontend_dir="$RELEASE_DIR/frontend"
+[[ -d "$frontend_dir" ]] || fail "Release frontend directory is missing."
+log "Making only the release frontend readable by the Nginx container."
+chmod -R a+rX -- "$frontend_dir"
+[[ -f "$frontend_dir/index.html" && -r "$frontend_dir/index.html" ]] \
+  || fail "Release frontend index.html is missing or unreadable."
+js_file="$(find "$frontend_dir" -type f \( -name '*.js' -o -name '*.mjs' \) -print -quit)"
+[[ -n "$js_file" && -r "$js_file" ]] || fail "Release frontend has no readable JavaScript module."
+unreadable_file="$(find "$frontend_dir" -type f ! -perm -o+r -print -quit)"
+unsearchable_dir="$(find "$frontend_dir" -type d ! -perm -o+rx -print -quit)"
+[[ -z "$unreadable_file" && -z "$unsearchable_dir" ]] \
+  || fail "Release frontend permissions do not allow the Nginx user to read static assets."
+
 DEPLOY_PHASE="compose-validation"
 log "Validating Docker Compose configuration from the isolated release."
 compose config --quiet

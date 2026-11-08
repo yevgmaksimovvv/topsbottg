@@ -24,6 +24,10 @@ def _production_checkout(tmp_path: Path, *, backup_fails: bool = False) -> tuple
     frontend = project / "frontend"
     frontend.mkdir()
     (frontend / "index.html").write_text("old frontend\n", encoding="utf-8")
+    (frontend / "app.js").write_text("old frontend js\n", encoding="utf-8")
+    frontend_js = frontend / "js"
+    frontend_js.mkdir()
+    (frontend_js / "module.js").write_text("old module\n", encoding="utf-8")
     compose = """services:
   postgres:
     image: postgres:16
@@ -40,15 +44,25 @@ volumes:
         compose.replace("build: .", "image: example.invalid/old-app"), encoding="utf-8"
     )
     subprocess.run(
-        ["git", "-C", str(project), "add", "tracked.txt", "frontend/index.html", "docker-compose.yml"], check=True
+        [
+            "git", "-C", str(project), "add", "tracked.txt", "frontend/index.html", "frontend/app.js",
+            "frontend/js/module.js", "docker-compose.yml",
+        ],
+        check=True,
     )
     subprocess.run(["git", "-C", str(project), "commit", "-m", "deployed version"], check=True, capture_output=True)
 
     (project / "tracked.txt").write_text("new backend\n", encoding="utf-8")
     (frontend / "index.html").write_text("new frontend\n", encoding="utf-8")
+    (frontend / "app.js").write_text("new frontend js\n", encoding="utf-8")
+    (frontend_js / "module.js").write_text("new module\n", encoding="utf-8")
     (project / "docker-compose.yml").write_text(compose, encoding="utf-8")
     subprocess.run(
-        ["git", "-C", str(project), "add", "tracked.txt", "frontend/index.html", "docker-compose.yml"], check=True
+        [
+            "git", "-C", str(project), "add", "tracked.txt", "frontend/index.html", "frontend/app.js",
+            "frontend/js/module.js", "docker-compose.yml",
+        ],
+        check=True,
     )
     subprocess.run(["git", "-C", str(project), "commit", "-m", "release candidate"], check=True, capture_output=True)
     sha = subprocess.check_output(["git", "-C", str(project), "rev-parse", "HEAD"], text=True).strip()
@@ -77,7 +91,12 @@ volumes:
     bin_dir.mkdir()
     real_git = subprocess.check_output(["which", "git"], text=True).strip()
     (bin_dir / "git").write_text(
-        f"#!/usr/bin/env bash\nif [[ $1 == fetch ]]; then exit 0; fi\nexec {real_git} \"$@\"\n", encoding="utf-8"
+        "#!/usr/bin/env bash\n"
+        "if [[ $1 == fetch ]]; then exit 0; fi\n"
+        f"if [[ $1 == worktree && $2 == add ]]; then {real_git} \"$@\" || exit $?; "
+        "find \"$4/frontend\" -printf '%m %y\\n' | sort > \"$WORKTREE_MODE_LOG\"; exit $?; fi\n"
+        f"exec {real_git} \"$@\"\n",
+        encoding="utf-8",
     )
     (bin_dir / "docker").write_text(
         "#!/usr/bin/env bash\n"
@@ -126,6 +145,7 @@ def _run_deploy(
         "COMPOSE_RESOLVED_FILE": str(tmp_path / "compose-resolved.json"),
         "REAL_DOCKER": real_docker or "docker",
         "CURL_CALL_LOG": str(tmp_path / "curl.log"),
+        "WORKTREE_MODE_LOG": str(tmp_path / "worktree-modes.log"),
     }
     return subprocess.run(["bash", str(DEPLOY_SCRIPT), sha], env=env, text=True, capture_output=True, timeout=30)
 
@@ -246,6 +266,30 @@ def test_deploy_happy_path_records_sha_and_recreates_only_nginx(tmp_path: Path) 
     assert resolved["networks"]["default"]["name"] == "custom-topsbottg_default"
 
 
+def test_frontend_created_under_restrictive_umask_is_readable_by_nginx(tmp_path: Path) -> None:
+    project, sha, bin_dir = _production_checkout(tmp_path)
+    env_mode_before = (project / ".env").stat().st_mode
+    result = _run_deploy(tmp_path, project, sha, bin_dir)
+    assert result.returncode == 0, result.stderr + result.stdout
+
+    original_modes = (tmp_path / "worktree-modes.log").read_text(encoding="utf-8").splitlines()
+    assert "700 d" in original_modes
+    assert original_modes.count("600 f") >= 2
+
+    release_frontend = tmp_path / "apps" / ".topsbottg-deploy" / "releases" / sha / "frontend"
+    release_dir = release_frontend.parent
+    assert (release_frontend / "index.html").stat().st_mode & 0o004
+    assert (release_frontend / "app.js").stat().st_mode & 0o004
+    assert (release_frontend / "js/module.js").stat().st_mode & 0o004
+    for directory in (release_frontend, release_frontend / "js"):
+        assert directory.stat().st_mode & 0o005 == 0o005
+    assert release_dir.joinpath("tracked.txt").stat().st_mode & 0o077 == 0
+    assert (project / ".env").stat().st_mode == env_mode_before
+    assert result.stdout.index("Making only the release frontend readable") < result.stdout.index(
+        "Recreating only the Compose nginx service"
+    )
+
+
 def test_ci_bootstraps_deploy_script_on_first_run_with_strict_host_checking(tmp_path: Path) -> None:
     project, sha, bin_dir = _production_checkout(tmp_path)
     remote_home = tmp_path / "remote-home"
@@ -284,6 +328,7 @@ def test_ci_bootstraps_deploy_script_on_first_run_with_strict_host_checking(tmp_
         "COMPOSE_RESOLVED_FILE": str(tmp_path / "compose-resolved.json"),
         "REAL_DOCKER": shutil.which("docker") or "docker",
         "CURL_CALL_LOG": str(tmp_path / "curl.log"),
+        "WORKTREE_MODE_LOG": str(tmp_path / "worktree-modes.log"),
         "SSH_CALL_LOG": str(tmp_path / "ssh.log"),
         "REMOTE_HOME": str(remote_home),
         "REMOTE_SHA": sha,
