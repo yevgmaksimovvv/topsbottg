@@ -30,7 +30,7 @@ let adminEventsSource = null;
 let adminEventsStartPromise = null;
 let adminEventsRecoveryUsed = false;
 let adminEventsWarningShown = false;
-let selectedRefreshPromise = null;
+const selectedRefreshPromises = new Map();
 let payoutsRefreshPromise = null;
 
 function isJsonResponse(response) {
@@ -249,34 +249,41 @@ export function upsertPayoutInList(payout) {
 }
 
 async function refreshSelectedPayout({ silent = false } = {}) {
+  const payoutId = Number(state.selectedPayoutId);
   const hasInitData = canUseApi();
-  if (!state.selectedPayoutId) {
+  if (!payoutId) {
     return;
   }
   if (!hasInitData) {
     return;
   }
   const requestId = ++state.selectedPayoutRequestId;
+  const isCurrentRequest = () =>
+    requestId === state.selectedPayoutRequestId &&
+    Number(state.selectedPayoutId) === payoutId;
   if (!silent) setLoadingAndRender("recipients", true);
+  else if (state.loading.recipients)
+    setLoadingAndRender("recipients", false);
   try {
-    const detail = await api(`/admin/payouts/${state.selectedPayoutId}`);
-    const recipients = await api(
-      `/admin/payouts/${state.selectedPayoutId}/recipients`,
-    );
-    if (requestId !== state.selectedPayoutRequestId) return;
+    const detail = await api(`/admin/payouts/${payoutId}`);
+    if (!isCurrentRequest()) return;
+    const recipients = await api(`/admin/payouts/${payoutId}/recipients`);
+    if (!isCurrentRequest()) return;
     state.selectedPayoutDetail = detail;
     state.recipientsLoadError = null;
     state.recipients = recipients;
     upsertPayoutInList(detail?.payout);
     renderSelectedPayoutView();
   } catch (error) {
+    if (!isCurrentRequest()) return;
     logLoadError("refreshSelectedPayout", error);
     state.recipientsLoadError = error?.message || "Ошибка загрузки";
     renderSelectedPayoutView();
     if (!silent)
       setErrorAndRender(error.message || "Не удалось обновить выплату");
   } finally {
-    if (!silent) setLoadingAndRender("recipients", false);
+    if (isCurrentRequest() && !silent)
+      setLoadingAndRender("recipients", false);
   }
 }
 
@@ -296,12 +303,15 @@ export async function fetchSelectedPayoutSnapshot(payoutId) {
 
 export function scheduleSelectedPayoutRefresh({ silent = true } = {}) {
   if (!state.initData || !state.selectedPayoutId) return Promise.resolve();
-  if (!selectedRefreshPromise) {
-    selectedRefreshPromise = refreshSelectedPayout({ silent }).finally(() => {
-      selectedRefreshPromise = null;
-    });
-  }
-  return selectedRefreshPromise;
+  const payoutId = Number(state.selectedPayoutId);
+  const existing = selectedRefreshPromises.get(payoutId);
+  if (existing) return existing;
+  const promise = refreshSelectedPayout({ silent }).finally(() => {
+    if (selectedRefreshPromises.get(payoutId) === promise)
+      selectedRefreshPromises.delete(payoutId);
+  });
+  selectedRefreshPromises.set(payoutId, promise);
+  return promise;
 }
 
 export function schedulePayoutsRefresh({ silent = true } = {}) {

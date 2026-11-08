@@ -85,6 +85,15 @@ test("responsive Mini App and payout workflows", async (t) => {
     },
   ];
   const requestLog = [];
+  const delayedRequests = new Map();
+  const delayNextRequest = (path) => {
+    let release;
+    const promise = new Promise((resolve) => {
+      release = resolve;
+    });
+    delayedRequests.set(path, promise);
+    return { release: (result = null) => release(result) };
+  };
   let sendCalls = 0;
   const sentUserIds = [];
   let markPaidCalls = 0;
@@ -160,6 +169,18 @@ test("responsive Mini App and payout workflows", async (t) => {
         method,
         search: url.searchParams.get("search") || "",
       });
+      const delayedRequest = delayedRequests.get(path);
+      if (delayedRequest) {
+        delayedRequests.delete(path);
+        const result = await delayedRequest;
+        if (result?.status) {
+          return route.fulfill({
+            status: result.status,
+            contentType: "application/json",
+            body: JSON.stringify({ detail: result.detail || "Request failed" }),
+          });
+        }
+      }
       let data = {};
       if (path.endsWith("/events-token")) data = { token: "browser-test" };
       else if (path.endsWith("/events"))
@@ -303,6 +324,20 @@ test("responsive Mini App and payout workflows", async (t) => {
           ),
           true,
           `horizontal overflow at ${width}px in ${tab}`,
+        );
+        assert.deepEqual(
+          await page.evaluate(() => ({
+            visibleHeadings: [...document.querySelectorAll("h1, .screen-heading")]
+              .filter((heading) => heading.getClientRects().length)
+              .map((heading) => heading.textContent.trim()),
+            titleId: document.querySelector(`[data-screen="${document.querySelector(".nav-button.active").dataset.mobileView}"]`).getAttribute("aria-labelledby"),
+          })),
+          {
+            visibleHeadings: [
+              (await page.locator("#screen-title").innerText()).trim(),
+            ],
+            titleId: "screen-title",
+          },
         );
       }
     }
@@ -635,6 +670,122 @@ test("responsive Mini App and payout workflows", async (t) => {
           ?.textContent === "Выплачено",
     );
     assert.equal(markPaidCalls, 1);
+
+    const selectPayout = async (id) => {
+      const requestStarted = page.waitForRequest(
+        (request) =>
+          new URL(request.url()).pathname === `/api/admin/payouts/${id}`,
+      );
+      await page.locator('[data-mobile-view="payouts"]').click();
+      await page.locator(`.payout-row[data-payout-id="${id}"]`).click();
+      await requestStarted;
+    };
+    const waitForPayoutContext = (id) =>
+      page.waitForFunction(
+        (payoutId) =>
+          document
+            .querySelector("#recipients-context")
+            ?.textContent.includes(`Текущая: #${payoutId} ·`),
+        id,
+      );
+
+    // A stale failure after a successful selection must not replace current state or toast.
+    const staleFailure = delayNextRequest("/api/admin/payouts/38");
+    await selectPayout(38);
+    await selectPayout(40);
+    await waitForPayoutContext(40);
+    const toastBeforeStaleFailure = await page.locator("#toast").innerText();
+    const staleFailureResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/admin/payouts/38",
+    );
+    staleFailure.release({ status: 503, detail: "stale failure" });
+    await staleFailureResponse;
+    await page.waitForTimeout(30);
+    assert.match(await page.locator("#recipients-context").innerText(), /Текущая: #40/);
+    assert.equal(await page.locator("#toast").innerText(), toastBeforeStaleFailure);
+    assert.doesNotMatch(await page.locator("#toast").getAttribute("class"), /toast-error/);
+
+    // A stale success must stop before requesting recipients or updating the current payout.
+    const staleSuccess = delayNextRequest("/api/admin/payouts/40");
+    const recipients40Before = requestLog.filter(
+      ({ path }) => path === "/api/admin/payouts/40/recipients",
+    ).length;
+    await selectPayout(40);
+    await selectPayout(38);
+    await waitForPayoutContext(38);
+    const staleSuccessResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/admin/payouts/40",
+    );
+    staleSuccess.release();
+    await staleSuccessResponse;
+    await page.waitForTimeout(30);
+    assert.match(await page.locator("#recipients-context").innerText(), /Текущая: #38/);
+    assert.equal(
+      requestLog.filter(({ path }) => path === "/api/admin/payouts/40/recipients").length,
+      recipients40Before,
+    );
+
+    // The previous request finishing while the new request is pending cannot clear its loading state.
+    const oldWhileNewLoading = delayNextRequest("/api/admin/payouts/38");
+    await selectPayout(38);
+    const newPayoutLoading = delayNextRequest("/api/admin/payouts/40");
+    await selectPayout(40);
+    const oldLoadingResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/admin/payouts/38",
+    );
+    oldWhileNewLoading.release({ status: 503, detail: "old request failed" });
+    await oldLoadingResponse;
+    assert.match(await page.locator("#recipients-state").innerText(), /Загрузка получателей/);
+    const newLoadingResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/admin/payouts/40",
+    );
+    newPayoutLoading.release();
+    await newLoadingResponse;
+    await waitForPayoutContext(40);
+
+    // Errors belonging to the selected payout remain visible.
+    const currentFailure = delayNextRequest("/api/admin/payouts/40");
+    await selectPayout(40);
+    const currentFailureResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/admin/payouts/40",
+    );
+    currentFailure.release({ status: 503, detail: "current payout unavailable" });
+    await currentFailureResponse;
+    await page.waitForFunction(() =>
+      document.querySelector("#toast")?.classList.contains("toast-error"),
+    );
+    assert.match(await page.locator("#toast").innerText(), /Backend временно недоступен/);
+    assert.match(await page.locator("#recipients-state").innerText(), /Backend временно недоступен/);
+
+    // SSE refreshes the selected payout, while an older payout response is still pending.
+    const staleForSse = delayNextRequest("/api/admin/payouts/38");
+    await selectPayout(38);
+    await selectPayout(40);
+    await waitForPayoutContext(40);
+    recipients = [
+      { id: 940, user_id: 9, full_name: "SSE актуальный получатель", status: "pending" },
+    ];
+    await page.evaluate(() =>
+      window.__adminEvents.dispatchEvent(
+        new MessageEvent("payout_recipients_changed", {
+          data: JSON.stringify({ payout_id: 40 }),
+        }),
+      ),
+    );
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll("[data-recipient-row]")].some((row) =>
+        row.textContent.includes("SSE актуальный получатель"),
+      ),
+    );
+    const staleForSseResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/admin/payouts/38",
+    );
+    staleForSse.release({ status: 503, detail: "stale SSE race" });
+    await staleForSseResponse;
+    await page.waitForTimeout(30);
+    assert.match(await page.locator("#recipients-context").innerText(), /Текущая: #40/);
+    assert.equal(await page.locator('[data-recipient-row="940"]').count(), 1);
+    assert.equal(await page.locator("#recipients-state").innerText(), "");
 
     await mkdir(evidence, { recursive: true });
     for (const theme of ["light", "dark"]) {
