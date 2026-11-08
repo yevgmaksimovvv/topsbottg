@@ -116,16 +116,44 @@ volumes:
     (bin_dir / "curl").write_text(
         "#!/usr/bin/env bash\n"
         "echo \"$*\" >> \"$CURL_CALL_LOG\"\n"
-        "if [[ ${FAIL_HEALTH:-0} == 1 && $* == *'http://127.0.0.1:18080/healthz'* ]]; then exit 22; fi\n"
-        "if [[ $* == *'http://127.0.0.1:18080/miniapp/'* && $* != *'/app.js'* ]]; then\n"
-        "  echo '<script type=module src=\"/miniapp/app.js?v=1\"></script>'; exit 0\n"
-        "fi\n"
+        "url=; body_file=; header_file=; write_format=\n"
         "while (($#)); do\n"
-        "  if [[ $1 == -D ]]; then\n"
-        "    shift; { echo 'Content-Type: application/javascript; charset=utf-8'; "
-        "echo 'X-Content-Type-Options: nosniff'; } > \"$1\";\n"
-        "  fi; shift;\n"
+        "  case $1 in\n"
+        "    -o) body_file=$2; shift 2 ;;\n"
+        "    -D) header_file=$2; shift 2 ;;\n"
+        "    -w) write_format=$2; shift 2 ;;\n"
+        "    http://*) url=$1; shift ;;\n"
+        "    *) shift ;;\n"
+        "  esac\n"
         "done\n"
+        "key=$(printf '%s' \"$url\" | sed 's/[^A-Za-z0-9]/_/g')\n"
+        "mkdir -p \"$CURL_STATE_DIR\"\n"
+        "count_file=\"$CURL_STATE_DIR/$key\"; count=0\n"
+        "[[ ! -f $count_file ]] || count=$(cat \"$count_file\")\n"
+        "count=$((count + 1)); printf '%s' \"$count\" > \"$count_file\"\n"
+        "status=${CURL_STATUS:-200}\n"
+        "if [[ $url == *\"${CURL_FAIL_MATCH:-__never__}\"* ]]; then\n"
+        "  [[ $count -ne 1 || -z ${CURL_FIRST_STATUS:-} ]] || status=$CURL_FIRST_STATUS\n"
+        "  [[ -z ${CURL_PERMANENT_STATUS:-} ]] || status=$CURL_PERMANENT_STATUS\n"
+        "  if [[ ${CURL_FIRST_EXIT:-0} != 0 && $count == 1 ]]; then\n"
+        "    echo SECRET_IN_CURL_DIAGNOSTIC >&2; exit $CURL_FIRST_EXIT\n"
+        "  fi\n"
+        "  if [[ ${CURL_PERMANENT_EXIT:-0} != 0 ]]; then\n"
+        "    echo SECRET_IN_CURL_DIAGNOSTIC >&2; exit $CURL_PERMANENT_EXIT\n"
+        "  fi\n"
+        "fi\n"
+        "if [[ $url == *'/miniapp/' && $url != *'styles.css'* && $url != *'.js'* ]]; then\n"
+        "  printf '%s' '<link rel=stylesheet href=\"/miniapp/styles.css\">' > \"$body_file\"\n"
+        "  printf '%s' '<script type=module src=\"/miniapp/app.js?v=1\"></script>' >> \"$body_file\"\n"
+        "fi\n"
+        "if [[ -n $header_file ]]; then\n"
+        "  mime='application/javascript; charset=utf-8'; nosniff='X-Content-Type-Options: nosniff'\n"
+        "  [[ ${CURL_BAD_MIME:-0} != 1 || $url != *'.js'* ]] || mime='text/plain'\n"
+        "  [[ ${CURL_MISSING_NOSNIFF:-0} != 1 || $url != *'.js'* ]] || nosniff=''\n"
+        "  printf 'Content-Type: %s\\n' \"$mime\" > \"$header_file\"\n"
+        "  [[ -z $nosniff ]] || printf '%s\\n' \"$nosniff\" >> \"$header_file\"\n"
+        "fi\n"
+        "if [[ -n $write_format ]]; then printf '%s' \"$status\"; fi\n"
         "exit 0\n",
         encoding="utf-8",
     )
@@ -145,6 +173,7 @@ def _run_deploy(
         "COMPOSE_RESOLVED_FILE": str(tmp_path / "compose-resolved.json"),
         "REAL_DOCKER": real_docker or "docker",
         "CURL_CALL_LOG": str(tmp_path / "curl.log"),
+        "CURL_STATE_DIR": str(tmp_path / "curl-state"),
         "WORKTREE_MODE_LOG": str(tmp_path / "worktree-modes.log"),
     }
     return subprocess.run(["bash", str(DEPLOY_SCRIPT), sha], env=env, text=True, capture_output=True, timeout=30)
@@ -218,15 +247,84 @@ def test_app_health_failure_stops_before_frontend_switch_without_leaking_logs(tm
 
 def test_endpoint_health_failure_fails_release_after_nginx_check(tmp_path: Path) -> None:
     project, sha, bin_dir = _production_checkout(tmp_path)
-    result = _run_deploy(tmp_path, project, sha, bin_dir, FAIL_HEALTH="1")
+    result = _run_deploy(
+        tmp_path, project, sha, bin_dir, CURL_FAIL_MATCH="/healthz", CURL_PERMANENT_STATUS="403"
+    )
     assert result.returncode != 0
     assert "endpoint-verification" in result.stderr
+    assert "URL=http://127.0.0.1:18080/healthz HTTP=403 curl_exit=0" in result.stderr
     assert not (project / ".deployed-sha").exists()
     assert (project / "frontend/index.html").read_text(encoding="utf-8") == "new frontend\n"
     docker_calls = (tmp_path / "docker.log").read_text(encoding="utf-8")
     nginx_calls = [line for line in docker_calls.splitlines() if "up -d" in line and line.endswith("nginx")]
     assert len(nginx_calls) == 1
     assert "--no-deps --force-recreate" in nginx_calls[0]
+
+
+@pytest.mark.parametrize(
+    ("env", "expected_calls"),
+    [
+        ({}, 4),
+        ({"CURL_FAIL_MATCH": "/healthz", "CURL_FIRST_EXIT": "56"}, 5),
+        ({"CURL_FAIL_MATCH": "/healthz", "CURL_FIRST_STATUS": "502"}, 5),
+    ],
+)
+def test_endpoint_verification_retries_only_transient_failures(
+    tmp_path: Path, env: dict[str, str], expected_calls: int
+) -> None:
+    project, sha, bin_dir = _production_checkout(tmp_path)
+    result = _run_deploy(tmp_path, project, sha, bin_dir, **env)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert len((tmp_path / "curl.log").read_text(encoding="utf-8").splitlines()) == expected_calls
+    docker_calls = (tmp_path / "docker.log").read_text(encoding="utf-8").splitlines()
+    assert sum(" build app" in call for call in docker_calls) == 1
+    assert sum("alembic current" in call for call in docker_calls) == 1
+    assert sum("up -d" in call for call in docker_calls) == 2
+
+
+@pytest.mark.parametrize("status", ["403", "404"])
+def test_permanent_endpoint_status_is_not_retried(tmp_path: Path, status: str) -> None:
+    project, sha, bin_dir = _production_checkout(tmp_path)
+    result = _run_deploy(
+        tmp_path, project, sha, bin_dir, CURL_FAIL_MATCH="/healthz", CURL_PERMANENT_STATUS=status
+    )
+    assert result.returncode != 0
+    assert f"URL=http://127.0.0.1:18080/healthz HTTP={status} curl_exit=0" in result.stderr
+    assert len((tmp_path / "curl.log").read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_persistent_tcp_reset_fails_after_bounded_attempts_without_secret_output(tmp_path: Path) -> None:
+    project, sha, bin_dir = _production_checkout(tmp_path)
+    result = _run_deploy(
+        tmp_path, project, sha, bin_dir, CURL_FAIL_MATCH="/healthz", CURL_PERMANENT_EXIT="56"
+    )
+    assert result.returncode != 0
+    assert "URL=http://127.0.0.1:18080/healthz HTTP=000 curl_exit=56" in result.stderr
+    assert len((tmp_path / "curl.log").read_text(encoding="utf-8").splitlines()) == 5
+    assert "SECRET_IN_CURL_DIAGNOSTIC" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("env", [{"CURL_BAD_MIME": "1"}, {"CURL_MISSING_NOSNIFF": "1"}])
+def test_javascript_requires_valid_mime_and_nosniff(tmp_path: Path, env: dict[str, str]) -> None:
+    project, sha, bin_dir = _production_checkout(tmp_path)
+    result = _run_deploy(tmp_path, project, sha, bin_dir, **env)
+    assert result.returncode != 0
+    assert "/miniapp/app.js?v=1" in result.stderr
+    assert not (project / ".deployed-sha").exists()
+
+
+def test_each_required_endpoint_is_checked_independently(tmp_path: Path) -> None:
+    project, sha, bin_dir = _production_checkout(tmp_path)
+    result = _run_deploy(
+        tmp_path, project, sha, bin_dir, CURL_FAIL_MATCH="/miniapp/styles.css", CURL_PERMANENT_STATUS="404"
+    )
+    assert result.returncode != 0
+    assert "URL=http://127.0.0.1:18080/miniapp/styles.css HTTP=404 curl_exit=0" in result.stderr
+    calls = (tmp_path / "curl.log").read_text(encoding="utf-8")
+    assert "/healthz" in calls
+    assert "/miniapp/" in calls
+    assert "/miniapp/styles.css" in calls
+    assert "/miniapp/app.js" not in calls
 
 
 def test_deploy_happy_path_records_sha_and_recreates_only_nginx(tmp_path: Path) -> None:
@@ -257,6 +355,7 @@ def test_deploy_happy_path_records_sha_and_recreates_only_nginx(tmp_path: Path) 
     curl_calls = (tmp_path / "curl.log").read_text(encoding="utf-8")
     assert "http://127.0.0.1:18080/healthz" in curl_calls
     assert "http://127.0.0.1:18080/miniapp/" in curl_calls
+    assert "http://127.0.0.1:18080/miniapp/styles.css" in curl_calls
     assert "http://127.0.0.1:18080/miniapp/app.js?v=1" in curl_calls
     resolved = json.loads((tmp_path / "compose-resolved.json").read_text(encoding="utf-8"))
     release_dir = tmp_path / "apps" / ".topsbottg-deploy" / "releases" / sha

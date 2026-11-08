@@ -16,7 +16,7 @@ FAILURE_LOG="$PROJECT_DIR/.deploy-failures.log"
 
 log() { printf '[deploy] %s\n' "$*"; }
 fail() {
-  log "ERROR: $*" >&2
+  log "ERROR: phase=$DEPLOY_PHASE $*" >&2
   if [[ -d "$PROJECT_DIR" ]]; then
     touch "$FAILURE_LOG" 2>/dev/null || true
     chmod 600 "$FAILURE_LOG" 2>/dev/null || true
@@ -162,15 +162,61 @@ app_domain="$(sed -n 's/^APP_DOMAIN=//p' .env | tail -n 1 | tr -d '\r"' | sed "s
 [[ -n "$app_domain" ]] || fail "APP_DOMAIN is missing from production .env."
 base_url="http://127.0.0.1:18080"
 log "Checking app and Mini App through local Nginx."
-curl --silent --show-error --fail --max-time 10 -H "Host: $app_domain" "$base_url/healthz" >/dev/null
-html="$(curl --silent --show-error --fail --max-time 10 -H "Host: $app_domain" "$base_url/miniapp/")"
+endpoint_deadline=$((SECONDS + 60))
+endpoint_body="$(mktemp)"
+endpoint_headers="$(mktemp)"
+endpoint_error="$(mktemp)"
+trap 'rm -f "$endpoint_body" "$endpoint_headers" "$endpoint_error"' EXIT
+check_endpoint() {
+  local url="$1" attempt=0 http_code curl_exit request_timeout remaining
+  while (( attempt < 5 && SECONDS < endpoint_deadline )); do
+    ((attempt += 1))
+    remaining=$((endpoint_deadline - SECONDS))
+    request_timeout=$((remaining < 5 ? remaining : 5))
+    : >"$endpoint_body"
+    : >"$endpoint_headers"
+    : >"$endpoint_error"
+    if http_code="$(curl --noproxy '*' --http1.1 --silent --show-error \
+      --connect-timeout 3 --max-time "$request_timeout" -o "$endpoint_body" -D "$endpoint_headers" \
+      -w '%{http_code}' -H "Host: $app_domain" "$url" 2>"$endpoint_error")"; then
+      curl_exit=0
+    else
+      curl_exit=$?
+    fi
+
+    if (( curl_exit == 0 )) && [[ "$http_code" == 200 ]]; then
+      return 0
+    fi
+
+    if (( curl_exit != 0 )); then
+      case "$curl_exit" in
+        7|28|52|56) ;;
+        *) fail "Endpoint failed: URL=$url HTTP=${http_code:-000} curl_exit=$curl_exit." ;;
+      esac
+    elif [[ "$http_code" != 502 && "$http_code" != 503 && "$http_code" != 504 ]]; then
+      fail "Endpoint failed: URL=$url HTTP=${http_code:-000} curl_exit=0."
+    fi
+
+    log "Transient endpoint failure: URL=$url HTTP=${http_code:-000} curl_exit=$curl_exit attempt=$attempt/5."
+    if (( attempt < 5 && SECONDS < endpoint_deadline )); then
+      remaining=$((endpoint_deadline - SECONDS))
+      sleep "$((remaining < 2 ? remaining : 2))"
+    fi
+  done
+  fail "Endpoint failed after bounded retries: URL=$url HTTP=${http_code:-000} curl_exit=${curl_exit:-0}."
+}
+
+check_endpoint "$base_url/healthz"
+check_endpoint "$base_url/miniapp/"
+html="$(cat "$endpoint_body")"
+check_endpoint "$base_url/miniapp/styles.css"
 js_path="$(printf '%s' "$html" | grep -Eo 'src="/miniapp/[^" ]+\.js([?][^" ]*)?"' | head -n 1 | sed 's/^src="//; s/"$//')"
 [[ -n "$js_path" ]] || fail "Mini App HTML did not reference a JavaScript module."
-headers="$(mktemp)"
-trap 'rm -f "$headers"' EXIT
-curl --silent --show-error --fail --max-time 10 -D "$headers" -o /dev/null -H "Host: $app_domain" "$base_url$js_path"
-grep -Eiq '^Content-Type: (application|text)/javascript([;[:space:]]|$)' "$headers" || fail "Mini App JavaScript response has an invalid MIME type."
-grep -Eiq '^X-Content-Type-Options: nosniff[[:space:]]*$' "$headers" || fail "Mini App JavaScript response is missing nosniff."
+check_endpoint "$base_url$js_path"
+grep -Eiq '^Content-Type: (application|text)/javascript([;[:space:]]|$)' "$endpoint_headers" \
+  || fail "Endpoint failed: URL=$base_url$js_path HTTP=200 curl_exit=0; invalid JavaScript MIME type."
+grep -Eiq '^X-Content-Type-Options: nosniff[[:space:]]*$' "$endpoint_headers" \
+  || fail "Endpoint failed: URL=$base_url$js_path HTTP=200 curl_exit=0; missing nosniff."
 
 printf '%s\n' "$DEPLOY_SHA" > .deployed-sha.tmp
 mv .deployed-sha.tmp .deployed-sha
