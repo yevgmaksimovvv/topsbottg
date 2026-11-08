@@ -56,9 +56,10 @@ function renderRow(recipient, payoutStatus) {
   const details = paymentDetails(recipient);
   const canMarkPaid =
     recipient.status === "payment_received" &&
-    !["draft", "sending", "cancelled"].includes(payoutStatus) &&
+    !["draft", "sending", "completed", "cancelled"].includes(payoutStatus) &&
     !state.recipientRefreshRequired[id];
   const operationError = state.recipientOperationError[id];
+  const payoutIsFinal = ["completed", "cancelled"].includes(payoutStatus);
   const failure =
     recipient.status === "failed" && recipient.failure_reason
       ? `<p>Ошибка отправки: ${escapeHtml(recipient.failure_reason)}</p>`
@@ -79,7 +80,7 @@ function renderRow(recipient, payoutStatus) {
     </button>
     <div class="recipient-details${expanded ? "" : " hidden"}" data-recipient-details="${id}">
       ${Number(recipient.payment_snapshot_version || 0) > 1 ? `<p class="snapshot-updated">\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u044b${recipient.payment_snapshot_updated_at ? ` \u00b7 ${escapeHtml(formatTime(recipient.payment_snapshot_updated_at))}` : ""}</p>` : ""}
-      ${operationError ? `<p class="field-error" role="alert">Не удалось отметить выплату: ${escapeHtml(operationError)}. Попробуйте ещё раз.</p>` : ""}
+      ${operationError ? `<p class="field-error" role="alert">${escapeHtml(payoutIsFinal ? operationError : `Не удалось отметить выплату: ${operationError}. Попробуйте ещё раз.`)}</p>` : ""}
       ${details ? `<pre>${escapeHtml(details)}</pre><button type="button" class="button button-quiet" data-copy-recipient="${id}">Копировать</button>` : ""}
       ${failure}${paidNote}${noSnapshot}
       ${canMarkPaid ? `<button type="button" class="button button-quiet" data-action="mark-paid" data-recipient-id="${id}" ${state.loading.markPaid && state.loadingRecipientId === id ? "disabled" : ""}>Отметить выплаченным</button>` : ""}

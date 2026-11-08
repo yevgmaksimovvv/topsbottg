@@ -34,6 +34,7 @@ from topsbottg.services import (
     ADMIN_EVENT_PING,
     ADMIN_EVENTS_KEEPALIVE_SECONDS,
     ADMIN_EVENTS_TOKEN_TTL_SECONDS,
+    PayoutClosedConflict,
     SnapshotVersionConflict,
     add_recipients,
     cancel_payout,
@@ -949,6 +950,8 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             )
         except SnapshotVersionConflict as exc:
             raise HTTPException(status_code=409, detail="payment_details_changed") from exc
+        except PayoutClosedConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         await session.commit()

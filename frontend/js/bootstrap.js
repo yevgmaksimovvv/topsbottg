@@ -298,13 +298,22 @@ function bindEvents() {
             (item) => Number(item.id) === Number(action.dataset.recipientId),
           );
           const payout = state.selectedPayoutDetail?.payout;
-          if (!recipient || !payout || state.loading.markPaid) return;
+          if (
+            !recipient || !payout || state.loading.markPaid ||
+            recipient.status !== "payment_received" ||
+            ["draft", "sending", "completed", "cancelled"].includes(payout.status)
+          ) return;
+          const confirmedPayoutId = Number(payout.id);
           showConfirmation({
             title: "Подтвердить выплату?",
             content: `${recipient.full_name}\nВыплата #${payout.id} · ${payoutPeriodLabel(payout)}`,
             confirmLabel: "Подтвердить оплату",
             focusFallback: `[data-expand-recipient="${Number(recipient.id)}"]`,
-            onConfirm: () => markPaid(Number(recipient.id), Number(recipient.payment_snapshot_version || 0)),
+            onConfirm: () => markPaid(
+              Number(recipient.id),
+              Number(recipient.payment_snapshot_version || 0),
+              confirmedPayoutId,
+            ),
           });
           return;
         }

@@ -214,6 +214,10 @@ class SnapshotVersionConflict(ValueError):
     """Recipient payment details changed since the admin reviewed them."""
 
 
+class PayoutClosedConflict(ValueError):
+    """Payment may not be recorded for a closed or cancelled payout."""
+
+
 def payment_profile_snapshot(profile: PaymentProfile) -> dict[str, str | None]:
     return {
         "raw_payment_details": profile.raw_payment_details,
@@ -224,6 +228,11 @@ def payout_workflow_state(payout: Payout, recipients: list[PayoutRecipient]) -> 
     """Compute the business lifecycle separately from the delivery status."""
     if payout.status == PayoutStatus.cancelled.value:
         return "cancelled"
+    if payout.status == PayoutStatus.completed.value:
+        active = [recipient for recipient in recipients if recipient.status != RecipientStatus.cancelled.value]
+        if active and all(recipient.status == RecipientStatus.paid.value for recipient in active):
+            return "paid"
+        return "closed"
     if payout.status == PayoutStatus.draft.value:
         return "draft"
     if payout.status == PayoutStatus.sending.value:
@@ -797,6 +806,16 @@ async def complete_payout(session: AsyncSession, payout: Payout, *, actor_telegr
         actor_telegram_id=actor_telegram_id,
     )
     try:
+        # The API may have loaded this payout before another transaction changed it.
+        # Re-read after acquiring the lock so closing and marking paid serialize.
+        payout = await session.scalar(
+            select(Payout)
+            .where(Payout.id == payout.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if payout is None:
+            raise ValueError("payout not found")
         if payout.status == PayoutStatus.completed.value:
             return payout
         if payout.status == PayoutStatus.cancelled.value:
@@ -1116,8 +1135,21 @@ async def mark_paid(
         actor_telegram_id=actor_telegram_id,
     )
     try:
-        # Profile updates and payments lock user then recipient in this order.
+        # All payment/profile updates lock User -> Payout -> Recipient.
+        # Closing takes the Payout lock, so either action wins atomically.
         user = await session.scalar(select(User).where(User.id == recipient.user_id).with_for_update())
+        payout = await session.scalar(
+            select(Payout)
+            .where(Payout.id == recipient.payout_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if payout is None:
+            raise ValueError("payout not found")
+        if payout.status == PayoutStatus.completed.value:
+            raise PayoutClosedConflict("payout_closed")
+        if payout.status == PayoutStatus.cancelled.value:
+            raise PayoutClosedConflict("payout_cancelled")
         recipient = await session.scalar(
             select(PayoutRecipient)
             .options(selectinload(PayoutRecipient.user))

@@ -15,7 +15,7 @@ import topsbottg.api as api_module
 import topsbottg.security as security_module
 from topsbottg.constants import MAX_PAYOUT_MESSAGE_LENGTH
 from topsbottg.logging_utils import log_event
-from topsbottg.models import AuditLog, RecipientStatus
+from topsbottg.models import AuditLog, PayoutStatus, RecipientStatus
 from topsbottg.services import add_recipients, create_payout, get_or_create_user, upsert_payment_profile
 
 
@@ -672,6 +672,69 @@ async def test_mark_paid_rejects_missing_or_invalid_snapshot_version(client, adm
         json=body,
     )
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("final_status", "expected_detail"),
+    [
+        ("completed", "payout_closed"),
+        ("cancelled", "payout_cancelled"),
+    ],
+)
+async def test_mark_paid_rejects_closed_payout_with_conflict(
+    client, session_factory, admin_init_data, final_status, expected_detail,
+):
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 111, "Иван Иванов")
+        payout = await create_payout(session, actor_telegram_id=123, payload=_payout_payload())
+        [recipient] = await add_recipients(session, payout, [user.id])
+        payout.status = final_status
+        recipient.status = RecipientStatus.payment_received.value
+        recipient.payment_profile_snapshot = {"raw_payment_details": "original account"}
+        recipient.payment_snapshot_version = 1
+        await session.commit()
+
+    response = await client.post(
+        f"/api/admin/payouts/{payout.id}/recipients/{recipient.id}/mark-paid",
+        headers={"X-Telegram-Init-Data": admin_init_data},
+        json={"expected_snapshot_version": 1},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == expected_detail
+    async with session_factory() as session:
+        saved = await session.get(type(recipient), recipient.id)
+        assert saved.status == RecipientStatus.payment_received.value
+        assert saved.paid_at is None
+        assert saved.payment_profile_snapshot == {"raw_payment_details": "original account"}
+        assert saved.payment_snapshot_version == 1
+
+
+@pytest.mark.asyncio
+async def test_close_endpoint_disables_payment_of_confirmed_recipient(client, session_factory, admin_init_data):
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 111, "Иван Иванов")
+        payout = await create_payout(session, actor_telegram_id=123, payload=_payout_payload())
+        [recipient] = await add_recipients(session, payout, [user.id])
+        payout.status = PayoutStatus.sent.value
+        recipient.status = RecipientStatus.payment_received.value
+        recipient.payment_snapshot_version = 1
+        recipient.payment_profile_snapshot = {"raw_payment_details": "account at closure"}
+        await session.commit()
+
+    close = await client.post(
+        f"/api/admin/payouts/{payout.id}/close",
+        headers={"X-Telegram-Init-Data": admin_init_data},
+    )
+    assert close.status_code == 200
+    assert close.json()["workflow_state"] == "closed"
+    response = await client.post(
+        f"/api/admin/payouts/{payout.id}/recipients/{recipient.id}/mark-paid",
+        headers={"X-Telegram-Init-Data": admin_init_data},
+        json={"expected_snapshot_version": 1},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "payout_closed"
 
 
 @pytest.mark.asyncio

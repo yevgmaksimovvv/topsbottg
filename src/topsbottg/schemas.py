@@ -121,7 +121,7 @@ class PayoutOut(BaseModel):
     status: str
     workflow_state: Literal[
         "draft", "sending", "no_recipients", "delivery_errors", "no_active_recipients",
-        "paid", "ready_for_payment", "awaiting_confirmation", "cancelled",
+        "paid", "ready_for_payment", "awaiting_confirmation", "closed", "cancelled",
     ]
     paid_recipient_count: int = 0
     recipient_count: int = 0

@@ -14,10 +14,12 @@ from sqlalchemy import select
 
 from topsbottg.models import AuditLog, Payout, PayoutRecipient, PayoutStatus, RecipientStatus
 from topsbottg.services import (
+    PayoutClosedConflict,
     SnapshotVersionConflict,
     add_recipients,
     cancel_recipient,
     claim_pending_recipients,
+    complete_payout,
     confirm_saved_profile,
     create_payout,
     finalize_payout_after_worker,
@@ -60,12 +62,71 @@ from topsbottg.services import (
         ("sent", ["payment_required", "cancelled", "cancelled"], "awaiting_confirmation"),
         ("sent", ["payment_received", "sent"], "awaiting_confirmation"),
         ("cancelled", ["paid"], "cancelled"),
+        ("completed", ["paid", "paid"], "paid"),
+        ("completed", ["paid", "cancelled"], "paid"),
+        ("completed", ["payment_received"], "closed"),
+        ("completed", ["payment_required"], "closed"),
+        ("completed", ["paid", "payment_received"], "closed"),
+        ("completed", ["cancelled", "cancelled"], "closed"),
+        ("completed", [], "closed"),
     ],
 )
 def test_payout_workflow_state(payout_status, recipient_statuses, expected):
     payout = Payout(status=payout_status)
     recipients = [PayoutRecipient(status=status) for status in recipient_statuses]
     assert payout_workflow_state(payout, recipients) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final_status", [PayoutStatus.completed.value, PayoutStatus.cancelled.value])
+async def test_mark_paid_rejects_closed_payout_and_preserves_snapshot(session_factory, final_status):
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 111, "Иван Иванов")
+        payout = await create_payout(session, actor_telegram_id=123, payload=_payout_payload())
+        [recipient] = await add_recipients(session, payout, [user.id])
+        payout.status = final_status
+        recipient.status = RecipientStatus.payment_received.value
+        recipient.payment_profile_snapshot = {"raw_payment_details": "original account"}
+        recipient.payment_snapshot_version = 1
+        recipient_id = recipient.id
+        await session.commit()
+
+        with pytest.raises(PayoutClosedConflict, match="payout_closed|payout_cancelled"):
+            await mark_paid(session, recipient, actor_telegram_id=123, expected_snapshot_version=1)
+        await session.rollback()
+
+        saved = await session.get(PayoutRecipient, recipient_id)
+        assert saved.status == RecipientStatus.payment_received.value
+        assert saved.payment_profile_snapshot == {"raw_payment_details": "original account"}
+        assert saved.payment_snapshot_version == 1
+        assert saved.paid_at is None
+
+
+@pytest.mark.asyncio
+async def test_completed_payout_snapshot_remains_frozen_after_profile_edit(session_factory):
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 111, "Иван Иванов")
+        await upsert_payment_profile(session, user, "original account")
+        payout = await create_payout(session, actor_telegram_id=123, payload=_payout_payload())
+        [recipient] = await add_recipients(session, payout, [user.id])
+        payout.status = PayoutStatus.sent.value
+        recipient.status = RecipientStatus.payment_received.value
+        recipient.payment_profile_snapshot = {"raw_payment_details": "original account"}
+        recipient.payment_snapshot_version = 1
+        await session.commit()
+
+        await complete_payout(session, payout, actor_telegram_id=123)
+        await session.commit()
+        await save_profile_and_snapshot(session, user=user, payload="new account", active_recipient=None)
+        await session.commit()
+
+        saved = await session.get(PayoutRecipient, recipient.id)
+        assert saved.status == RecipientStatus.payment_received.value
+        assert saved.payment_profile_snapshot == {"raw_payment_details": "original account"}
+        assert saved.payment_snapshot_version == 1
+        with pytest.raises(PayoutClosedConflict, match="payout_closed"):
+            await mark_paid(session, saved, actor_telegram_id=123, expected_snapshot_version=1)
+        await session.rollback()
 
 
 def test_payout_workflow_state_rejects_unknown_recipient_status():
