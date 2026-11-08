@@ -673,6 +673,8 @@ async def test_send_failure_sets_failed(session_factory):
 async def test_stale_sending_returns_pending(session_factory):
     payout, recipient, _ = await _create_payout_with_recipient(session_factory)
     async with session_factory() as session:
+        db_payout = await session.get(Payout, payout.id)
+        db_payout.status = PayoutStatus.sending.value
         db_recipient = await session.get(PayoutRecipient, recipient.id)
         db_recipient.status = RecipientStatus.sending.value
         db_recipient.updated_at = datetime.now(UTC) - timedelta(minutes=11)

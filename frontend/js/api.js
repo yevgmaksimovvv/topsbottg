@@ -77,6 +77,7 @@ async function readErrorMessage(response) {
         const detail = (await response.json())?.detail;
         if (detail === "payout_closed") return "Выплата закрыта. Отметка оплаты недоступна.";
         if (detail === "payout_cancelled") return "Выплата отменена. Отметка оплаты недоступна.";
+        if (detail === "payout_sending") return "Нельзя удалить выплату до завершения рассылки.";
       } catch {
         // Fall back to the snapshot conflict message.
       }
@@ -231,31 +232,43 @@ async function loadUsers({ reset = true, silent = false } = {}) {
   }
 }
 
-async function loadPayouts({ silent = false } = {}) {
+async function loadPayouts({ silent = false, loadMore = false } = {}) {
   if (!canUseApi()) return;
   const requestId = ++state.payoutsRequestId;
+  const limit = state.payoutsPageSize;
+  const beforeId = loadMore ? Number(state.payouts.at(-1)?.id) : null;
   if (!silent) {
     setLoadingAndRender("payouts", true);
     clearError();
   }
   try {
-    const payouts = await api("/admin/payouts");
+    const cursor = Number.isInteger(beforeId) && beforeId > 0 ? `&before_id=${beforeId}` : "";
+    const payouts = await api(`/admin/payouts?limit=${limit}${cursor}`);
     if (requestId !== state.payoutsRequestId) return;
     state.payoutsLoadError = null;
-    state.payouts = payouts;
+    if (loadMore) {
+      const byId = new Map(state.payouts.map((item) => [Number(item.id), item]));
+      payouts.forEach((item) => byId.set(Number(item.id), item));
+      state.payouts = [...byId.values()];
+      state.payoutsHasMore = payouts.length === limit;
+    } else {
+      const ids = new Set(payouts.map((item) => Number(item.id)));
+      const keepOlder = payouts.length === limit && state.payouts.length > limit;
+      state.payouts = [...payouts, ...(keepOlder
+        ? state.payouts.filter((item) => !ids.has(Number(item.id)) &&
+          Number(item.id) < Number(payouts.at(-1)?.id)) : [])];
+      if (!keepOlder) state.payoutsHasMore = payouts.length === limit;
+    }
     renderPayouts();
   } catch (error) {
     if (requestId === state.payoutsRequestId) {
       logLoadError("loadPayouts", error);
       state.payoutsLoadError = error?.message || "Ошибка загрузки";
       renderPayouts();
-      if (!silent)
-        setErrorAndRender(error.message || "Не удалось загрузить выплаты");
+      if (!silent) setErrorAndRender(error.message || "Не удалось загрузить выплаты");
     }
   } finally {
-    if (requestId === state.payoutsRequestId) {
-      if (!silent) setLoadingAndRender("payouts", false);
-    }
+    if (requestId === state.payoutsRequestId && !silent) setLoadingAndRender("payouts", false);
   }
 }
 
@@ -289,7 +302,9 @@ async function refreshSelectedPayout({ silent = false } = {}) {
   try {
     const detail = await api(`/admin/payouts/${payoutId}`);
     if (!isCurrentRequest()) return false;
-    const recipients = await api(`/admin/payouts/${payoutId}/recipients`);
+    const recipients = Array.isArray(detail?.recipients)
+      ? detail.recipients
+      : await api(`/admin/payouts/${payoutId}/recipients`);
     if (!isCurrentRequest()) return false;
     state.selectedPayoutDetail = detail;
     state.recipientsLoadError = null;
@@ -319,7 +334,9 @@ export async function fetchSelectedPayoutSnapshot(payoutId) {
   const id = Number(payoutId);
   if (!Number.isInteger(id)) return null;
   const detail = await api(`/admin/payouts/${id}`);
-  const recipients = await api(`/admin/payouts/${id}/recipients`);
+  const recipients = Array.isArray(detail?.recipients)
+    ? detail.recipients
+    : await api(`/admin/payouts/${id}/recipients`);
   if (Number(state.selectedPayoutId) === id) {
     state.selectedPayoutDetail = detail;
     state.recipients = recipients;
@@ -327,6 +344,18 @@ export async function fetchSelectedPayoutSnapshot(payoutId) {
     renderSelectedPayoutView();
   }
   return { detail, recipients };
+}
+
+export async function deleteSelectedPayout(payoutId) {
+  const id = Number(payoutId);
+  if (!canUseApi() || !Number.isInteger(id) || id < 1) return false;
+  await api(`/admin/payouts/${id}`, { method: "DELETE" });
+  state.payouts = state.payouts.filter((item) => Number(item.id) !== id);
+  if (Number(state.selectedPayoutId) === id) clearPayoutSelection();
+  setToast(`Выплата #${id} удалена из истории.`, "success");
+  renderApp();
+  void schedulePayoutsRefresh({ silent: true });
+  return true;
 }
 
 export function clearPayoutSelection() {
@@ -422,44 +451,32 @@ export function stopAdminEvents({ resetRecovery = true } = {}) {
 }
 
 export function handleAdminEvent(type, payload = {}) {
-  if (type === "ping") return;
+  if (type === "ping" || !state.initData) return;
   if (type === "users_changed") {
-    if (state.initData) void loadUsers({ reset: true, silent: true });
+    void loadUsers({ reset: true, silent: true });
     return;
   }
+  if (payload.reason === "delete_payout" && payload.payout_id) {
+    const id = Number(payload.payout_id);
+    state.payouts = state.payouts.filter((item) => Number(item.id) !== id);
+    if (Number(state.selectedPayoutId) === id) clearPayoutSelection();
+  }
   if (type === "payouts_changed") {
-    if (state.initData) void schedulePayoutsRefresh({ silent: true });
+    void schedulePayoutsRefresh({ silent: true });
     return;
   }
   if (type === "payout_changed") {
-    if (state.initData) {
-      if (
-        payload.payout_id &&
-        Number(payload.payout_id) === Number(state.selectedPayoutId)
-      ) {
-        void scheduleAdminStateRefresh({
-          selected: true,
-          payouts: true,
-          silent: true,
-        });
-      } else {
-        void schedulePayoutsRefresh({ silent: true });
-      }
+    if (payload.payout_id && Number(payload.payout_id) === Number(state.selectedPayoutId)) {
+      void scheduleAdminStateRefresh({ selected: true, payouts: true, silent: true });
+    } else {
+      void schedulePayoutsRefresh({ silent: true });
     }
     return;
   }
   if (type === "payout_recipients_changed") {
-    if (
-      state.initData &&
-      payload.payout_id &&
-      Number(payload.payout_id) === Number(state.selectedPayoutId)
-    ) {
-      void scheduleAdminStateRefresh({
-        selected: true,
-        payouts: true,
-        silent: true,
-      });
-    } else if (state.initData) {
+    if (payload.payout_id && Number(payload.payout_id) === Number(state.selectedPayoutId)) {
+      void scheduleAdminStateRefresh({ selected: true, payouts: true, silent: true });
+    } else {
       void schedulePayoutsRefresh({ silent: true });
     }
   }

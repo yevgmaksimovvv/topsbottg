@@ -208,7 +208,7 @@ def test_vps_flock_rejects_concurrent_deploy_before_compose_changes(tmp_path: Pa
     project, sha, bin_dir = _production_checkout(tmp_path)
     lock_path = project / ".deploy.lock"
     with lock_path.open("w", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[attr-defined]
         result = _run_deploy(tmp_path, project, sha, bin_dir)
     assert result.returncode != 0
     assert "Another production deployment is active" in result.stderr

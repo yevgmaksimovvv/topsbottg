@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -10,15 +11,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import selectinload
 
-from topsbottg.models import Payout, PayoutRecipient, PayoutStatus, RecipientStatus
+from topsbottg.models import Payout, PayoutReadyNotification, PayoutRecipient, PayoutStatus, RecipientStatus
 from topsbottg.services import (
     ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
     claim_pending_recipients,
+    claim_ready_notifications,
     finalize_payout_after_worker,
     get_payment_profile,
+    payout_send_lock,
     queue_admin_event,
     recover_stale_sending,
     render_message_template,
+    settle_ready_notification,
 )
 
 MAX_TELEGRAM_MESSAGE_LENGTH = 4096
@@ -47,102 +51,165 @@ def _recipient_keyboard(recipient_id: int, *, has_profile: bool) -> InlineKeyboa
 
 
 async def process_recipient(
-    bot: MessageSender,
-    session_factory: async_sessionmaker,
-    settings,
-    recipient_id: int,
+    bot: MessageSender, session_factory: async_sessionmaker, settings, recipient_id: int
 ) -> None:
     async with session_factory() as session:
-        recipient = await session.scalar(
-            select(PayoutRecipient)
-            .options(selectinload(PayoutRecipient.user))
-            .options(selectinload(PayoutRecipient.payout))
-            .where(PayoutRecipient.id == recipient_id)
-        )
-        if recipient is None or recipient.status != RecipientStatus.sending.value:
+        payout_id = await session.scalar(select(PayoutRecipient.payout_id).where(PayoutRecipient.id == recipient_id))
+        if payout_id is None:
             return
-        payout = recipient.payout
-        user = recipient.user
-        profile = await get_payment_profile(session, recipient.user_id)
-        has_profile = profile is not None and profile.deleted_at is None
-        keyboard = _recipient_keyboard(recipient.id, has_profile=has_profile)
-        try:
-            text = render_message_template(payout)
-            if has_profile:
-                text += (
-                    "\n\n\u041f\u043b\u0430\u0442\u0451\u0436\u043d\u044b\u0435 "
-                    f"\u0434\u0430\u043d\u043d\u044b\u0435:\n{profile.raw_payment_details}"
-                )
-            if len(text) > MAX_TELEGRAM_MESSAGE_LENGTH:
-                raise ValueError(
-                    f"Telegram message exceeds the {MAX_TELEGRAM_MESSAGE_LENGTH}-character limit."
-                )
-            await bot.send_message(user.telegram_id, text, reply_markup=keyboard)
-        except Exception as exc:  # noqa: BLE001
-            async with session_factory() as fail_session:
-                fail_recipient = await fail_session.get(PayoutRecipient, recipient.id)
-                if fail_recipient is not None and fail_recipient.status == RecipientStatus.sending.value:
-                    fail_recipient.status = RecipientStatus.failed.value
-                    fail_recipient.failed_at = datetime.now(UTC)
-                    fail_recipient.failure_reason = str(exc)[:250]
-                    queue_admin_event(
-                        fail_session,
-                        ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
-                        {"payout_id": fail_recipient.payout_id, "reason": "worker_failed"},
-                    )
-                await fail_session.commit()
+        # Keep the transaction lock on this session so cancellation and deletion
+        # in other processes serialize without consuming another pool connection.
+        async with payout_send_lock(payout_id, session):
+            recipient = await session.scalar(
+                select(PayoutRecipient)
+                .options(selectinload(PayoutRecipient.user))
+                .options(selectinload(PayoutRecipient.payout))
+                .where(PayoutRecipient.id == recipient_id)
+            )
+            if recipient is None or recipient.status != RecipientStatus.sending.value:
+                return
+            payout = recipient.payout
+            if payout.deleted_at is not None or payout.status in {
+                PayoutStatus.cancelled.value,
+                PayoutStatus.completed.value,
+            }:
+                recipient.status = RecipientStatus.cancelled.value
+                return
+            profile = await get_payment_profile(session, recipient.user_id)
+            has_profile = profile is not None and profile.deleted_at is None
+            keyboard = _recipient_keyboard(recipient.id, has_profile=has_profile)
+            chat_id = recipient.user.telegram_id
+            try:
+                text = render_message_template(payout)
+                if has_profile and profile is not None and profile.raw_payment_details is not None:
+                    text += "\n\nПлатёжные данные:\n" + profile.raw_payment_details
+                if len(text) > MAX_TELEGRAM_MESSAGE_LENGTH:
+                    raise ValueError(f"Telegram message exceeds the {MAX_TELEGRAM_MESSAGE_LENGTH}-character limit.")
+                error: Exception | None = None
+            except Exception as exc:  # noqa: BLE001
+                error = exc
+            if error is None:
+                try:
+                    await bot.send_message(chat_id, text, reply_markup=keyboard)
+                except Exception as exc:  # noqa: BLE001
+                    error = exc
+            updated = await session.get(PayoutRecipient, recipient_id)
+            if updated is None or updated.status != RecipientStatus.sending.value:
+                return
+            if error is None:
+                updated.status = RecipientStatus.sent.value if has_profile else RecipientStatus.payment_required.value
+                updated.sent_at = datetime.now(UTC)
+                reason = "worker_sent" if has_profile else "worker_payment_required"
+            else:
+                updated.status = RecipientStatus.failed.value
+                updated.failed_at = datetime.now(UTC)
+                updated.failure_reason = str(error)[:250]
+                reason = "worker_failed"
+            queue_admin_event(
+                session, ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED, {"payout_id": payout_id, "reason": reason}
+            )
+
+
+async def deliver_ready_notifications(bot: MessageSender, session_factory: async_sessionmaker) -> None:
+    async with session_factory() as session:
+        rows = await claim_ready_notifications(session)
+        notifications = [(row.id, row.telegram_id, row.message) for row in rows]
+        await session.commit()
+    for message_id, chat_id, message in notifications:
+        await deliver_ready_notification(bot, session_factory, message_id, chat_id, message)
+
+
+async def deliver_ready_notification(
+    bot: MessageSender, session_factory: async_sessionmaker, message_id: int, chat_id: int, message: str
+) -> None:
+    async with session_factory() as session:
+        notification = await session.get(PayoutReadyNotification, message_id)
+        if notification is None:
             return
-        next_status = RecipientStatus.sent.value if has_profile else RecipientStatus.payment_required.value
-        async with session_factory() as ok_session:
-            ok_recipient = await ok_session.get(PayoutRecipient, recipient.id)
-            if ok_recipient is not None and ok_recipient.status == RecipientStatus.sending.value:
-                ok_recipient.status = next_status
-                ok_recipient.sent_at = datetime.now(UTC)
-                queue_admin_event(
-                    ok_session,
-                    ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
-                    {
-                        "payout_id": ok_recipient.payout_id,
-                        "reason": "worker_sent" if has_profile else "worker_payment_required",
-                    },
+        async with payout_send_lock(notification.payout_id, session):
+            notification = await session.scalar(
+                select(PayoutReadyNotification)
+                .where(PayoutReadyNotification.id == message_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            payout = (
+                await session.scalar(
+                    select(Payout)
+                    .where(Payout.id == notification.payout_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
                 )
-                await ok_session.commit()
+                if notification is not None
+                else None
+            )
+            if (
+                notification is None
+                or notification.delivered_at is not None
+                or notification.discarded_at is not None
+            ):
+                return
+            statuses = list(
+                await session.scalars(
+                    select(PayoutRecipient.status).where(PayoutRecipient.payout_id == notification.payout_id)
+                )
+            )
+            active = [status for status in statuses if status != RecipientStatus.cancelled.value]
+            ready = (
+                payout is not None
+                and payout.deleted_at is None
+                and payout.status in {PayoutStatus.sent.value, PayoutStatus.partially_failed.value}
+                and active
+                and RecipientStatus.payment_received.value in active
+                and all(
+                    status in {RecipientStatus.payment_received.value, RecipientStatus.paid.value} for status in active
+                )
+            )
+            if not ready:
+                await settle_ready_notification(session, message_id, discard=True)
+                return
+            error: Exception | None = None
+            try:
+                await bot.send_message(chat_id, message)
+            except Exception as exc:  # noqa: BLE001
+                error = exc
+            await settle_ready_notification(session, message_id, error)
 
 
 async def run_worker(bot: Bot, session_factory: async_sessionmaker, settings, stop_event: asyncio.Event) -> None:
+    loop = asyncio.get_running_loop()
+    next_recovery = 0.0
+    next_notification = 0.0
     while not stop_event.is_set():
+        now = loop.time()
+        if now >= next_recovery:
+            async with session_factory() as session:
+                await recover_stale_sending(session)
+                await session.commit()
+            next_recovery = loop.time() + 60
+        if now >= next_notification:
+            await deliver_ready_notifications(bot, session_factory)
+            next_notification = loop.time() + 5
         async with session_factory() as session:
-            await recover_stale_sending(session)
+            rows = await claim_pending_recipients(session, limit=max(1, int(settings.broadcast_rate_per_second)))
             await session.commit()
-
-        async with session_factory() as session:
-            recipients = await claim_pending_recipients(
-                session,
-                limit=max(1, int(settings.broadcast_rate_per_second)),
-            )
-            await session.commit()
-
-        if not recipients:
-            await asyncio.sleep(1)
+        if not rows:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop_event.wait(), timeout=1)
             continue
-
-        impacted_payout_ids = {recipient.payout_id for recipient in recipients}
-        for recipient in recipients:
+        payout_ids = {row.payout_id for row in rows}
+        for row in rows:
             if stop_event.is_set():
                 break
-            await process_recipient(bot, session_factory, settings, recipient.id)
-            await asyncio.sleep(1 / settings.broadcast_rate_per_second)
-
+            await process_recipient(bot, session_factory, settings, row.id)
+            await asyncio.sleep(1 / max(1, int(settings.broadcast_rate_per_second)))
         async with session_factory() as session:
             payouts = await session.scalars(
                 select(Payout).where(
-                    Payout.id.in_(impacted_payout_ids),
+                    Payout.id.in_(payout_ids),
+                    Payout.deleted_at.is_(None),
                     Payout.status.in_(
-                        [
-                            PayoutStatus.sending.value,
-                            PayoutStatus.sent.value,
-                            PayoutStatus.partially_failed.value,
-                        ]
+                        [PayoutStatus.sending.value, PayoutStatus.sent.value, PayoutStatus.partially_failed.value]
                     ),
                 )
             )

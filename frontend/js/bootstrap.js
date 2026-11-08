@@ -19,6 +19,7 @@ import {
   loadUsers,
   markPaid,
   clearPayoutSelection,
+  deleteSelectedPayout,
   selectPayout,
   startAdminEvents,
   stopAdminEvents,
@@ -212,6 +213,29 @@ function bindEvents() {
         case "clear-payout":
           clearPayoutSelection();
           return;
+        case "load-more-payouts":
+          await loadPayouts({ loadMore: true });
+          return;
+        case "delete-payout": {
+          const payout = state.selectedPayoutDetail?.payout;
+          if (!payout || payout.status === "sending") return;
+          const payoutId = Number(payout.id);
+          showConfirmation({
+            title: "Удалить выплату?",
+            content: `Выплата #${payoutId} · ${payoutPeriodLabel(payout)} будет скрыта из истории.`,
+            warning: "История операций сохранится, уже отправленные сообщения и переводы не отменяются.",
+            confirmLabel: "Удалить выплату",
+            onConfirm: async () => {
+              try { await deleteSelectedPayout(payoutId); }
+              catch (error) {
+                setToast(error.message || "Не удалось удалить выплату.", "error");
+                renderApp();
+                throw error;
+              }
+            },
+          });
+          return;
+        }
         case "open-history":
           state.activeMobileView = "payouts";
           renderNavigation();
