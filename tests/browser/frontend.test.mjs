@@ -110,6 +110,8 @@ test("responsive Mini App and payout workflows", async (t) => {
   const sentUserIds = [];
   let markPaidCalls = 0;
   let staleMarkPaid = false;
+  let failConflictRefresh = false;
+  let conflictRefreshShouldFail = false;
   let createPayoutCalls = 0;
   const failedPayoutDetails = new Set();
   let server;
@@ -179,10 +181,12 @@ test("responsive Mini App and payout workflows", async (t) => {
       const url = new URL(req.url());
       const path = url.pathname;
       const method = req.method();
+      let conflict = false;
       requestLog.push({
         path,
         method,
         search: url.searchParams.get("search") || "",
+        body: method === "POST" ? req.postDataJSON() : null,
       });
       if (method === "POST" && path.endsWith("/send-selected")) {
         sendCalls += 1;
@@ -192,11 +196,7 @@ test("responsive Mini App and payout workflows", async (t) => {
         markPaidCalls += 1;
         if (staleMarkPaid) {
           staleMarkPaid = false;
-          return route.fulfill({
-            status: 409,
-            contentType: "application/json",
-            body: JSON.stringify({ detail: "payment_details_changed" }),
-          });
+          conflict = true;
         }
       }
       const requestQueue = delayedRequests.get(path);
@@ -211,6 +211,13 @@ test("responsive Mini App and payout workflows", async (t) => {
             body: JSON.stringify({ detail: result.detail || "Request failed" }),
           });
         }
+      }
+      if (conflict) {
+        conflictRefreshShouldFail = failConflictRefresh;
+        historicalRecipients = historicalRecipients.map((recipient) => recipient.id === 501
+          ? { ...recipient, payment_snapshot_version: 2, payment_snapshot_updated_at: "2026-11-08T12:00:00Z", payment_profile_snapshot: { raw_payment_details: "Updated details" } }
+          : recipient);
+        return route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ detail: "payment_details_changed" }) });
       }
       let data = {};
       if (path.endsWith("/events-token")) data = { token: "browser-test" };
@@ -277,6 +284,10 @@ test("responsive Mini App and payout workflows", async (t) => {
         data = { payout: payouts.find((payout) => payout.id === id) || null };
       } else if (path.endsWith("/recipients") && method === "GET") {
         const payoutId = Number(path.split("/").at(-2));
+        if (payoutId === 38 && conflictRefreshShouldFail) {
+          conflictRefreshShouldFail = false;
+          return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ detail: "Recipient refresh unavailable" }) });
+        }
         data = payoutId === 38 ? historicalRecipients : payoutId === 39 ? sentRecipients : recipients;
       } else if (path.endsWith("/send-selected")) {
         await new Promise((done) => setTimeout(done, 100));
@@ -1316,18 +1327,59 @@ test("responsive Mini App and payout workflows", async (t) => {
     await page.locator("[data-expand-recipient='501']").click();
     staleMarkPaid = true;
     await page.locator('[data-action="mark-paid"]').click();
-    historicalRecipients = historicalRecipients.map((recipient) => recipient.id === 501
-      ? { ...recipient, payment_snapshot_version: 2, payment_snapshot_updated_at: "2026-11-08T12:00:00Z", payment_profile_snapshot: { raw_payment_details: "Updated details" } }
-      : recipient);
-    await page.evaluate(() => window.__adminEvents.dispatchEvent(
-      new MessageEvent("payout_recipients_changed", { data: JSON.stringify({ payout_id: 38 }) }),
-    ));
     await page.locator("#dialog-confirm").click();
+    await page.waitForFunction(() => document.querySelector("[data-recipient-details='501']")?.textContent.includes("Updated details"));
+    assert.ok(requestLog.filter((request) => request.path === "/api/admin/payouts/38/recipients" && request.method === "GET").length >= 2);
     await page.waitForFunction(() => document.querySelector('[data-recipient-row="501"] .field-error')?.textContent.includes("Реквизиты изменились"));
     assert.equal(await page.locator('[data-recipient-row="501"] .badge').innerText(), "Готов к оплате");
     assert.match(await page.locator("[data-recipient-details='501']").innerText(), /Updated details/);
     assert.match(await page.locator("[data-recipient-details='501']").innerText(), /Реквизиты обновлены/);
     assert.equal(await page.locator("[data-expand-recipient='501']").getAttribute("aria-expanded"), "true");
+    assert.equal(markPaidCalls, 4);
+    failConflictRefresh = true;
+    staleMarkPaid = true;
+    const failedRefreshResponse = page.waitForResponse((response) => response.status() === 503 && new URL(response.url()).pathname === "/api/admin/payouts/38/recipients");
+    await page.locator('[data-action="mark-paid"]').click();
+    await page.locator("#dialog-confirm").click();
+    await failedRefreshResponse;
+    await page.waitForFunction(() => document.querySelector('[data-recipient-row="501"] .field-error') !== null);
+    assert.equal(await page.locator('[data-recipient-row="501"] [data-action="mark-paid"]').count(), 0);
+    assert.equal(markPaidCalls, 5);
+    await selectPayout(37);
+    await selectPayout(38);
+    await page.locator('[data-mobile-view="recipients"]').click();
+    await page.locator("[data-expand-recipient='501']").click();
+    await page.locator('[data-action="mark-paid"]').click();
+    await page.locator("#dialog-confirm").click();
+    await page.waitForFunction(async () => { const { state } = await import("/miniapp/js/store.js"); return state.recipients.find((recipient) => recipient.id === 501)?.status === "paid"; });
+    assert.equal(requestLog.filter((request) => request.path.endsWith("/mark-paid") && request.method === "POST").at(-1).body.expected_snapshot_version, 2);
+    historicalRecipients = historicalRecipients.map((recipient) => recipient.id === 501 ? { ...recipient, status: "payment_received" } : recipient);
+    await selectPayout(38);
+    await page.locator('[data-mobile-view="recipients"]').click();
+    if (await page.locator("[data-expand-recipient='501']").getAttribute("aria-expanded") !== "true") await page.locator("[data-expand-recipient='501']").click();
+    staleMarkPaid = true;
+    await page.locator('[data-action="mark-paid"]').waitFor();
+    const delayedConflict = delayNextRequest("/api/admin/payouts/38/recipients/501/mark-paid");
+    const conflictStarted = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/admin/payouts/38/recipients/501/mark-paid");
+    await page.locator('[data-action="mark-paid"]').click();
+    await page.locator("#dialog-confirm").click();
+    await conflictStarted;
+    await page.keyboard.press("Escape");
+    await page.locator('[data-mobile-view="payouts"]').click();
+    await page.locator('.payout-row[data-payout-id="40"]').click();
+    delayedConflict.release();
+    await page.waitForFunction(() => document.querySelector("#recipients-context")?.textContent.includes("#40"));
+    await page.waitForFunction(async () => { const { state } = await import("/miniapp/js/store.js"); return !state.loading.markPaid; });
+    assert.equal((await readPayoutState()).selectedPayoutId, 40);
+    assert.equal((await readPayoutState()).detailPayoutId, 40);
+    assert.equal((await readPayoutState()).markPaidErrorIds.includes(501), false);
+    assert.equal((await readPayoutState()).loadingRecipientId, null);
+    payouts.find((payout) => payout.id === 40).workflow_state = "no_active_recipients";
+    await page.evaluate(() => window.__adminEvents.dispatchEvent(
+      new MessageEvent("payout_changed", { data: JSON.stringify({ payout_id: 40 }) }),
+    ));
+    await page.waitForFunction(async () => { const { state } = await import("/miniapp/js/store.js"); return state.payouts.find((payout) => payout.id === 40)?.workflow_state === "no_active_recipients"; });
+    assert.ok((await page.locator('.payout-row[data-payout-id="40"]').innerText()).includes(String.fromCodePoint(1053, 1077, 1090, 32, 1072, 1082, 1090, 1080, 1074, 1085, 1099, 1093, 32, 1087, 1086, 1083, 1091, 1095, 1072, 1090, 1077, 1083, 1077, 1081)));
     await page.evaluate(async () => {
       const { clearNotification } = await import("/miniapp/js/store.js");
       clearNotification();
@@ -1362,7 +1414,7 @@ test("responsive Mini App and payout workflows", async (t) => {
     }
     assert.deepEqual(pageErrors, []);
     assert.equal(sendCalls, 3);
-    assert.equal(markPaidCalls, 4);
+    assert.equal(markPaidCalls, 7);
     await t.diagnostic(`Mobile, tablet, and desktop light/dark screenshots saved to ${evidence}`);
     await context.close();
   } finally {

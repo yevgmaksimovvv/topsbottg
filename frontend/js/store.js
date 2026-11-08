@@ -35,6 +35,7 @@ export const state = {
   recipientFilter: "all",
   expandedRecipients: new Set(),
   recipientOperationError: {},
+  recipientRefreshRequired: {},
   loading: {
     users: false,
     payouts: false,

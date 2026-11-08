@@ -116,7 +116,9 @@ async function api(path, options = {}) {
       },
     });
     if (!response.ok) {
-      throw new Error(await readErrorMessage(response));
+      const error = new Error(await readErrorMessage(response));
+      error.status = response.status;
+      throw error;
     }
     if (response.status === 204) return null;
     if (isJsonResponse(response)) return response.json();
@@ -125,7 +127,9 @@ async function api(path, options = {}) {
     if (error?.name === "AbortError" || error === "timeout") {
       throw new Error("Запрос превысил время ожидания.");
     }
-    throw new Error(error?.message || "Не удалось выполнить запрос.");
+    const wrapped = new Error(error?.message || "Request failed.");
+    wrapped.status = error?.status;
+    throw wrapped;
   } finally {
     clearTimeout(timeoutId);
   }
@@ -274,6 +278,10 @@ async function refreshSelectedPayout({ silent = false } = {}) {
     state.selectedPayoutDetail = detail;
     state.recipientsLoadError = null;
     state.recipients = recipients;
+    for (const recipient of recipients) {
+      if (state.recipientRefreshRequired[Number(recipient.id)])
+        delete state.recipientRefreshRequired[Number(recipient.id)];
+    }
     upsertPayoutInList(detail?.payout);
     renderSelectedPayoutView();
     return true;
@@ -594,6 +602,7 @@ async function markPaid(recipientId, expectedSnapshotVersion) {
   const payoutRequestId = state.selectedPayoutRequestId;
   const id = Number(recipientId);
   const isCurrentPayout = () => Number(state.selectedPayoutId) === payoutId && state.selectedPayoutRequestId === payoutRequestId;
+  const isSelectedPayout = () => Number(state.selectedPayoutId) === payoutId;
   markPaidInFlight = true;
   setLoadingAndRender("markPaid", true);
   state.loadingRecipientId = id;
@@ -620,7 +629,23 @@ async function markPaid(recipientId, expectedSnapshotVersion) {
     await schedulePayoutsRefresh({ silent: true });
   } catch (error) {
     const message = error?.message || "Ошибка сервера";
-    if (isCurrentPayout()) {
+    if (error?.status === 409) {
+      if (isSelectedPayout()) {
+        state.recipientRefreshRequired[id] = true;
+        state.expandedRecipients.add(id);
+        state.recipientOperationError[id] = "\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b \u0438\u0437\u043c\u0435\u043d\u0438\u043b\u0438\u0441\u044c. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0430\u043a\u0442\u0443\u0430\u043b\u044c\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435 \u043f\u0435\u0440\u0435\u0434 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435\u043c \u043e\u043f\u043b\u0430\u0442\u044b.";
+        renderApp();
+        const refreshed = await refreshSelectedPayout();
+        if (!refreshed && isSelectedPayout()) {
+          state.recipientRefreshRequired[id] = true;
+          state.recipientOperationError[id] = "\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b \u0438\u0437\u043c\u0435\u043d\u0438\u043b\u0438\u0441\u044c, \u043d\u043e \u0430\u043a\u0442\u0443\u0430\u043b\u044c\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435 \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c. \u041e\u0431\u043d\u043e\u0432\u0438\u0442\u0435 \u0432\u044b\u043f\u043b\u0430\u0442\u0443 \u043f\u0435\u0440\u0435\u0434 \u043f\u043e\u0432\u0442\u043e\u0440\u043d\u044b\u043c \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435\u043c.";
+          renderApp();
+        }
+      } else {
+        setToast(`\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b \u0432 \u0432\u044b\u043f\u043b\u0430\u0442\u0435 #${payoutId} \u0438\u0437\u043c\u0435\u043d\u0438\u043b\u0438\u0441\u044c. \u041e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u0432\u044b\u043f\u043b\u0430\u0442\u0443 \u0437\u0430\u043d\u043e\u0432\u043e \u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0434\u0430\u043d\u043d\u044b\u0435.`, "warning");
+        renderApp();
+      }
+    } else if (isCurrentPayout()) {
       state.recipientOperationError[id] = message;
       setErrorAndRender(message || "Не удалось обновить статус");
     } else {

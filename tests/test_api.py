@@ -606,11 +606,12 @@ async def test_mark_paid_rejects_wrong_status(client, session_factory, admin_ini
             payload=_payout_payload(),
         )
         [recipient] = await add_recipients(session, payout, [user.id])
+        recipient.payment_snapshot_version = 1
         await session.commit()
     response = await client.post(
         f"/api/admin/payouts/{payout.id}/recipients/{recipient.id}/mark-paid",
         headers={"X-Telegram-Init-Data": admin_init_data},
-        json={},
+        json={"expected_snapshot_version": 1},
     )
     assert response.status_code == 400
 
@@ -626,16 +627,51 @@ async def test_mark_paid_endpoint(client, session_factory, admin_init_data):
         )
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.payment_received.value
+        recipient.payment_profile_snapshot = {"raw_payment_details": "Reviewed details"}
+        recipient.payment_snapshot_version = 1
         await session.commit()
     response = await client.post(
         f"/api/admin/payouts/{payout.id}/recipients/{recipient.id}/mark-paid",
         headers={"X-Telegram-Init-Data": admin_init_data},
-        json={"paid_note": "done"},
+        json={"paid_note": "done", "expected_snapshot_version": 1},
     )
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "paid"
     assert payload["paid_by_admin_id"] == 123
+    async with session_factory() as session:
+        paid = await session.get(type(recipient), recipient.id)
+        assert paid.status == RecipientStatus.paid.value
+        assert paid.payment_snapshot_version == 1
+        assert paid.payment_profile_snapshot == {"raw_payment_details": "Reviewed details"}
+    repeated = await client.post(
+        f"/api/admin/payouts/{payout.id}/recipients/{recipient.id}/mark-paid",
+        headers={"X-Telegram-Init-Data": admin_init_data},
+        json={"expected_snapshot_version": 1},
+    )
+    assert repeated.status_code == 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        None,
+        {"expected_snapshot_version": None},
+        {"expected_snapshot_version": 0},
+        {"expected_snapshot_version": -1},
+        {"expected_snapshot_version": 1.5},
+        {"expected_snapshot_version": "1"},
+    ],
+)
+async def test_mark_paid_rejects_missing_or_invalid_snapshot_version(client, admin_init_data, body):
+    response = await client.post(
+        "/api/admin/payouts/1/recipients/1/mark-paid",
+        headers={"X-Telegram-Init-Data": admin_init_data},
+        json=body,
+    )
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -658,6 +694,33 @@ async def test_mark_paid_endpoint_rejects_stale_snapshot_version(client, session
         unchanged = await session.get(type(recipient), recipient.id)
         assert unchanged.status == RecipientStatus.payment_received.value
         assert unchanged.payment_snapshot_version == 2
+
+
+@pytest.mark.asyncio
+async def test_payout_api_serializes_active_and_cancelled_recipient_progress(client, session_factory, admin_init_data):
+    async with session_factory() as session:
+        users = [
+            await get_or_create_user(session, telegram_id, f"User {telegram_id}")
+            for telegram_id in (201, 202, 203)
+        ]
+        payout = await create_payout(session, actor_telegram_id=123, payload=_payout_payload())
+        payout.status = "sent"
+        recipients = await add_recipients(session, payout, [user.id for user in users])
+        recipients[0].status = RecipientStatus.paid.value
+        recipients[1].status = RecipientStatus.payment_received.value
+        recipients[2].status = RecipientStatus.cancelled.value
+        await session.commit()
+    response = await client.get("/api/admin/payouts", headers={"X-Telegram-Init-Data": admin_init_data})
+    assert response.status_code == 200
+    item = next(row for row in response.json() if row["id"] == payout.id)
+    assert item["workflow_state"] == "ready_for_payment"
+    assert item["recipient_count"] == 3
+    assert item["active_recipient_count"] == 2
+    assert item["paid_recipient_count"] == 1
+    assert item["ready_for_payment_count"] == 1
+    assert item["awaiting_confirmation_count"] == 0
+    assert item["delivery_error_count"] == 0
+    assert item["cancelled_recipient_count"] == 1
 
 
 @pytest.mark.asyncio

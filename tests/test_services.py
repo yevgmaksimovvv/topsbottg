@@ -50,6 +50,14 @@ from topsbottg.services import (
         ("sent", ["payment_received", "payment_received"], "ready_for_payment"),
         ("sent", ["payment_received", "paid"], "ready_for_payment"),
         ("sent", ["paid", "paid"], "paid"),
+        ("sent", ["paid", "cancelled"], "paid"),
+        ("sent", ["payment_received", "cancelled"], "ready_for_payment"),
+        ("sent", ["payment_required", "cancelled"], "awaiting_confirmation"),
+        ("sent", ["failed", "cancelled"], "delivery_errors"),
+        ("sent", ["cancelled", "cancelled"], "no_active_recipients"),
+        ("sent", ["paid", "cancelled", "cancelled", "cancelled"], "paid"),
+        ("sent", ["payment_received", "paid", "cancelled", "cancelled"], "ready_for_payment"),
+        ("sent", ["payment_required", "cancelled", "cancelled"], "awaiting_confirmation"),
         ("sent", ["payment_received", "sent"], "awaiting_confirmation"),
         ("cancelled", ["paid"], "cancelled"),
     ],
@@ -731,7 +739,13 @@ async def test_mark_paid_service(session_factory, monkeypatch: pytest.MonkeyPatc
     events.clear()
     async with session_factory() as session:
         recipient = await session.get(PayoutRecipient, recipient.id)
-        recipient = await mark_paid(session, recipient, actor_telegram_id=123, paid_note="ok")
+        recipient = await mark_paid(
+            session,
+            recipient,
+            actor_telegram_id=123,
+            paid_note="ok",
+            expected_snapshot_version=recipient.payment_snapshot_version,
+        )
         await session.commit()
         assert recipient.status == RecipientStatus.paid.value
         assert recipient.paid_by_admin_id == 123
@@ -888,7 +902,12 @@ async def test_mark_paid_rejects_wrong_status(session_factory, initial_status):
         recipient.status = initial_status
         await session.commit()
         with pytest.raises(ValueError):
-            await mark_paid(session, recipient, actor_telegram_id=123)
+            await mark_paid(
+                session,
+                recipient,
+                actor_telegram_id=123,
+                expected_snapshot_version=recipient.payment_snapshot_version,
+            )
 
 
 @pytest.mark.asyncio
@@ -977,7 +996,12 @@ async def test_audit_log_does_not_store_payment_details(session_factory):
         [recipient] = await add_recipients(session, payout, [user.id])
         recipient.status = RecipientStatus.payment_received.value
         await session.commit()
-        await mark_paid(session, recipient, actor_telegram_id=123)
+        await mark_paid(
+            session,
+            recipient,
+            actor_telegram_id=123,
+            expected_snapshot_version=recipient.payment_snapshot_version,
+        )
         await session.commit()
         rows = await session.scalars(select(AuditLog).where(AuditLog.action == "recipient_marked_paid"))
         log = rows.first()

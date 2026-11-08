@@ -135,6 +135,7 @@ def serialize_payment_reveal(user: User, profile: PaymentProfile) -> PaymentProf
 
 def serialize_payout(payout: Payout, recipients: list[PayoutRecipient] | None = None) -> PayoutOut:
     recipients = recipients or []
+    active = [recipient for recipient in recipients if recipient.status != "cancelled"]
     return PayoutOut(
         id=payout.id,
         period_start_day=payout.period_start_day,
@@ -154,6 +155,14 @@ def serialize_payout(payout: Payout, recipients: list[PayoutRecipient] | None = 
         workflow_state=payout_workflow_state(payout, recipients),
         paid_recipient_count=sum(recipient.status == "paid" for recipient in recipients),
         recipient_count=len(recipients),
+        active_recipient_count=len(active),
+        ready_for_payment_count=sum(recipient.status == "payment_received" for recipient in active),
+        awaiting_confirmation_count=sum(
+            recipient.status in {"pending", "sending", "sent", "payment_required"}
+            for recipient in active
+        ),
+        delivery_error_count=sum(recipient.status == "failed" for recipient in active),
+        cancelled_recipient_count=len(recipients) - len(active),
         created_by_telegram_id=payout.created_by_telegram_id,
         created_at=payout.created_at,
         updated_at=payout.updated_at,

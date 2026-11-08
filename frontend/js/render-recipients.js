@@ -56,7 +56,8 @@ function renderRow(recipient, payoutStatus) {
   const details = paymentDetails(recipient);
   const canMarkPaid =
     recipient.status === "payment_received" &&
-    !["draft", "sending", "cancelled"].includes(payoutStatus);
+    !["draft", "sending", "cancelled"].includes(payoutStatus) &&
+    !state.recipientRefreshRequired[id];
   const operationError = state.recipientOperationError[id];
   const failure =
     recipient.status === "failed" && recipient.failure_reason

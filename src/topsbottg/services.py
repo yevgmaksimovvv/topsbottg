@@ -230,22 +230,28 @@ def payout_workflow_state(payout: Payout, recipients: list[PayoutRecipient]) -> 
         return "sending"
     if not recipients:
         return "no_recipients"
-    if any(recipient.status == RecipientStatus.failed.value for recipient in recipients):
-        return "delivery_errors"
-    statuses = {recipient.status for recipient in recipients}
-    if statuses == {RecipientStatus.paid.value}:
-        return "paid"
-    if statuses <= {RecipientStatus.payment_received.value, RecipientStatus.paid.value}:
-        return "ready_for_payment"
-    if statuses <= {RecipientStatus.cancelled.value}:
-        return "cancelled"
-    if statuses - {
+    cancelled = RecipientStatus.cancelled.value
+    active_recipients = [recipient for recipient in recipients if recipient.status != cancelled]
+    statuses = {recipient.status for recipient in active_recipients}
+    allowed = {
         RecipientStatus.pending.value, RecipientStatus.sending.value,
         RecipientStatus.sent.value, RecipientStatus.payment_required.value,
         RecipientStatus.payment_received.value, RecipientStatus.paid.value,
-        RecipientStatus.cancelled.value,
-    }:
-        raise ValueError(f"unsupported recipient status in payout: {sorted(statuses)}")
+    }
+    unknown = statuses - allowed - {RecipientStatus.failed.value}
+    if unknown:
+        raise ValueError(f"unsupported recipient status in payout: {sorted(unknown)}")
+    if any(recipient.status == RecipientStatus.failed.value for recipient in active_recipients):
+        return "delivery_errors"
+    if not active_recipients:
+        return "no_active_recipients"
+    if all(recipient.status == RecipientStatus.paid.value for recipient in active_recipients):
+        return "paid"
+    if (
+        statuses <= {RecipientStatus.payment_received.value, RecipientStatus.paid.value}
+        and RecipientStatus.payment_received.value in statuses
+    ):
+        return "ready_for_payment"
     return "awaiting_confirmation"
 
 
@@ -1100,7 +1106,7 @@ async def mark_paid(
     actor_telegram_id: int,
     paid_at: datetime | None = None,
     paid_note: str | None = None,
-    expected_snapshot_version: int | None = None,
+    expected_snapshot_version: int,
 ) -> PayoutRecipient:
     _log_payout_action(
         "payout_action_requested",
@@ -1122,7 +1128,7 @@ async def mark_paid(
         )
         if user is None or recipient is None:
             raise ValueError("recipient not found")
-        if expected_snapshot_version is not None and recipient.payment_snapshot_version != expected_snapshot_version:
+        if recipient.payment_snapshot_version != expected_snapshot_version:
             raise SnapshotVersionConflict("payment details changed")
         if recipient.status != RecipientStatus.payment_received.value:
             raise ValueError("recipient can only be marked paid from payment_received")

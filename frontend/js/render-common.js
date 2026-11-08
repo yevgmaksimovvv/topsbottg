@@ -7,6 +7,7 @@ import {
 } from "./message-limit.js";
 import { escapeHtml } from "./utils.js";
 const nameFor = (m, k) => m[k] || "Неизвестный статус";
+const payoutProgress = (p) => `\u0412\u044b\u043f\u043b\u0430\u0447\u0435\u043d\u043e: ${Number(p.paid_recipient_count || 0)} \u0438\u0437 ${Number(p.active_recipient_count ?? p.recipient_count ?? 0)}${Number(p.cancelled_recipient_count || 0) ? ` \u00b7 \u041e\u0442\u043c\u0435\u043d\u0435\u043d\u043e: ${Number(p.cancelled_recipient_count)}` : ""}`;
 export function renderPayoutsInto(id = "payouts-list") {
   const root = $(id);
   if (!root) return;
@@ -23,7 +24,7 @@ export function renderPayoutsInto(id = "payouts-list") {
   root.innerHTML = list
     .map(
       (p) =>
-        `<button type="button" class="payout-row" data-payout-id="${Number(p.id)}"><span class="payout-main"><strong>#${Number(p.id)} · ${escapeHtml(payoutPeriodLabel(p) || "Период не задан")}</strong><span>${escapeHtml(nameFor(PAYOUT_WORKFLOW_LABELS, p.workflow_state))}</span><small>\u0412\u044b\u043f\u043b\u0430\u0447\u0435\u043d\u043e: ${Number(p.paid_recipient_count || 0)} \u0438\u0437 ${Number(p.recipient_count || 0)}</small></span><span class="current-marker">${Number(p.id) === Number(state.selectedPayoutId) ? "Текущая" : "Выбрать"}</span></button>`,
+        `<button type="button" class="payout-row" data-payout-id="${Number(p.id)}"><span class="payout-main"><strong>#${Number(p.id)} · ${escapeHtml(payoutPeriodLabel(p) || "Период не задан")}</strong><span>${escapeHtml(nameFor(PAYOUT_WORKFLOW_LABELS, p.workflow_state))}</span><small>${payoutProgress(p)}</small></span><span class="current-marker">${Number(p.id) === Number(state.selectedPayoutId) ? "Текущая" : "Выбрать"}</span></button>`,
     )
     .join("");
 }
@@ -32,7 +33,7 @@ export function renderPayouts() {
 }
 export function renderCurrentPayout() {
   const p = state.selectedPayoutDetail?.payout;
-  const label = p ? `\u0422\u0435\u043a\u0443\u0449\u0430\u044f: #${state.selectedPayoutId} \u00b7 ${payoutPeriodLabel(p)} \u00b7 ${nameFor(PAYOUT_WORKFLOW_LABELS, p.workflow_state)} \u00b7 \u0412\u044b\u043f\u043b\u0430\u0447\u0435\u043d\u043e: ${Number(p.paid_recipient_count || 0)} \u0438\u0437 ${Number(p.recipient_count || 0)}` : "";
+  const label = p ? `\u0422\u0435\u043a\u0443\u0449\u0430\u044f: #${state.selectedPayoutId} \u00b7 ${payoutPeriodLabel(p)} \u00b7 ${nameFor(PAYOUT_WORKFLOW_LABELS, p.workflow_state)} \u00b7 ${payoutProgress(p)}` : "";
   const history = $("history-current-context");
   if (history) history.innerHTML = p ? `<span>${escapeHtml(label)}</span><button type="button" class="button button-quiet" data-action="clear-payout">\u0421\u043d\u044f\u0442\u044c \u0432\u044b\u0431\u043e\u0440</button>` : "";
   for (const id of ["selection-payout-context", "recipients-context"]) {
