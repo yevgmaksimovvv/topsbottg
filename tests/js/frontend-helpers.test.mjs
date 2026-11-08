@@ -27,7 +27,7 @@ test("Russian recipient plural forms handle teens and compound counts", () => {
   );
 });
 
-test("same-day payout uses one date in a compact label", () => {
-  assert.equal(formatPayoutPeriodLabel(1, 11, 1, 11), "01.11");
+test("same-day payout keeps both dates in its label", () => {
+  assert.equal(formatPayoutPeriodLabel(1, 11, 1, 11), "01.11 – 01.11");
   assert.equal(formatPayoutPeriodLabel(1, 11, 7, 11), "01.11 – 07.11");
 });

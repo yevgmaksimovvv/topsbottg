@@ -19,6 +19,7 @@ export const state = {
   recipientsLoadError: null,
   selectedUsers: new Set(),
   selectedUsersByPayout: new Map(),
+  selectionGenerationByPayout: new Map(),
   selectedPayoutId: null,
   selectedPayoutDetail: null,
   composer: {
@@ -34,6 +35,7 @@ export const state = {
   recipientFilter: "all",
   expandedRecipients: new Set(),
   recipientOperationError: {},
+  recipientRefreshRequired: {},
   loading: {
     users: false,
     payouts: false,

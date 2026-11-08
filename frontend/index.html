@@ -165,11 +165,6 @@
               Посмотреть сообщение
             </button>
             <div
-              id="preview"
-              class="preview-root hidden"
-              aria-live="polite"
-            ></div>
-            <div
               id="payout-validation"
               class="form-error hidden"
               role="alert"
@@ -335,6 +330,13 @@
           ></button>
         </div>
       </form>
+    </dialog>
+    <dialog id="preview-dialog" class="preview-dialog" aria-labelledby="preview-title">
+      <div class="preview-dialog-header">
+        <h2 id="preview-title">Предпросмотр</h2>
+        <button type="button" class="button button-quiet" data-action="close-preview" aria-label="Закрыть предпросмотр">Закрыть</button>
+      </div>
+      <pre id="preview" class="preview-root"></pre>
     </dialog>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script type="module" src="/miniapp/app.js?v=20261108-redesign-1"></script>

@@ -1,3 +1,4 @@
+import { PAYOUT_WORKFLOW_LABELS } from "./constants.js";
 import {
   state,
   canUseApi,
@@ -47,9 +48,11 @@ export async function createPayout() {
   const payload = validate();
   if (!payload) return;
   const startingPayoutId = Number(state.selectedPayoutId || 0);
+  const startingRequestId = state.selectedPayoutRequestId;
   const startingView = state.activeMobileView;
   const isStartingContextCurrent = () =>
     Number(state.selectedPayoutId || 0) === startingPayoutId &&
+    state.selectedPayoutRequestId === startingRequestId &&
     state.activeMobileView === startingView;
   setLoading("createPayout", true);
   renderApp();
@@ -87,13 +90,13 @@ export async function createPayout() {
       silent: true,
     });
   } catch (e) {
-    setError(`Не удалось создать выплату: ${e.message}`);
+    if (isStartingContextCurrent()) setError(`Не удалось создать выплату: ${e.message}`);
   } finally {
     setLoading("createPayout", false);
     renderApp();
   }
 }
-export async function sendPayout() {
+export async function sendPayout(selectedIds = [...state.selectedUsers]) {
   if (
     sendInFlight ||
     state.loading.sendPayout ||
@@ -104,9 +107,11 @@ export async function sendPayout() {
   )
     return;
   const id = Number(state.selectedPayoutId);
-  const ids = [...state.selectedUsers];
+  const payoutRequestId = state.selectedPayoutRequestId;
+  const selectionGeneration = state.selectionGenerationByPayout.get(id) || 0;
+  const ids = [...selectedIds];
   const submittedUsers = new Set(ids);
-  const isCurrentPayout = () => Number(state.selectedPayoutId) === id;
+  const isCurrentPayout = () => Number(state.selectedPayoutId) === id && state.selectedPayoutRequestId === payoutRequestId;
   if (!ids.length || !isCurrentPayout()) return;
   sendInFlight = true;
   setLoading("sendPayout", true);
@@ -124,11 +129,11 @@ export async function sendPayout() {
     });
     const payout = snapshot?.detail?.payout || snapshot?.payout;
     if (payout) upsertPayoutInList(payout);
-    const savedSelection = new Set(
-      state.selectedUsersByPayout.get(id) || submittedUsers,
-    );
-    submittedUsers.forEach((userId) => savedSelection.delete(userId));
-    state.selectedUsersByPayout.set(id, savedSelection);
+    if ((state.selectionGenerationByPayout.get(id) || 0) === selectionGeneration) {
+      const savedSelection = new Set(state.selectedUsersByPayout.get(id) || submittedUsers);
+      submittedUsers.forEach((userId) => savedSelection.delete(userId));
+      state.selectedUsersByPayout.set(id, savedSelection);
+    }
     if (isCurrentPayout()) {
       state.selectedPayoutDetail = payout
         ? { payout }

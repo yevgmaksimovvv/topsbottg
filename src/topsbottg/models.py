@@ -101,6 +101,8 @@ class PayoutRecipient(Base, TimestampMixin):
     paid_by_admin_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     paid_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     payment_profile_snapshot: Mapped[dict | None] = mapped_column(json_type, nullable=True)
+    payment_snapshot_version: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
+    payment_snapshot_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     payout: Mapped[Payout] = relationship(back_populates="recipients")
     user: Mapped[User] = relationship(back_populates="payout_recipients")

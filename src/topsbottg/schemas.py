@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -75,6 +76,7 @@ class AdminEventsTokenOut(BaseModel):
 
 
 class MarkPaidIn(BaseModel):
+    expected_snapshot_version: int = Field(ge=1, strict=True)
     paid_at: datetime | None = None
     paid_note: str | None = Field(default=None, max_length=500)
 
@@ -101,6 +103,8 @@ class RecipientOut(BaseModel):
     paid_by_admin_id: int | None = None
     paid_note: str | None = None
     payment_profile_snapshot: dict | None = None
+    payment_snapshot_version: int = 0
+    payment_snapshot_updated_at: datetime | None = None
     reply: ReplyOut | None = None
 
 
@@ -115,6 +119,17 @@ class PayoutOut(BaseModel):
     message_before_period: str | None = None
     message_after_period: str | None = None
     status: str
+    workflow_state: Literal[
+        "draft", "sending", "no_recipients", "delivery_errors", "no_active_recipients",
+        "paid", "ready_for_payment", "awaiting_confirmation", "closed", "cancelled",
+    ]
+    paid_recipient_count: int = 0
+    recipient_count: int = 0
+    active_recipient_count: int = 0
+    ready_for_payment_count: int = 0
+    awaiting_confirmation_count: int = 0
+    delivery_error_count: int = 0
+    cancelled_recipient_count: int = 0
     created_by_telegram_id: int
     created_at: datetime
     updated_at: datetime

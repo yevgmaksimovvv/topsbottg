@@ -210,10 +210,58 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+class SnapshotVersionConflict(ValueError):
+    """Recipient payment details changed since the admin reviewed them."""
+
+
+class PayoutClosedConflict(ValueError):
+    """Payment may not be recorded for a closed or cancelled payout."""
+
+
 def payment_profile_snapshot(profile: PaymentProfile) -> dict[str, str | None]:
     return {
         "raw_payment_details": profile.raw_payment_details,
     }
+
+
+def payout_workflow_state(payout: Payout, recipients: list[PayoutRecipient]) -> str:
+    """Compute the business lifecycle separately from the delivery status."""
+    if payout.status == PayoutStatus.cancelled.value:
+        return "cancelled"
+    if payout.status == PayoutStatus.completed.value:
+        active = [recipient for recipient in recipients if recipient.status != RecipientStatus.cancelled.value]
+        if active and all(recipient.status == RecipientStatus.paid.value for recipient in active):
+            return "paid"
+        return "closed"
+    if payout.status == PayoutStatus.draft.value:
+        return "draft"
+    if payout.status == PayoutStatus.sending.value:
+        return "sending"
+    if not recipients:
+        return "no_recipients"
+    cancelled = RecipientStatus.cancelled.value
+    active_recipients = [recipient for recipient in recipients if recipient.status != cancelled]
+    statuses = {recipient.status for recipient in active_recipients}
+    allowed = {
+        RecipientStatus.pending.value, RecipientStatus.sending.value,
+        RecipientStatus.sent.value, RecipientStatus.payment_required.value,
+        RecipientStatus.payment_received.value, RecipientStatus.paid.value,
+    }
+    unknown = statuses - allowed - {RecipientStatus.failed.value}
+    if unknown:
+        raise ValueError(f"unsupported recipient status in payout: {sorted(unknown)}")
+    if any(recipient.status == RecipientStatus.failed.value for recipient in active_recipients):
+        return "delivery_errors"
+    if not active_recipients:
+        return "no_active_recipients"
+    if all(recipient.status == RecipientStatus.paid.value for recipient in active_recipients):
+        return "paid"
+    if (
+        statuses <= {RecipientStatus.payment_received.value, RecipientStatus.paid.value}
+        and RecipientStatus.payment_received.value in statuses
+    ):
+        return "ready_for_payment"
+    return "awaiting_confirmation"
 
 
 def format_payout_period_label(
@@ -758,6 +806,16 @@ async def complete_payout(session: AsyncSession, payout: Payout, *, actor_telegr
         actor_telegram_id=actor_telegram_id,
     )
     try:
+        # The API may have loaded this payout before another transaction changed it.
+        # Re-read after acquiring the lock so closing and marking paid serialize.
+        payout = await session.scalar(
+            select(Payout)
+            .where(Payout.id == payout.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if payout is None:
+            raise ValueError("payout not found")
         if payout.status == PayoutStatus.completed.value:
             return payout
         if payout.status == PayoutStatus.cancelled.value:
@@ -1067,6 +1125,7 @@ async def mark_paid(
     actor_telegram_id: int,
     paid_at: datetime | None = None,
     paid_note: str | None = None,
+    expected_snapshot_version: int,
 ) -> PayoutRecipient:
     _log_payout_action(
         "payout_action_requested",
@@ -1076,6 +1135,33 @@ async def mark_paid(
         actor_telegram_id=actor_telegram_id,
     )
     try:
+        # All payment/profile updates lock User -> Payout -> Recipient.
+        # Closing takes the Payout lock, so either action wins atomically.
+        user = await session.scalar(select(User).where(User.id == recipient.user_id).with_for_update())
+        payout = await session.scalar(
+            select(Payout)
+            .where(Payout.id == recipient.payout_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if payout is None:
+            raise ValueError("payout not found")
+        if payout.status == PayoutStatus.completed.value:
+            raise PayoutClosedConflict("payout_closed")
+        if payout.status == PayoutStatus.cancelled.value:
+            raise PayoutClosedConflict("payout_cancelled")
+        recipient = await session.scalar(
+            select(PayoutRecipient)
+            .options(selectinload(PayoutRecipient.user))
+            .options(selectinload(PayoutRecipient.payment_replies))
+            .where(PayoutRecipient.id == recipient.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if user is None or recipient is None:
+            raise ValueError("recipient not found")
+        if recipient.payment_snapshot_version != expected_snapshot_version:
+            raise SnapshotVersionConflict("payment details changed")
         if recipient.status != RecipientStatus.payment_received.value:
             raise ValueError("recipient can only be marked paid from payment_received")
         recipient.status = RecipientStatus.paid.value
@@ -1139,6 +1225,19 @@ async def get_payout_recipients(session: AsyncSession, payout_id: int) -> list[P
     return list(rows)
 
 
+async def get_payout_recipients_for_payouts(
+    session: AsyncSession, payout_ids: Sequence[int]
+) -> list[PayoutRecipient]:
+    if not payout_ids:
+        return []
+    rows = await session.scalars(
+        select(PayoutRecipient)
+        .where(PayoutRecipient.payout_id.in_(payout_ids))
+        .order_by(PayoutRecipient.payout_id, PayoutRecipient.id)
+    )
+    return list(rows)
+
+
 async def get_latest_active_recipient(session: AsyncSession, user_id: int) -> PayoutRecipient | None:
     stmt = (
         select(PayoutRecipient)
@@ -1174,22 +1273,77 @@ async def save_profile_and_snapshot(
     payload: dict | str,
     active_recipient: PayoutRecipient | None,
 ) -> PaymentProfile:
+    # Match mark_paid's lock order: user first, then recipient rows.
+    await session.scalar(select(User).where(User.id == user.id).with_for_update())
+    old_profile = await get_payment_profile(session, user.id)
+    old_details = old_profile.raw_payment_details if old_profile else None
     profile = await upsert_payment_profile(session, user, payload)
+    now = utcnow()
+    payout_ids: set[int] = set()
+    if old_details != profile.raw_payment_details:
+        active_payout_ids = list(await session.scalars(
+            select(Payout.id)
+            .join(PayoutRecipient)
+            .where(
+                PayoutRecipient.user_id == user.id,
+                PayoutRecipient.status == RecipientStatus.payment_received.value,
+                Payout.status.in_(list(ACTIVATED_PAYOUT_STATUSES)),
+            )
+            .order_by(Payout.id)
+            .with_for_update(of=Payout)
+        ))
+        recipients = await session.scalars(
+            select(PayoutRecipient)
+            .where(
+                PayoutRecipient.user_id == user.id,
+                PayoutRecipient.payout_id.in_(active_payout_ids),
+                PayoutRecipient.status == RecipientStatus.payment_received.value,
+            )
+            .order_by(PayoutRecipient.payout_id, PayoutRecipient.id)
+            .with_for_update(of=PayoutRecipient)
+            .execution_options(populate_existing=True)
+        )
+        snapshot = payment_profile_snapshot(profile)
+        for recipient in recipients:
+            if recipient.payment_profile_snapshot != snapshot:
+                recipient.payment_profile_snapshot = snapshot
+                recipient.payment_snapshot_version += 1
+                recipient.payment_snapshot_updated_at = now
+                payout_ids.add(recipient.payout_id)
+
     if active_recipient is not None and active_recipient.status in PAYMENT_RECEIPT_RECIPIENT_STATUSES:
-        active_recipient.payment_profile_snapshot = payment_profile_snapshot(profile)
-        active_recipient.status = RecipientStatus.payment_received.value
-        active_recipient.replied_at = utcnow()
+        active_payout = await session.scalar(
+            select(Payout)
+            .where(Payout.id == active_recipient.payout_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if active_payout is not None and active_payout.status not in {
+            PayoutStatus.cancelled.value,
+            PayoutStatus.completed.value,
+        }:
+            active_recipient = await session.scalar(
+                select(PayoutRecipient)
+                .where(PayoutRecipient.id == active_recipient.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if active_recipient is not None and active_recipient.status in PAYMENT_RECEIPT_RECIPIENT_STATUSES:
+                snapshot = payment_profile_snapshot(profile)
+                if active_recipient.payment_profile_snapshot != snapshot:
+                    active_recipient.payment_profile_snapshot = snapshot
+                    active_recipient.payment_snapshot_version += 1
+                    active_recipient.payment_snapshot_updated_at = now
+                active_recipient.status = RecipientStatus.payment_received.value
+                active_recipient.replied_at = now
+                payout_ids.add(active_recipient.payout_id)
     await session.flush()
-    queue_admin_events(
-        session,
-        [
-            (ADMIN_EVENT_USERS_CHANGED, {"user_id": user.id, "telegram_user_id": user.telegram_id}),
-            (
-                ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
-                {"payout_id": getattr(active_recipient, "payout_id", None), "reason": "save_profile_and_snapshot"},
-            ),
-        ],
+    events = [(ADMIN_EVENT_USERS_CHANGED, {"user_id": user.id, "telegram_user_id": user.telegram_id})]
+    events.extend(
+        (ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED, {"payout_id": payout_id, "reason": "save_profile_and_snapshot"})
+        for payout_id in sorted(payout_ids)
     )
+    queue_admin_events(session, events)
     return profile
 
 
@@ -1199,11 +1353,27 @@ async def confirm_saved_profile(
     recipient_id: int,
     user_id: int,
 ) -> PayoutRecipient | None:
+    await session.scalar(select(User).where(User.id == user_id).with_for_update())
+    recipient_payout_id = await session.scalar(
+        select(PayoutRecipient.payout_id).where(
+            PayoutRecipient.id == recipient_id,
+            PayoutRecipient.user_id == user_id,
+        )
+    )
+    payout = await session.scalar(
+        select(Payout)
+        .where(Payout.id == recipient_payout_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ) if recipient_payout_id is not None else None
+    if payout is None or payout.status in {PayoutStatus.cancelled.value, PayoutStatus.completed.value}:
+        return None
     recipient = await session.scalar(
         select(PayoutRecipient)
-        .join(User)
         .options(selectinload(PayoutRecipient.user))
         .where(PayoutRecipient.id == recipient_id, PayoutRecipient.user_id == user_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     if recipient is None or recipient.status not in PAYMENT_RECEIPT_RECIPIENT_STATUSES:
         return None
@@ -1211,6 +1381,8 @@ async def confirm_saved_profile(
     if profile is None:
         return None
     recipient.payment_profile_snapshot = payment_profile_snapshot(profile)
+    recipient.payment_snapshot_version += 1
+    recipient.payment_snapshot_updated_at = utcnow()
     recipient.status = RecipientStatus.payment_received.value
     recipient.replied_at = utcnow()
     await session.flush()

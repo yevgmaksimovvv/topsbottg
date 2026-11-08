@@ -261,16 +261,43 @@ textarea::placeholder {
   margin: 8px 0 10px;
 }
 .preview-root {
-  max-height: 30vh;
-  overflow: auto;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
+  margin: 0;
+  padding: 16px;
+  border: 0;
+  border-radius: 0;
   background: var(--surface);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  margin-bottom: 14px;
+  font: inherit;
+  line-height: 1.5;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
+.preview-dialog {
+  width: min(calc(100% - 32px), 680px);
+  height: min(90dvh, var(--app-viewport-height, 90dvh));
+  max-height: calc(var(--app-viewport-height, 100dvh) - 24px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  color: var(--text);
+  background: var(--bg);
+  flex-direction: column;
+  overflow: hidden;
+}
+.preview-dialog[open] { display: flex; }
+.preview-dialog::backdrop { background: rgba(0,0,0,.58); }
+.preview-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px 8px 18px;
+  padding-top: max(8px, env(safe-area-inset-top));
+  border-bottom: 1px solid var(--border);
+}
+.preview-dialog-header h2 { margin: 0; font-size: 16px; }
 .form-actions {
   display: grid;
   gap: 10px;
@@ -294,6 +321,22 @@ textarea::placeholder {
   font-size: 13px;
   margin-bottom: 12px;
   overflow-wrap: anywhere;
+}
+#history-current-context {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+#history-current-context > span { min-width: 0; }
+.snapshot-updated {
+  margin: 0 0 8px;
+  padding: 6px 9px;
+  border-left: 2px solid var(--accent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  color: var(--text);
+  font-size: 12px;
 }
 .search-field {
   display: flex;
@@ -549,6 +592,7 @@ textarea::placeholder {
 }
 .payout-main {
   min-width: 0;
+  flex: 1 1 auto;
 }
 .payout-main strong {
   display: block;
@@ -556,8 +600,15 @@ textarea::placeholder {
   font-weight: 600;
 }
 .payout-main span {
+  display: block;
   font-size: 12px;
   color: var(--muted);
+}
+.payout-main small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
 }
 .current-marker {
   font-size: 11px;
@@ -734,8 +785,14 @@ textarea::placeholder {
   .message-editor textarea {
     max-height: 120px;
   }
-  .preview-root {
-    max-height: 15vh;
+  .preview-dialog {
+    width: 100%;
+    height: var(--app-viewport-height, 100dvh);
+    max-height: var(--app-viewport-height, 100dvh);
+    max-width: none;
+    margin: 0;
+    border-radius: 0;
+    padding-bottom: env(safe-area-inset-bottom);
   }
   .recipient-summary-line {
     display: grid;

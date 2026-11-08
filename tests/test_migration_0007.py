@@ -62,8 +62,12 @@ def test_migration_0007_preserves_and_sends_existing_payout(tmp_path: Path) -> N
         )
         connection.execute(
             """
-            INSERT INTO payout_recipients (id, payout_id, user_id, status, created_at, updated_at)
-            VALUES (1, 1, 1, 'sending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            INSERT INTO payout_recipients (
+                id, payout_id, user_id, status, payment_profile_snapshot, created_at, updated_at
+            ) VALUES (
+                1, 1, 1, 'sending', '{"raw_payment_details":"Legacy details"}',
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
             """
         )
 
@@ -81,6 +85,9 @@ def test_migration_0007_preserves_and_sends_existing_payout(tmp_path: Path) -> N
             assert payout.message_after_period is None
             recipient = await session.get(PayoutRecipient, 1)
             assert recipient is not None
+            assert recipient.payment_snapshot_version == 1
+            assert recipient.payment_snapshot_updated_at is not None
+            assert recipient.payment_profile_snapshot == {"raw_payment_details": "Legacy details"}
 
         await process_recipient(bot, session_factory, None, 1)
 

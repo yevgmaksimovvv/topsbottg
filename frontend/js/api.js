@@ -71,6 +71,18 @@ async function readErrorMessage(response) {
   }
   if (response.status === 401) return AUTH_REQUIRED_ERROR;
   if (response.status === 403) return FORBIDDEN_ERROR;
+  if (response.status === 409) {
+    if (isJsonResponse(response)) {
+      try {
+        const detail = (await response.json())?.detail;
+        if (detail === "payout_closed") return "Выплата закрыта. Отметка оплаты недоступна.";
+        if (detail === "payout_cancelled") return "Выплата отменена. Отметка оплаты недоступна.";
+      } catch {
+        // Fall back to the snapshot conflict message.
+      }
+    }
+    return "Реквизиты изменились. Проверьте актуальные данные перед подтверждением оплаты.";
+  }
   if (isJsonResponse(response)) {
     try {
       const data = await response.json();
@@ -115,7 +127,13 @@ async function api(path, options = {}) {
       },
     });
     if (!response.ok) {
-      throw new Error(await readErrorMessage(response));
+      const detail = response.status === 409 && isJsonResponse(response)
+        ? (await response.clone().json().catch(() => null))?.detail
+        : null;
+      const error = new Error(await readErrorMessage(response));
+      error.status = response.status;
+      error.conflictType = typeof detail === "string" ? detail : null;
+      throw error;
     }
     if (response.status === 204) return null;
     if (isJsonResponse(response)) return response.json();
@@ -124,7 +142,10 @@ async function api(path, options = {}) {
     if (error?.name === "AbortError" || error === "timeout") {
       throw new Error("Запрос превысил время ожидания.");
     }
-    throw new Error(error?.message || "Не удалось выполнить запрос.");
+    const wrapped = new Error(error?.message || "Request failed.");
+    wrapped.status = error?.status;
+    wrapped.conflictType = error?.conflictType;
+    throw wrapped;
   } finally {
     clearTimeout(timeoutId);
   }
@@ -273,6 +294,10 @@ async function refreshSelectedPayout({ silent = false } = {}) {
     state.selectedPayoutDetail = detail;
     state.recipientsLoadError = null;
     state.recipients = recipients;
+    for (const recipient of recipients) {
+      if (state.recipientRefreshRequired[Number(recipient.id)])
+        delete state.recipientRefreshRequired[Number(recipient.id)];
+    }
     upsertPayoutInList(detail?.payout);
     renderSelectedPayoutView();
     return true;
@@ -302,6 +327,24 @@ export async function fetchSelectedPayoutSnapshot(payoutId) {
     renderSelectedPayoutView();
   }
   return { detail, recipients };
+}
+
+export function clearPayoutSelection() {
+  const payoutId = Number(state.selectedPayoutId);
+  const payoutIds = new Set([...state.selectedUsersByPayout.keys(), ...(payoutId ? [payoutId] : [])]);
+  for (const id of payoutIds)
+    state.selectionGenerationByPayout.set(id, (state.selectionGenerationByPayout.get(id) || 0) + 1);
+  state.selectedPayoutRequestId += 1;
+  state.selectedPayoutId = null;
+  state.selectedPayoutDetail = null;
+  state.recipients = [];
+  state.recipientsLoadError = null;
+  state.selectedUsers.clear();
+  state.selectedUsersByPayout.clear();
+  state.expandedRecipients.clear();
+  state.recipientOperationError = {};
+  state.loading.recipients = false;
+  renderApp();
 }
 
 export function scheduleSelectedPayoutRefresh({ silent = true } = {}) {
@@ -568,12 +611,32 @@ async function selectPayout(id, { requireSuccessfulLoad = false } = {}) {
   return loadedForTarget;
 }
 
-async function markPaid(recipientId) {
-  if (!canUseApi() || !state.selectedPayoutId) return;
-  if (markPaidInFlight) return;
+async function markPaid(recipientId, expectedSnapshotVersion, expectedPayoutId) {
+  if (!canUseApi() || !state.selectedPayoutId || markPaidInFlight) return;
+  const currentPayout = state.selectedPayoutDetail?.payout;
+  if (
+    Number(state.selectedPayoutId) !== Number(expectedPayoutId) ||
+    Number(currentPayout?.id) !== Number(expectedPayoutId)
+  ) return;
+  if (["completed", "cancelled"].includes(currentPayout.status)) {
+    setToast(
+      currentPayout.status === "completed"
+        ? "Выплата закрыта. Отметка оплаты недоступна."
+        : "Выплата отменена. Отметка оплаты недоступна.",
+      "warning",
+    );
+    renderApp();
+    return;
+  }
+  if (
+    ["draft", "sending"].includes(currentPayout.status) ||
+    state.recipients.find((item) => Number(item.id) === Number(recipientId))?.status !== "payment_received"
+  ) return;
   const payoutId = Number(state.selectedPayoutId);
+  const payoutRequestId = state.selectedPayoutRequestId;
   const id = Number(recipientId);
-  const isCurrentPayout = () => Number(state.selectedPayoutId) === payoutId;
+  const isCurrentPayout = () => Number(state.selectedPayoutId) === payoutId && state.selectedPayoutRequestId === payoutRequestId;
+  const isSelectedPayout = () => Number(state.selectedPayoutId) === payoutId;
   markPaidInFlight = true;
   setLoadingAndRender("markPaid", true);
   state.loadingRecipientId = id;
@@ -583,7 +646,7 @@ async function markPaid(recipientId) {
       `/admin/payouts/${payoutId}/recipients/${id}/mark-paid`,
       {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify({ expected_snapshot_version: expectedSnapshotVersion }),
       },
     );
     if (isCurrentPayout()) {
@@ -600,7 +663,36 @@ async function markPaid(recipientId) {
     await schedulePayoutsRefresh({ silent: true });
   } catch (error) {
     const message = error?.message || "Ошибка сервера";
-    if (isCurrentPayout()) {
+    if (error?.status === 409) {
+      const payoutClosed = ["payout_closed", "payout_cancelled"].includes(error?.conflictType);
+      if (isSelectedPayout() && payoutClosed) {
+        state.recipientRefreshRequired[id] = true;
+        state.recipientOperationError[id] = message;
+        renderApp();
+        const refreshed = await refreshSelectedPayout();
+        if (!refreshed && isSelectedPayout()) {
+          state.recipientOperationError[id] = `${message} Не удалось обновить выплату. Повторите загрузку данных.`;
+          renderApp();
+        }
+      } else if (payoutClosed) {
+        setToast(`Выплата #${payoutId}: ${message}`, "warning");
+        renderApp();
+      } else if (isSelectedPayout()) {
+        state.recipientRefreshRequired[id] = true;
+        state.expandedRecipients.add(id);
+        state.recipientOperationError[id] = "\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b \u0438\u0437\u043c\u0435\u043d\u0438\u043b\u0438\u0441\u044c. \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0430\u043a\u0442\u0443\u0430\u043b\u044c\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435 \u043f\u0435\u0440\u0435\u0434 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435\u043c \u043e\u043f\u043b\u0430\u0442\u044b.";
+        renderApp();
+        const refreshed = await refreshSelectedPayout();
+        if (!refreshed && isSelectedPayout()) {
+          state.recipientRefreshRequired[id] = true;
+          state.recipientOperationError[id] = "\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b \u0438\u0437\u043c\u0435\u043d\u0438\u043b\u0438\u0441\u044c, \u043d\u043e \u0430\u043a\u0442\u0443\u0430\u043b\u044c\u043d\u044b\u0435 \u0434\u0430\u043d\u043d\u044b\u0435 \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c. \u041e\u0431\u043d\u043e\u0432\u0438\u0442\u0435 \u0432\u044b\u043f\u043b\u0430\u0442\u0443 \u043f\u0435\u0440\u0435\u0434 \u043f\u043e\u0432\u0442\u043e\u0440\u043d\u044b\u043c \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435\u043c.";
+          renderApp();
+        }
+      } else {
+        setToast(`\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b \u0432 \u0432\u044b\u043f\u043b\u0430\u0442\u0435 #${payoutId} \u0438\u0437\u043c\u0435\u043d\u0438\u043b\u0438\u0441\u044c. \u041e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u0432\u044b\u043f\u043b\u0430\u0442\u0443 \u0437\u0430\u043d\u043e\u0432\u043e \u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435 \u0434\u0430\u043d\u043d\u044b\u0435.`, "warning");
+        renderApp();
+      }
+    } else if (isCurrentPayout()) {
       state.recipientOperationError[id] = message;
       setErrorAndRender(message || "Не удалось обновить статус");
     } else {
