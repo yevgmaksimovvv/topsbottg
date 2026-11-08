@@ -1,12 +1,28 @@
 import { API_TIMEOUT_MS } from "./constants.js";
-import { state, canUseApi, clearError, setError, setLoading, setToast } from "./store.js";
+import {
+  state,
+  canUseApi,
+  clearError,
+  setError,
+  setLoading,
+  setToast,
+} from "./store.js";
 import { renderApp } from "./render-app.js";
+import {
+  renderActionState,
+  renderCurrentPayout,
+  renderNotifications,
+  renderPayouts,
+} from "./render-common.js";
+import { renderUsers } from "./render-users.js";
+import { renderRecipients } from "./render-recipients.js";
 import {
   createPayout as renderCreatePayout,
   sendPayout as renderSendPayout,
 } from "./render-payouts.js";
 
-const TEMPORARY_BACKEND_ERROR = "Backend временно недоступен. Проверьте сервер приложения.";
+const TEMPORARY_BACKEND_ERROR =
+  "Backend временно недоступен. Проверьте сервер приложения.";
 const AUTH_REQUIRED_ERROR = "Требуется вход через Telegram.";
 const FORBIDDEN_ERROR = "Недостаточно прав администратора.";
 
@@ -14,8 +30,9 @@ let adminEventsSource = null;
 let adminEventsStartPromise = null;
 let adminEventsRecoveryUsed = false;
 let adminEventsWarningShown = false;
-let selectedRefreshPromise = null;
+const selectedRefreshPromises = new Map();
 let payoutsRefreshPromise = null;
+let markPaidInFlight = false;
 
 function isJsonResponse(response) {
   const contentType = response.headers.get("content-type") || "";
@@ -24,7 +41,11 @@ function isJsonResponse(response) {
 
 function isHtmlText(text, contentType = "") {
   const trimmed = text.trimStart();
-  return contentType.includes("text/html") || trimmed.startsWith("<!doctype html") || trimmed.startsWith("<html");
+  return (
+    contentType.includes("text/html") ||
+    trimmed.startsWith("<!doctype html") ||
+    trimmed.startsWith("<html")
+  );
 }
 
 function safeDetailMessage(detail) {
@@ -41,7 +62,11 @@ function safeDetailMessage(detail) {
 
 async function readErrorMessage(response) {
   const contentType = response.headers.get("content-type") || "";
-  if (response.status === 502 || response.status === 503 || response.status === 504) {
+  if (
+    response.status === 502 ||
+    response.status === 503 ||
+    response.status === 504
+  ) {
     return TEMPORARY_BACKEND_ERROR;
   }
   if (response.status === 401) return AUTH_REQUIRED_ERROR;
@@ -59,7 +84,9 @@ async function readErrorMessage(response) {
   try {
     const text = await response.text();
     if (isHtmlText(text, contentType)) {
-      return response.status >= 500 ? TEMPORARY_BACKEND_ERROR : "Сервер вернул некорректный ответ.";
+      return response.status >= 500
+        ? TEMPORARY_BACKEND_ERROR
+        : "Сервер вернул некорректный ответ.";
     }
     const trimmed = text.trim();
     return trimmed || "Запрос не выполнен.";
@@ -73,7 +100,10 @@ async function api(path, options = {}) {
     throw new Error("Нет доступа к данным");
   }
   const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort("timeout"), API_TIMEOUT_MS);
+  const timeoutId = window.setTimeout(
+    () => controller.abort("timeout"),
+    API_TIMEOUT_MS,
+  );
   try {
     const response = await fetch(`/api${path}`, {
       ...options,
@@ -102,7 +132,17 @@ async function api(path, options = {}) {
 
 function setLoadingAndRender(key, value) {
   setLoading(key, value);
-  renderApp();
+  if (key === "users") renderUsers();
+  else if (key === "payouts") renderPayouts();
+  else if (key === "recipients") renderSelectedPayoutView();
+  else renderApp();
+}
+
+function renderSelectedPayoutView() {
+  renderCurrentPayout();
+  renderRecipients();
+  renderPayouts();
+  renderActionState();
 }
 
 function setErrorAndRender(message) {
@@ -131,6 +171,7 @@ async function loadUsers({ reset = true, silent = false } = {}) {
   if (!canUseApi()) return;
   const requestId = ++state.usersRequestId;
   if (reset) {
+    state.usersLoadError = null;
     state.usersOffset = 0;
     state.users = [];
     state.usersHasMore = false;
@@ -138,23 +179,29 @@ async function loadUsers({ reset = true, silent = false } = {}) {
   if (!silent) {
     setLoadingAndRender("users", true);
     clearError();
-    renderApp();
   }
   try {
     const params = new URLSearchParams();
     params.set("limit", String(state.usersLimit));
     params.set("offset", String(state.usersOffset));
-    if (state.usersSearch.trim()) params.set("search", state.usersSearch.trim());
+    if (state.usersSearch.trim())
+      params.set("search", state.usersSearch.trim());
     const page = await api(`/admin/users?${params.toString()}`);
     if (requestId !== state.usersRequestId) return;
     state.users = reset ? page.items : [...state.users, ...page.items];
+    state.usersLoadError = null;
     state.usersHasMore = page.has_more;
     state.usersOffset = page.offset + page.items.length;
-    if (silent) renderApp();
+    renderUsers();
   } catch (error) {
     if (requestId === state.usersRequestId) {
       logLoadError("loadUsers", error);
-      if (!silent) setErrorAndRender(error.message || "Не удалось загрузить пользователей");
+      state.usersLoadError = error?.message || "Ошибка загрузки";
+      renderUsers();
+      if (!silent) {
+        setError(error.message || "Не удалось загрузить пользователей");
+        renderNotifications();
+      }
     }
   } finally {
     if (requestId === state.usersRequestId) {
@@ -169,17 +216,20 @@ async function loadPayouts({ silent = false } = {}) {
   if (!silent) {
     setLoadingAndRender("payouts", true);
     clearError();
-    renderApp();
   }
   try {
     const payouts = await api("/admin/payouts");
     if (requestId !== state.payoutsRequestId) return;
+    state.payoutsLoadError = null;
     state.payouts = payouts;
-    if (silent) renderApp();
+    renderPayouts();
   } catch (error) {
     if (requestId === state.payoutsRequestId) {
       logLoadError("loadPayouts", error);
-      if (!silent) setErrorAndRender(error.message || "Не удалось загрузить выплаты");
+      state.payoutsLoadError = error?.message || "Ошибка загрузки";
+      renderPayouts();
+      if (!silent)
+        setErrorAndRender(error.message || "Не удалось загрузить выплаты");
     }
   } finally {
     if (requestId === state.payoutsRequestId) {
@@ -200,28 +250,43 @@ export function upsertPayoutInList(payout) {
 }
 
 async function refreshSelectedPayout({ silent = false } = {}) {
+  const payoutId = Number(state.selectedPayoutId);
   const hasInitData = canUseApi();
-  if (!state.selectedPayoutId) {
-    return;
+  if (!payoutId) {
+    return false;
   }
   if (!hasInitData) {
-    return;
+    return false;
   }
   const requestId = ++state.selectedPayoutRequestId;
+  const isCurrentRequest = () =>
+    requestId === state.selectedPayoutRequestId &&
+    Number(state.selectedPayoutId) === payoutId;
   if (!silent) setLoadingAndRender("recipients", true);
+  else if (state.loading.recipients)
+    setLoadingAndRender("recipients", false);
   try {
-    const detail = await api(`/admin/payouts/${state.selectedPayoutId}`);
-    const recipients = await api(`/admin/payouts/${state.selectedPayoutId}/recipients`);
-    if (requestId !== state.selectedPayoutRequestId) return;
+    const detail = await api(`/admin/payouts/${payoutId}`);
+    if (!isCurrentRequest()) return false;
+    const recipients = await api(`/admin/payouts/${payoutId}/recipients`);
+    if (!isCurrentRequest()) return false;
     state.selectedPayoutDetail = detail;
+    state.recipientsLoadError = null;
     state.recipients = recipients;
     upsertPayoutInList(detail?.payout);
-    renderApp();
+    renderSelectedPayoutView();
+    return true;
   } catch (error) {
+    if (!isCurrentRequest()) return false;
     logLoadError("refreshSelectedPayout", error);
-    if (!silent) setErrorAndRender(error.message || "Не удалось обновить выплату");
+    state.recipientsLoadError = error?.message || "Ошибка загрузки";
+    renderSelectedPayoutView();
+    if (!silent)
+      setErrorAndRender(error.message || "Не удалось обновить выплату");
+    return false;
   } finally {
-    if (!silent) setLoadingAndRender("recipients", false);
+    if (isCurrentRequest() && !silent)
+      setLoadingAndRender("recipients", false);
   }
 }
 
@@ -234,19 +299,49 @@ export async function fetchSelectedPayoutSnapshot(payoutId) {
     state.selectedPayoutDetail = detail;
     state.recipients = recipients;
     upsertPayoutInList(detail?.payout);
-    renderApp();
+    renderSelectedPayoutView();
   }
   return { detail, recipients };
 }
 
 export function scheduleSelectedPayoutRefresh({ silent = true } = {}) {
   if (!state.initData || !state.selectedPayoutId) return Promise.resolve();
-  if (!selectedRefreshPromise) {
-    selectedRefreshPromise = refreshSelectedPayout({ silent }).finally(() => {
-      selectedRefreshPromise = null;
-    });
+  const payoutId = Number(state.selectedPayoutId);
+  const existing = selectedRefreshPromises.get(payoutId);
+  if (
+    existing &&
+    existing.requestId === state.selectedPayoutRequestId
+  ) {
+    existing.repeatRequested = true;
+    return existing.promise;
   }
-  return selectedRefreshPromise;
+
+  const entry = {
+    requestId: null,
+    repeatRequested: false,
+    promise: null,
+  };
+  const request = refreshSelectedPayout({ silent });
+  entry.requestId = state.selectedPayoutRequestId;
+  entry.promise = request
+    .then(() => {
+      if (
+        entry.repeatRequested &&
+        entry.requestId === state.selectedPayoutRequestId &&
+        Number(state.selectedPayoutId) === payoutId
+      ) {
+        if (selectedRefreshPromises.get(payoutId) === entry)
+          selectedRefreshPromises.delete(payoutId);
+        return scheduleSelectedPayoutRefresh({ silent });
+      }
+      return undefined;
+    })
+    .finally(() => {
+      if (selectedRefreshPromises.get(payoutId) === entry)
+        selectedRefreshPromises.delete(payoutId);
+    });
+  selectedRefreshPromises.set(payoutId, entry);
+  return entry.promise;
 }
 
 export function schedulePayoutsRefresh({ silent = true } = {}) {
@@ -259,7 +354,11 @@ export function schedulePayoutsRefresh({ silent = true } = {}) {
   return payoutsRefreshPromise;
 }
 
-export function scheduleAdminStateRefresh({ selected = true, payouts = true, silent = true } = {}) {
+export function scheduleAdminStateRefresh({
+  selected = true,
+  payouts = true,
+  silent = true,
+} = {}) {
   const tasks = [];
   if (selected) tasks.push(scheduleSelectedPayoutRefresh({ silent }));
   if (payouts) tasks.push(schedulePayoutsRefresh({ silent }));
@@ -291,8 +390,15 @@ export function handleAdminEvent(type, payload = {}) {
   }
   if (type === "payout_changed") {
     if (state.initData) {
-      if (payload.payout_id && Number(payload.payout_id) === Number(state.selectedPayoutId)) {
-        void scheduleAdminStateRefresh({ selected: true, payouts: true, silent: true });
+      if (
+        payload.payout_id &&
+        Number(payload.payout_id) === Number(state.selectedPayoutId)
+      ) {
+        void scheduleAdminStateRefresh({
+          selected: true,
+          payouts: true,
+          silent: true,
+        });
       } else {
         void schedulePayoutsRefresh({ silent: true });
       }
@@ -300,8 +406,16 @@ export function handleAdminEvent(type, payload = {}) {
     return;
   }
   if (type === "payout_recipients_changed") {
-    if (state.initData && payload.payout_id && Number(payload.payout_id) === Number(state.selectedPayoutId)) {
-      void scheduleAdminStateRefresh({ selected: true, payouts: true, silent: true });
+    if (
+      state.initData &&
+      payload.payout_id &&
+      Number(payload.payout_id) === Number(state.selectedPayoutId)
+    ) {
+      void scheduleAdminStateRefresh({
+        selected: true,
+        payouts: true,
+        silent: true,
+      });
     } else if (state.initData) {
       void schedulePayoutsRefresh({ silent: true });
     }
@@ -326,26 +440,41 @@ function handleAdminEventsError(source, retryTokenRefresh) {
 
 export async function startAdminEvents(retryTokenRefresh = false) {
   if (!state.initData || !canUseApi()) return null;
-  if (adminEventsSource && adminEventsSource.readyState !== EventSource.CLOSED) return adminEventsSource;
+  if (adminEventsSource && adminEventsSource.readyState !== EventSource.CLOSED)
+    return adminEventsSource;
   if (adminEventsStartPromise) return adminEventsStartPromise;
   adminEventsStartPromise = (async () => {
     try {
       const { token } = await createEventsToken();
-      if (adminEventsSource && adminEventsSource.readyState !== EventSource.CLOSED) {
+      if (
+        adminEventsSource &&
+        adminEventsSource.readyState !== EventSource.CLOSED
+      ) {
         return adminEventsSource;
       }
-      const source = new EventSource(`/api/admin/events?token=${encodeURIComponent(token)}`);
+      const source = new EventSource(
+        `/api/admin/events?token=${encodeURIComponent(token)}`,
+      );
       adminEventsSource = source;
       adminEventsWarningShown = false;
       source.addEventListener("open", () => {
         adminEventsRecoveryUsed = false;
       });
       source.addEventListener("ping", () => handleAdminEvent("ping", {}));
-      source.addEventListener("users_changed", (event) => handleAdminEvent("users_changed", parseEventPayload(event.data)));
-      source.addEventListener("payouts_changed", (event) => handleAdminEvent("payouts_changed", parseEventPayload(event.data)));
-      source.addEventListener("payout_changed", (event) => handleAdminEvent("payout_changed", parseEventPayload(event.data)));
+      source.addEventListener("users_changed", (event) =>
+        handleAdminEvent("users_changed", parseEventPayload(event.data)),
+      );
+      source.addEventListener("payouts_changed", (event) =>
+        handleAdminEvent("payouts_changed", parseEventPayload(event.data)),
+      );
+      source.addEventListener("payout_changed", (event) =>
+        handleAdminEvent("payout_changed", parseEventPayload(event.data)),
+      );
       source.addEventListener("payout_recipients_changed", (event) =>
-        handleAdminEvent("payout_recipients_changed", parseEventPayload(event.data))
+        handleAdminEvent(
+          "payout_recipients_changed",
+          parseEventPayload(event.data),
+        ),
       );
       source.onerror = () => {
         handleAdminEventsError(source, true);
@@ -366,37 +495,123 @@ export async function startAdminEvents(retryTokenRefresh = false) {
   return adminEventsStartPromise;
 }
 
-async function selectPayout(id) {
-  if (!canUseApi()) return;
-  const changed = state.selectedPayoutId !== id;
+async function selectPayout(id, { requireSuccessfulLoad = false } = {}) {
+  if (!canUseApi()) return false;
+  const nextId = Number(id);
+  const previous = requireSuccessfulLoad
+    ? {
+        payoutId: state.selectedPayoutId,
+        selectedUsers: new Set(state.selectedUsers),
+        selectedPayoutDetail: state.selectedPayoutDetail,
+        recipients: state.recipients,
+        recipientsLoadError: state.recipientsLoadError,
+        expandedRecipients: new Set(state.expandedRecipients),
+        previousPayoutSelection: state.selectedPayoutId
+          ? new Set(
+              state.selectedUsersByPayout.get(Number(state.selectedPayoutId)) ||
+                state.selectedUsers,
+            )
+          : null,
+        nextPayoutSelection: new Set(
+          state.selectedUsersByPayout.get(nextId) || [],
+        ),
+      }
+    : null;
+  const changed = Number(state.selectedPayoutId) !== nextId;
   if (changed) {
+    if (state.selectedPayoutId)
+      state.selectedUsersByPayout.set(
+        Number(state.selectedPayoutId),
+        new Set(state.selectedUsers),
+      );
     state.selectedUsers.clear();
+    state.selectedUsersByPayout
+      .get(nextId)
+      ?.forEach((userId) => state.selectedUsers.add(userId));
     state.selectedPayoutDetail = null;
     state.recipients = [];
+    state.expandedRecipients.clear();
   }
-  state.selectedPayoutId = id;
-  await refreshSelectedPayout();
+  state.selectedPayoutId = nextId;
+  const refresh = refreshSelectedPayout();
+  const requestId = state.selectedPayoutRequestId;
+  const loaded = await refresh;
+  const loadedForTarget =
+    loaded &&
+    Number(state.selectedPayoutDetail?.payout?.id) === nextId;
+  if (
+    requireSuccessfulLoad &&
+    !loadedForTarget &&
+    Number(state.selectedPayoutId) === nextId &&
+    state.selectedPayoutRequestId === requestId
+  ) {
+    state.selectedPayoutId = previous.payoutId;
+    state.selectedUsers.clear();
+    previous.selectedUsers.forEach((userId) => state.selectedUsers.add(userId));
+    state.selectedPayoutDetail = previous.selectedPayoutDetail;
+    state.recipients = previous.recipients;
+    state.recipientsLoadError = previous.recipientsLoadError;
+    state.expandedRecipients.clear();
+    previous.expandedRecipients.forEach((recipientId) =>
+      state.expandedRecipients.add(recipientId),
+    );
+    if (previous.payoutId)
+      state.selectedUsersByPayout.set(
+        Number(previous.payoutId),
+        previous.previousPayoutSelection,
+      );
+    state.selectedUsersByPayout.set(nextId, previous.nextPayoutSelection);
+    renderApp();
+    return false;
+  }
   renderApp();
+  return loadedForTarget;
 }
 
 async function markPaid(recipientId) {
   if (!canUseApi() || !state.selectedPayoutId) return;
-  const confirmed = window.confirm("Вы уверены, что выплата этому получателю выполнена?");
-  if (!confirmed) return;
+  if (markPaidInFlight) return;
+  const payoutId = Number(state.selectedPayoutId);
+  const id = Number(recipientId);
+  const isCurrentPayout = () => Number(state.selectedPayoutId) === payoutId;
+  markPaidInFlight = true;
   setLoadingAndRender("markPaid", true);
-  state.loadingRecipientId = recipientId;
+  state.loadingRecipientId = id;
   renderApp();
   try {
-    await api(`/admin/payouts/${state.selectedPayoutId}/recipients/${recipientId}/mark-paid`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    setToastAndRender("Получатель отмечен как выплаченный.");
-    await refreshSelectedPayout();
-    await loadPayouts();
+    await api(
+      `/admin/payouts/${payoutId}/recipients/${id}/mark-paid`,
+      {
+        method: "POST",
+        body: JSON.stringify({}),
+      },
+    );
+    if (isCurrentPayout()) {
+      delete state.recipientOperationError[id];
+      setToastAndRender(`Оплата получателя в выплате #${payoutId} отмечена.`);
+      await refreshSelectedPayout();
+    } else {
+      setToast(
+        `Оплата получателя в выплате #${payoutId} отмечена.`,
+        "success",
+      );
+      renderApp();
+    }
+    await schedulePayoutsRefresh({ silent: true });
   } catch (error) {
-    setErrorAndRender(error.message || "Не удалось обновить статус");
+    const message = error?.message || "Ошибка сервера";
+    if (isCurrentPayout()) {
+      state.recipientOperationError[id] = message;
+      setErrorAndRender(message || "Не удалось обновить статус");
+    } else {
+      setToast(
+        `Не удалось отметить оплату в выплате #${payoutId}: ${message}`,
+        "error",
+      );
+      renderApp();
+    }
   } finally {
+    markPaidInFlight = false;
     state.loadingRecipientId = null;
     setLoadingAndRender("markPaid", false);
     renderApp();

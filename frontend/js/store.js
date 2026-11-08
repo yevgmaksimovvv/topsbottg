@@ -1,15 +1,24 @@
-import { AUTO_HIDE_TOAST_MS, COMPOSER_IDS, MOBILE_QUERY, USERS_LIMIT } from "./constants.js";
+import { AUTO_HIDE_TOAST_MS, COMPOSER_IDS, USERS_LIMIT } from "./constants.js";
 import { composerPeriodLabel } from "./message-limit.js";
+import { formatPayoutPeriodLabel } from "./utils.js";
+
+export { formatPayoutPeriodLabel } from "./utils.js";
 
 export const state = {
   isTelegramEnvironment: Boolean(window.Telegram?.WebApp),
   initData: "",
-  authStatus: window.Telegram?.WebApp ? "telegram_missing_init_data" : "browser",
+  authStatus: window.Telegram?.WebApp
+    ? "telegram_missing_init_data"
+    : "browser",
   activeMobileView: "composer",
   users: [],
   payouts: [],
   recipients: [],
+  usersLoadError: null,
+  payoutsLoadError: null,
+  recipientsLoadError: null,
   selectedUsers: new Set(),
+  selectedUsersByPayout: new Map(),
   selectedPayoutId: null,
   selectedPayoutDetail: null,
   composer: {
@@ -22,6 +31,9 @@ export const state = {
   usersOffset: 0,
   usersHasMore: false,
   usersSearch: "",
+  recipientFilter: "all",
+  expandedRecipients: new Set(),
+  recipientOperationError: {},
   loading: {
     users: false,
     payouts: false,
@@ -39,21 +51,14 @@ export const state = {
   selectedPayoutRequestId: 0,
   toastTimer: null,
   searchTimer: null,
+  previewOpen: false,
+  dialogBusy: false,
 };
 
 export const $ = (id) => document.getElementById(id);
 
-function padPeriodPart(value) {
-  return String(value).padStart(2, "0");
-}
-
-export function formatPayoutPeriodLabel(startDay, startMonth, endDay, endMonth) {
-  return `${padPeriodPart(startDay)}.${padPeriodPart(startMonth)} — ${padPeriodPart(endDay)}.${padPeriodPart(endMonth)}`;
-}
-
 export function payoutPeriodLabel(payout) {
   if (!payout) return "";
-  if (payout.period_label) return payout.period_label;
   if (
     payout.period_start_day &&
     payout.period_start_month &&
@@ -64,52 +69,36 @@ export function payoutPeriodLabel(payout) {
       payout.period_start_day,
       payout.period_start_month,
       payout.period_end_day,
-      payout.period_end_month
+      payout.period_end_month,
     );
   }
-  return "";
-}
-
-function readTelegramWebApp() {
-  return window.Telegram?.WebApp || null;
+  return payout.period_label || "";
 }
 
 export function refreshTelegramAuthState() {
-  const webApp = readTelegramWebApp();
+  const webApp = window.Telegram?.WebApp;
   state.isTelegramEnvironment = Boolean(webApp);
   state.initData = webApp?.initData || "";
-  if (!webApp) {
-    state.authStatus = "browser";
-    return;
-  }
-  state.authStatus = state.initData ? "ready" : "telegram_missing_init_data";
+  state.authStatus = !webApp
+    ? "browser"
+    : state.initData
+      ? "ready"
+      : "telegram_missing_init_data";
 }
 
-export function canUseApi() {
-  return Boolean(state.initData);
-}
-
+export const canUseApi = () => Boolean(state.initData);
 export function setLoading(key, value) {
   state.loading[key] = value;
 }
 
 export function setError(message) {
-  const text = String(message || "").trim();
-  state.error = text || null;
-  setToast(text, "error");
+  state.error = String(message || "").trim() || null;
+  setToast(state.error, "error");
 }
 
 export function clearError() {
   state.error = null;
   clearNotification();
-}
-
-function hideNotificationDom() {
-  const toast = $("toast");
-  if (toast) {
-    toast.textContent = "";
-    toast.className = "toast hidden";
-  }
 }
 
 function clearNotificationTimer() {
@@ -122,73 +111,42 @@ function clearNotificationTimer() {
 export function clearNotification() {
   clearNotificationTimer();
   state.notification = null;
-  hideNotificationDom();
-}
-
-function notificationDuration(kind) {
-  if (kind === "warning" || kind === "error") return 5000;
-  return AUTO_HIDE_TOAST_MS;
+  const toast = $("toast");
+  if (toast) {
+    toast.textContent = "";
+    toast.className = "toast hidden";
+  }
 }
 
 export function setToast(message, kind = "info") {
-  const text = String(message || "").trim();
   clearNotificationTimer();
+  const text = String(message || "").trim();
   state.notification = text ? { kind, message: text } : null;
-  if (!text) {
-    hideNotificationDom();
-    return;
+  if (text) {
+    state.toastTimer = window.setTimeout(
+      clearNotification,
+      kind === "warning" || kind === "error" ? 5000 : AUTO_HIDE_TOAST_MS,
+    );
   }
-  state.toastTimer = window.setTimeout(() => {
-    state.notification = null;
-    state.toastTimer = null;
-    hideNotificationDom();
-  }, notificationDuration(kind));
 }
 
 export function setMobileView(view) {
   state.activeMobileView = view;
 }
 
-export function getComposerElements() {
-  const side = MOBILE_QUERY.matches ? "mobile" : "desktop";
-  const ids = COMPOSER_IDS[side];
-  return {
-    side,
-    periodStart: $(ids.periodStart), periodEnd: $(ids.periodEnd),
-    messageBefore: $(ids.messageBefore), messageAfter: $(ids.messageAfter),
-    periodLabel: document.querySelector(`#${side}-protected-period`),
-    messageCount: $(ids.messageCount), validation: $(ids.validation), preview: $(ids.preview),
-  };
-}
-
-export function getAllComposerElementPairs() {
-  return Object.values(COMPOSER_IDS).map((ids) => ({
-    periodStart: $(ids.periodStart), periodEnd: $(ids.periodEnd),
-    messageBefore: $(ids.messageBefore), messageAfter: $(ids.messageAfter),
-    periodLabel: document.querySelector(`#${ids.messageBefore.split("-")[0]}-protected-period`),
-    messageCount: $(ids.messageCount), validation: $(ids.validation), preview: $(ids.preview),
-  }));
-}
-
 export function syncFilterInputs() {
-  ["desktop-search", "mobile-search"].forEach((id) => {
-    const input = $(id);
-    if (input) input.value = state.usersSearch;
-  });
+  const input = $("users-search");
+  if (input && input.value !== state.usersSearch)
+    input.value = state.usersSearch;
 }
 
 export function syncComposerFields() {
-  const periodLabel = composerPeriodLabel(state.composer);
-  getAllComposerElementPairs().forEach((fields) => {
-    for (const key of ["periodStart", "periodEnd", "messageBefore", "messageAfter"]) {
-      if (!fields[key]) continue;
-      if (key.startsWith("period")) {
-        if (fields[key].value !== state.composer[key]) fields[key].value = state.composer[key];
-      } else if (fields[key].value !== state.composer[key]) {
-        fields[key].value = state.composer[key];
-      }
-    }
-    if (fields.periodLabel && fields.periodLabel.textContent !== periodLabel) fields.periodLabel.textContent = periodLabel;
-    if (fields.validation && !fields.validation.textContent) fields.validation.classList.add("hidden");
-  });
+  for (const [key, id] of Object.entries(COMPOSER_IDS)) {
+    if (["messageCount", "validation", "preview"].includes(key)) continue;
+    const field = $(id);
+    if (field && field.value !== state.composer[key])
+      field.value = state.composer[key];
+  }
+  const period = $("protected-period");
+  if (period) period.textContent = composerPeriodLabel(state.composer);
 }
