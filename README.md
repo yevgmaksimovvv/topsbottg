@@ -161,6 +161,32 @@ docker compose logs -f nginx
 - audit log не должен содержать платежные реквизиты;
 - банковская оплата выполняется вне сервиса.
 
+## Автоматический production deploy
+
+После merge PR каждый push в `main` проходит workflow `CI`. Job `Deploy production` запускается только после успешных проверок, использует тот же SHA и подключается к VPS как `deploy` в `/home/deploy/apps/topsbottg`. В GitHub создайте Environment `production` и добавьте настройки именно в него:
+
+- Secret `DEPLOY_SSH_PRIVATE_KEY` — отдельный приватный OpenSSH ключ CI.
+- Variables `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER` — адрес VPS, SSH порт и пользователь `deploy`.
+- Variable `DEPLOY_KNOWN_HOSTS` — доверенная строка ключа хоста из `known_hosts`. Для нестандартного порта формат записи: `[host]:port ssh-ed25519 AAAA...`.
+
+Однократная настройка с Windows PowerShell (укажите реальный адрес VPS и порт):
+
+```powershell
+ssh-keygen -t ed25519 -C "topsbottg-github-actions-production" -f "$env:USERPROFILE\.ssh\topsbottg-production" -N ""
+Get-Content "$env:USERPROFILE\.ssh\topsbottg-production.pub" | ssh deploy@VPS "umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys"
+ssh-keygen -lf "$env:USERPROFILE\.ssh\topsbottg-production.pub"
+ssh-keyscan -p 22 -t ed25519 VPS
+```
+
+Сверьте отпечаток `ssh-keyscan` с доверенным отпечатком VPS (на сервере: `sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`) и сохраните выданную строку в `DEPLOY_KNOWN_HOSTS`. Не добавляйте приватный файл `topsbottg-production` в репозиторий. В **Settings → Environments → New environment** создайте `production` и задайте Secret/Variables выше.
+
+Workflow не запускает параллельные deploy и откажется выкладывать SHA, если `origin/main` успел продвинуться. Deploy job checkout’ит ровно проверенный SHA и передаёт содержащийся в нём deploy-скрипт по SCP в уникальный файл в домашнем каталоге SSH-пользователя. Поэтому скрипт не нужно заранее устанавливать на VPS. SSH и SCP используют заданный `known_hosts` с `StrictHostKeyChecking=yes`. VPS должен иметь Git, Docker Compose plugin, `curl`, GNU `timeout`, доступ к GitHub по HTTPS и production `.env`.
+
+Deploy создаёт SQL backup до миграций и подготавливает точный SHA в изолированном Git worktree рядом с production checkout. App строится и проходит health/Alembic проверки из worktree, пока Nginx продолжает отдавать прежний frontend. Только после успешной проверки app основной checkout fast-forward’ится, и Compose пересоздаёт только `nginx` с новым frontend. В `up` передаются `--no-deps --force-recreate`, PostgreSQL и внешние сервисы не перезапускаются. Скрипт проверяет `/healthz`, Mini App и JavaScript MIME/`nosniff`; успешный SHA хранится в `.deployed-sha`. Release worktrees хранятся в `/home/deploy/apps/.topsbottg-deploy/releases` и используются как источник bind mount Nginx.
+
+On failure, Actions shows only the failed phase and a safe diagnostic. Detailed Compose output and recent app/nginx logs stay on the VPS in `/home/deploy/apps/topsbottg/.deploy-failures.log` (mode 0600). A VPS-side `flock` prevents a retry from mutating the same Compose project while an earlier SSH process is still running.
+The `app` service is replaced in place and runs Telegram polling in the same process as the API. A second app cannot safely run with the same bot token. If the replacement fails its health check, the backend may remain unavailable even though Nginx still serves the previous frontend; this is not an application rollback. Deployment stops before switching Nginx and never downgrades the database. An operator must inspect `.deployed-sha`, the app state, the VPS diagnostic log, and `backups/topsbottg-*.sql`, then recover with a forward release compatible with the current schema. Database restore is a separate operator decision.
+
 ## Operational notes
 
 - app делает миграции на старте контейнера;

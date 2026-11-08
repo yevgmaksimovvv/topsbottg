@@ -20,9 +20,11 @@ fi
 
 mkdir -p "$BACKUP_DIR"
 stamp="$(date +%Y%m%d-%H%M%S)"
-backup_file="$BACKUP_DIR/topsbottg-$stamp.sql"
+backup_file="$(mktemp "$BACKUP_DIR/topsbottg-$stamp-XXXXXX.sql")"
 
 echo "Creating backup: $backup_file"
+# These variables are intentionally expanded by the shell inside the postgres container.
+# shellcheck disable=SC2016
 if docker compose exec -T postgres sh -c 'exec env PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB"' > "$backup_file"; then
   echo "Backup completed: $backup_file"
 else

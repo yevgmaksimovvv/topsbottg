@@ -223,3 +223,10 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 .DS_Store
+
+# Production deployment state and isolated release worktrees
+.deploy/
+.deployed-sha
+.deployed-sha.tmp
+.deploy.lock
+.deploy-failures.log
