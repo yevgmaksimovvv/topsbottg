@@ -65,12 +65,21 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Install browser test dependencies
+        run: npm ci
+
+      - name: Install Chromium for Mini App browser checks
+        run: npx playwright install --with-deps chromium
+
       - name: Check JavaScript syntax
         shell: bash
         run: find frontend -type f \( -name '*.js' -o -name '*.mjs' \) -print0 | xargs -0 -n1 node --check
 
       - name: Test payout message length helpers
         run: node --test tests/js/*.test.mjs
+
+      - name: Test Mini App workflows in Chromium
+        run: npm run test:browser
 
       - name: Check JavaScript modules through Nginx
         shell: bash

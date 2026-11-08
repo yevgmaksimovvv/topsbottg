@@ -2,223 +2,341 @@
 <html lang="ru">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>topsbottg · Админ-панель</title>
-    <link rel="stylesheet" href="/miniapp/styles.css?v=20261107-payout-js-mime-1" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>topsbottg</title>
+    <link rel="stylesheet" href="/miniapp/styles.css?v=20261108-redesign-1" />
   </head>
   <body>
     <main class="app-shell">
       <header class="app-header">
-        <div class="app-header-title">Админ-панель</div>
-        <div id="auth-state" class="auth-pill hidden"></div>
+        <h1 id="screen-title">Новая выплата</h1>
+        <div id="auth-state" class="hidden"></div>
       </header>
+      <div id="auth-banner" class="notice hidden" role="status"></div>
+      <div
+        id="toast"
+        class="toast hidden"
+        role="status"
+        aria-live="polite"
+      ></div>
 
-      <div id="auth-banner" class="auth-banner hidden" role="status"></div>
-      <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-
-      <nav class="mobile-nav" aria-label="Разделы">
-        <button type="button" data-mobile-view="composer" class="mobile-nav-button">Выплата</button>
-        <button type="button" data-mobile-view="payouts" class="mobile-nav-button">Список</button>
-        <button type="button" data-mobile-view="users" class="mobile-nav-button">Пользователи</button>
-        <button type="button" data-mobile-view="recipients" class="mobile-nav-button">Получатели</button>
-      </nav>
-
-      <section class="desktop-workspace">
-        <section class="panel users-panel">
-          <div class="panel-head">
-            <div>
-              <h2>Пользователи</h2>
-              <p class="panel-note">Выберите выплату.</p>
+      <section class="workspace">
+        <section
+          class="screen"
+          data-screen="composer"
+          aria-labelledby="screen-title"
+        >
+          <form
+            class="composer-form"
+            data-action-form="create-payout"
+            novalidate
+          >
+            <fieldset class="period-fields">
+              <legend>Период</legend>
+              <label class="field"
+                ><span>С</span
+                ><input
+                  id="period-start"
+                  type="text"
+                  inputmode="numeric"
+                  maxlength="5"
+                  autocomplete="off"
+                  placeholder="ДД.ММ"
+                  aria-describedby="period-start-error"
+              /></label>
+              <label class="field"
+                ><span>По</span
+                ><input
+                  id="period-end"
+                  type="text"
+                  inputmode="numeric"
+                  maxlength="5"
+                  autocomplete="off"
+                  placeholder="ДД.ММ"
+                  aria-describedby="period-end-error"
+              /></label>
+            </fieldset>
+            <div class="period-errors">
+              <span id="period-start-error" class="field-error"></span
+              ><span id="period-end-error" class="field-error"></span>
             </div>
-          </div>
-
-          <div class="users-toolbar">
-            <div class="selected-counter">
-              <span>Выбрано</span>
-              <strong id="selected-count">0</strong>
+            <label class="field message-label"><span>Сообщение</span></label>
+            <div class="message-editor">
+              <textarea
+                id="message-before"
+                rows="3"
+                aria-label="Текст до периода"
+                data-message-part="messageBefore"
+              ></textarea>
+              <div class="protected-period">
+                <svg
+                  viewBox="0 0 16 16"
+                  width="14"
+                  height="14"
+                  aria-hidden="true"
+                >
+                  <rect
+                    x="3"
+                    y="7"
+                    width="10"
+                    height="8"
+                    rx="1.5"
+                    fill="none"
+                    stroke="currentColor"
+                  />
+                  <path
+                    d="M5 7V5a3 3 0 0 1 6 0v2"
+                    fill="none"
+                    stroke="currentColor"
+                  /></svg
+                ><span id="protected-period">ДД.ММ – ДД.ММ</span>
+              </div>
+              <textarea
+                id="message-after"
+                rows="3"
+                aria-label="Текст после периода"
+                data-message-part="messageAfter"
+              ></textarea>
+              <output
+                id="message-count"
+                class="message-count"
+                aria-label="Количество символов"
+              ></output>
             </div>
-            <div class="toolbar-actions">
-              <button type="button" class="secondary-button" data-action="clear-selection">Снять выбор</button>
-              <button type="button" class="success-button" data-action="send-payout">Разослать</button>
-            </div>
-          </div>
-
-          <div class="controls controls-users">
-            <label class="field">
-              <span>Поиск</span>
-              <input id="desktop-search" autocomplete="off" placeholder="Поиск по ФИО" />
-            </label>
-            <div class="field field-button">
-              <span>&nbsp;</span>
-              <button type="button" class="secondary-button" data-action="load-more-users">Загрузить ещё</button>
-            </div>
-          </div>
-
-          <div id="desktop-users" class="list-root"></div>
-        </section>
-
-        <section class="panel composer-panel">
-          <div class="panel-head">
-            <div>
-              <h2>Новая выплата</h2>
-              <p class="panel-note">Создайте черновик выплаты.</p>
-            </div>
-          </div>
-
-          <form class="composer-form" data-action-form="create-payout">
-            <div class="controls controls-composer period-fields">
-              <label class="field"><span>&#1053;&#1072;&#1095;&#1072;&#1083;&#1086; &#1087;&#1077;&#1088;&#1080;&#1086;&#1076;&#1072;</span><input id="desktop-period-start" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="&#1044;&#1044;.&#1052;&#1052;" /></label>
-              <label class="field"><span>&#1050;&#1086;&#1085;&#1077;&#1094; &#1087;&#1077;&#1088;&#1080;&#1086;&#1076;&#1072;</span><input id="desktop-period-end" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="&#1044;&#1044;.&#1052;&#1052;" /></label>
-            </div>
-            <div class="field message-editor"><span>Текст до и после периода</span>
-              <textarea id="desktop-message-before" class="message-part" rows="4" aria-label="&#1058;&#1077;&#1082;&#1089;&#1090; &#1076;&#1086; &#1087;&#1077;&#1088;&#1080;&#1086;&#1076;&#1072;" data-message-part="messageBefore"></textarea>
-              <span id="desktop-protected-period" class="protected-period" contenteditable="false" aria-label="&#1055;&#1077;&#1088;&#1080;&#1086;&#1076; &#1079;&#1072;&#1097;&#1080;&#1097;&#1105;&#1085; &#1086;&#1090; &#1088;&#1077;&#1076;&#1072;&#1082;&#1090;&#1080;&#1088;&#1086;&#1074;&#1072;&#1085;&#1080;&#1103;">&#1044;&#1044;.&#1052;&#1052; &#8211; &#1044;&#1044;.&#1052;&#1052;</span>
-              <textarea id="desktop-message-after" class="message-part" rows="6" aria-label="&#1058;&#1077;&#1082;&#1089;&#1090; &#1087;&#1086;&#1089;&#1083;&#1077; &#1087;&#1077;&#1088;&#1080;&#1086;&#1076;&#1072;" data-message-part="messageAfter"></textarea>
-              <output id="desktop-message-count" class="message-count" aria-label="Количество символов" aria-live="off"></output>
-            </div>
-            <div id="desktop-payout-validation" class="form-hint hidden"></div>
-
-            <div id="desktop-preview" class="preview-root"></div>
-
-            <div class="action-row">
-              <button type="button" data-action="create-payout">Создать выплату</button>
+            <button
+              type="button"
+              class="button button-quiet preview-toggle"
+              data-action="toggle-preview"
+              aria-expanded="false"
+            >
+              Посмотреть сообщение
+            </button>
+            <div
+              id="preview"
+              class="preview-root hidden"
+              aria-live="polite"
+            ></div>
+            <div
+              id="payout-validation"
+              class="form-error hidden"
+              role="alert"
+            ></div>
+            <div class="form-actions">
+              <button
+                type="submit"
+                data-action="create-payout"
+                class="button button-primary"
+              >
+                Создать выплату
+              </button>
+              <div
+                id="create-success"
+                class="success-callout hidden"
+                role="status"
+              ></div>
             </div>
           </form>
         </section>
 
-        <section class="side-stack">
-          <section class="panel current-payout-panel">
-            <div class="panel-head">
-              <div>
-                <h2>Текущая выплата</h2>
-                <p class="panel-note">Статус и действия.</p>
-              </div>
-            </div>
-            <div id="desktop-current-payout" class="current-payout-root"></div>
-          </section>
+        <section
+          class="screen"
+          data-screen="users"
+          aria-labelledby="screen-title"
+          hidden
+        >
+          <div id="selection-payout-context" class="payout-context"></div>
+          <label class="search-field"
+            ><span class="sr-only">Поиск пользователей по ФИО</span
+            ><span aria-hidden="true">⌕</span
+            ><input
+              id="users-search"
+              autocomplete="off"
+              placeholder="Поиск по ФИО"
+              aria-label="Поиск по ФИО"
+          /></label>
+          <div id="users-lock-note" class="notice hidden"></div>
+          <div id="users-state" class="list-state" role="status"></div>
+          <div id="users-list" class="user-list" aria-live="polite"></div>
+          <div id="users-more-state" class="list-state"></div>
+          <button
+            type="button"
+            class="button button-quiet load-more hidden"
+            data-action="load-more-users"
+          >
+            Загрузить ещё
+          </button>
+        </section>
 
-          <section class="panel payouts-panel">
-            <div class="panel-head">
-              <div>
-                <h2>Все выплаты</h2>
-                <p class="panel-note">Последняя сверху. Выберите нужную выплату.</p>
-              </div>
-            </div>
-            <div id="desktop-payouts" class="list-root"></div>
-          </section>
+        <section
+          class="screen"
+          data-screen="recipients"
+          aria-labelledby="screen-title"
+          hidden
+        >
+          <div id="recipients-context" class="payout-context"></div>
+          <div id="recipient-summary" class="recipient-summary"></div>
+          <div
+            id="recipient-filters"
+            class="filter-row"
+            role="group"
+            aria-label="Фильтр получателей"
+          >
+            <button
+              type="button"
+              class="filter-button active"
+              data-filter="all"
+              aria-pressed="true"
+            >
+              Все
+            </button>
+            <button
+              type="button"
+              class="filter-button"
+              data-filter="payable"
+              aria-pressed="false"
+            >
+              К оплате
+            </button>
+            <button
+              type="button"
+              class="filter-button"
+              data-filter="paid"
+              aria-pressed="false"
+            >
+              Выплачено
+            </button>
+            <button
+              type="button"
+              class="filter-button"
+              data-filter="problems"
+              aria-pressed="false"
+            >
+              Проблемы
+            </button>
+          </div>
+          <div id="recipients-state" class="list-state" role="status"></div>
+          <div id="recipients-list" class="recipient-list"></div>
+        </section>
 
-          <section class="panel recipients-panel">
-            <div class="panel-head">
-              <div>
-                <h2>Получатели</h2>
-              </div>
-            </div>
-            <div id="desktop-recipients" class="list-root"></div>
-          </section>
+        <section
+          class="screen"
+          data-screen="payouts"
+          aria-labelledby="screen-title"
+          hidden
+        >
+          <div id="history-current-context" class="payout-context"></div>
+          <div id="payouts-state" class="list-state" role="status"></div>
+          <div id="payouts-list" class="payout-list"></div>
         </section>
       </section>
 
-      <section class="mobile-workspace">
-        <section class="mobile-view" data-mobile-panel="users">
-          <section class="panel">
-            <div class="panel-head">
-              <div>
-                <h2>Пользователи</h2>
-                <p class="panel-note">Выберите выплату.</p>
-              </div>
-            </div>
-
-            <div class="users-toolbar">
-              <div class="selected-counter">
-                <span>Выбрано</span>
-                <strong id="selected-count-mobile">0</strong>
-              </div>
-              <div class="toolbar-actions">
-                <button type="button" class="secondary-button" data-action="clear-selection">Снять выбор</button>
-                <button type="button" class="success-button" data-action="send-payout">Разослать</button>
-              </div>
-            </div>
-
-            <div class="controls controls-users">
-              <label class="field">
-                <span>Поиск</span>
-                <input id="mobile-search" autocomplete="off" placeholder="Поиск по ФИО" />
-              </label>
-              <div class="field field-button">
-                <span>&nbsp;</span>
-                <button type="button" class="secondary-button" data-action="load-more-users">Загрузить ещё</button>
-              </div>
-            </div>
-
-            <div id="mobile-users" class="list-root"></div>
-          </section>
-        </section>
-
-        <section class="mobile-view" data-mobile-panel="composer">
-          <section class="panel">
-            <div class="panel-head">
-              <div>
-                <h2>Новая выплата</h2>
-                <p class="panel-note">Создайте черновик выплаты.</p>
-              </div>
-            </div>
-
-            <form class="composer-form" data-action-form="create-payout">
-              <div class="controls controls-composer period-fields">
-              <label class="field"><span>&#1053;&#1072;&#1095;&#1072;&#1083;&#1086; &#1087;&#1077;&#1088;&#1080;&#1086;&#1076;&#1072;</span><input id="mobile-period-start" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="&#1044;&#1044;.&#1052;&#1052;" /></label>
-              <label class="field"><span>&#1050;&#1086;&#1085;&#1077;&#1094; &#1087;&#1077;&#1088;&#1080;&#1086;&#1076;&#1072;</span><input id="mobile-period-end" type="text" inputmode="numeric" autocomplete="off" maxlength="5" placeholder="&#1044;&#1044;.&#1052;&#1052;" /></label>
-            </div>
-            <div class="field message-editor"><span>Текст до и после периода</span>
-              <textarea id="mobile-message-before" class="message-part" rows="4" aria-label="&#1058;&#1077;&#1082;&#1089;&#1090; &#1076;&#1086; &#1087;&#1077;&#1088;&#1080;&#1086;&#1076;&#1072;" data-message-part="messageBefore"></textarea>
-              <span id="mobile-protected-period" class="protected-period" contenteditable="false" aria-label="&#1055;&#1077;&#1088;&#1080;&#1086;&#1076; &#1079;&#1072;&#1097;&#1080;&#1097;&#1105;&#1085; &#1086;&#1090; &#1088;&#1077;&#1076;&#1072;&#1082;&#1090;&#1080;&#1088;&#1086;&#1074;&#1072;&#1085;&#1080;&#1103;">&#1044;&#1044;.&#1052;&#1052; &#8211; &#1044;&#1044;.&#1052;&#1052;</span>
-              <textarea id="mobile-message-after" class="message-part" rows="6" aria-label="&#1058;&#1077;&#1082;&#1089;&#1090; &#1087;&#1086;&#1089;&#1083;&#1077; &#1087;&#1077;&#1088;&#1080;&#1086;&#1076;&#1072;" data-message-part="messageAfter"></textarea>
-              <output id="mobile-message-count" class="message-count" aria-label="Количество символов" aria-live="off"></output>
-            </div>
-              <div id="mobile-payout-validation" class="form-hint hidden"></div>
-
-              <div id="mobile-preview" class="preview-root"></div>
-
-              <div class="action-row">
-                <button type="button" data-action="create-payout">Создать выплату</button>
-              </div>
-            </form>
-          </section>
-        </section>
-
-        <section class="mobile-view" data-mobile-panel="payouts">
-          <section class="panel">
-            <div class="panel-head">
-              <div>
-                <h2>Текущая выплата</h2>
-                <p class="panel-note">Статус и действия.</p>
-              </div>
-            </div>
-            <div id="mobile-current-payout" class="current-payout-root"></div>
-            <div class="panel-spacer"></div>
-            <div class="panel-head">
-              <div>
-                <h2>Все выплаты</h2>
-                <p class="panel-note">Последняя сверху. Выберите нужную выплату.</p>
-              </div>
-            </div>
-            <div id="mobile-payouts" class="list-root"></div>
-          </section>
-        </section>
-
-        <section class="mobile-view" data-mobile-panel="recipients">
-          <section class="panel">
-            <div class="panel-head">
-              <div>
-                <h2>Получатели</h2>
-              </div>
-            </div>
-            <div id="mobile-recipients" class="list-root"></div>
-          </section>
-        </section>
-      </section>
+      <aside
+        id="selection-bar"
+        class="selection-bar hidden"
+        aria-label="Массовое действие"
+      >
+        <div>
+          <strong id="selected-count">0 получателей</strong
+          ><button
+            type="button"
+            class="text-button"
+            data-action="clear-selection"
+          >
+            Снять выбор
+          </button>
+        </div>
+        <button
+          type="button"
+          class="button button-primary"
+          data-action="send-payout"
+        >
+          Разослать
+        </button>
+      </aside>
+      <nav class="bottom-nav" aria-label="Разделы">
+        <button
+          type="button"
+          data-mobile-view="composer"
+          class="nav-button active"
+          aria-pressed="true"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"></circle>
+            <path d="M12 8v8M8 12h8"></path></svg
+          ><span>Создать</span>
+        </button>
+        <button
+          type="button"
+          data-mobile-view="users"
+          class="nav-button"
+          aria-pressed="false"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M10 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM20 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"
+            ></path></svg
+          ><span>Выбор</span>
+        </button>
+        <button
+          type="button"
+          data-mobile-view="recipients"
+          class="nav-button"
+          aria-pressed="false"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="m9 11 3 3L22 4M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"
+            ></path></svg
+          ><span>Получатели</span>
+        </button>
+        <button
+          type="button"
+          data-mobile-view="payouts"
+          class="nav-button"
+          aria-pressed="false"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M3 12a9 9 0 1 0 2.64-6.36L3 8M3 3v5h5M12 7v5l3 2"
+            ></path></svg
+          ><span>История</span>
+        </button>
+      </nav>
     </main>
 
+    <dialog
+      id="confirm-dialog"
+      class="confirm-dialog"
+      aria-labelledby="dialog-title"
+    >
+      <form method="dialog">
+        <button
+          type="button"
+          class="dialog-close"
+          data-dialog-cancel
+          aria-label="Закрыть"
+        >
+          ×
+        </button>
+        <h2 id="dialog-title"></h2>
+        <div id="dialog-content" class="dialog-content"></div>
+        <p id="dialog-warning" class="dialog-warning hidden"></p>
+        <div class="dialog-actions">
+          <button type="button" class="button button-quiet" data-dialog-cancel>
+            Отмена</button
+          ><button
+            type="button"
+            id="dialog-confirm"
+            class="button button-primary"
+          ></button>
+        </div>
+      </form>
+    </dialog>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script type="module" src="/miniapp/app.js?v=20261107-payout-js-mime-1"></script>
+    <script type="module" src="/miniapp/app.js?v=20261108-redesign-1"></script>
   </body>
 </html>

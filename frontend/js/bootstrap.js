@@ -1,257 +1,321 @@
 import { SEARCH_DEBOUNCE_MS } from "./constants.js";
-import { renderApp } from "./render-app.js";
-import { bindTelegramViewportEvents, setThemeVariables, syncViewportVariables, telegramWebApp } from "./telegram.js";
+import { renderApp, renderNavigation } from "./render-app.js";
 import {
-  clearNotification,
+  bindTelegramViewportEvents,
+  setThemeVariables,
+  syncViewportVariables,
+  telegramWebApp,
+} from "./telegram.js";
+import {
   canUseApi,
+  clearNotification,
+  payoutPeriodLabel,
   refreshTelegramAuthState,
-  setError,
+  setToast,
   state,
-  setMobileView,
-  syncComposerFields,
-  syncFilterInputs,
 } from "./store.js";
 import {
   loadPayouts,
   loadUsers,
   markPaid,
-  scheduleAdminStateRefresh,
   selectPayout,
   startAdminEvents,
   stopAdminEvents,
 } from "./api.js";
 import { createPayout, sendPayout } from "./render-payouts.js";
 import { bindMessageEditors } from "./message-editor.js";
+import { renderRecipients } from "./render-recipients.js";
+import { renderUsers } from "./render-users.js";
+import { parsePeriodInput, plural } from "./utils.js";
 
-let adminRecoveryTimer = null;
-let adminRecoveryReason = null;
+let lastFocusedElement = null;
 
-function syncTelegramSafeAreaVariables() {
-  const webApp = telegramWebApp();
-  const root = document.documentElement.style;
-  const safeAreaBottom = Math.max(0, Math.round(webApp?.safeAreaInset?.bottom || 0));
-  const contentSafeAreaBottom = Math.max(0, Math.round(webApp?.contentSafeAreaInset?.bottom || 0));
-  root.setProperty("--tg-safe-area-inset-bottom", `${safeAreaBottom}px`);
-  root.setProperty("--tg-content-safe-area-inset-bottom", `${contentSafeAreaBottom}px`);
-}
-
-function syncLayoutMetrics() {
-  syncViewportVariables();
-  syncTelegramSafeAreaVariables();
-}
-
-function scheduleAdminRecoveryRefresh(reason = "visibilitychange") {
-  if (!canUseApi()) return;
-  adminRecoveryReason = reason;
-  if (adminRecoveryTimer) {
-    clearTimeout(adminRecoveryTimer);
-  }
-  adminRecoveryTimer = window.setTimeout(() => {
-    adminRecoveryTimer = null;
-    const currentReason = adminRecoveryReason;
-    adminRecoveryReason = null;
-    console.info("[topsbottg] recovery refresh", {
-      build: window.__TOPSBOTTG_FRONTEND_BUILD__ || null,
-      reason: currentReason,
-      visibilityState: document.visibilityState,
-    });
-    void (async () => {
-      await startAdminEvents();
-      await scheduleAdminStateRefresh({ selected: true, payouts: true, silent: true });
-    })();
-  }, 700);
-}
-
-function bindComposerInputs() {
-  const pairs = ["desktop", "mobile"];
-  for (const prefix of pairs) {
-    for (const [suffix, key] of [["period-start", "periodStart"], ["period-end", "periodEnd"]]) {
-      document.getElementById(`${prefix}-${suffix}`)?.addEventListener("input", (event) => {
-        const input = event.target;
-        const caret = input.selectionStart ?? input.value.length;
-        const digitsBeforeCaret = input.value.slice(0, caret).replace(/\D/g, "").length;
-        const digits = input.value.replace(/\D/g, "").slice(0, 4);
-        const formatted = digits.length > 2 ? `${digits.slice(0, 2)}.${digits.slice(2)}` : digits;
-        input.value = formatted;
-        const nextCaret = digitsBeforeCaret > 2 ? digitsBeforeCaret + 1 : digitsBeforeCaret;
-        input.setSelectionRange(nextCaret, nextCaret);
-        state.composer[key] = formatted;
-        syncComposerFields();
-        renderApp();
-      });
+function bindPeriodInput(id, stateKey) {
+  const input = document.getElementById(id);
+  input.addEventListener("input", () => {
+    const caret = input.selectionStart ?? input.value.length;
+    const digitCount = input.value.slice(0, caret).replace(/\D/g, "").length;
+    const digits = input.value.replace(/\D/g, "").slice(0, 4);
+    const formatted =
+      digits.length > 2 ? `${digits.slice(0, 2)}.${digits.slice(2)}` : digits;
+    input.value = formatted;
+    const nextCaret = Math.min(
+      formatted.length,
+      digitCount > 2 ? digitCount + 1 : digitCount,
+    );
+    input.setSelectionRange(nextCaret, nextCaret);
+    state.composer[stateKey] = formatted;
+    const error = document.getElementById(`${id}-error`);
+    error.textContent =
+      formatted.length === 5 && !parsePeriodInput(formatted)
+        ? "Проверьте дату."
+        : "";
+    document.getElementById("protected-period").textContent =
+      `${state.composer.periodStart || "ДД.ММ"} – ${state.composer.periodEnd || "ДД.ММ"}`;
+    const preview = document.getElementById("preview");
+    if (!preview.classList.contains("hidden")) {
+      preview.textContent = `${state.composer.messageBefore}${state.composer.periodStart || "ДД.ММ"} – ${state.composer.periodEnd || "ДД.ММ"}${state.composer.messageAfter}`;
     }
-  }
-}
-
-function bindFilterInputs() {
-  const searchIds = ["desktop-search", "mobile-search"];
-
-  searchIds.forEach((id) => {
-    document.getElementById(id)?.addEventListener("input", (event) => {
-      state.usersSearch = event.target.value;
-      syncFilterInputs();
-      if (state.searchTimer) clearTimeout(state.searchTimer);
-      state.searchTimer = window.setTimeout(() => loadUsers({ reset: true }), SEARCH_DEBOUNCE_MS);
-      renderApp();
-    });
   });
 }
 
-function getActionElement(event) {
-  const target = event.target;
-  if (!(target instanceof Element)) return null;
-  return target.closest("[data-action]");
-}
-
-function isDisabledAction(action) {
-  return Boolean(
-    action.disabled || action.getAttribute("aria-disabled") === "true" || action.classList.contains("disabled")
-  );
-}
-
-function bindDelegatedEvents() {
-  document.addEventListener("click", async (event) => {
-    const mobileView = event.target.closest("[data-mobile-view]");
-    const userCheckbox = event.target.closest('input[type="checkbox"][data-user-id]');
-    const payoutButton = event.target.closest("[data-payout-id]");
-    const action = getActionElement(event);
-
-    if (mobileView) {
-      setMobileView(mobileView.dataset.mobileView);
-      renderApp();
-      return;
-    }
-
-    if (userCheckbox) return;
-
-    if (payoutButton) {
-      event.preventDefault();
-      await selectPayout(Number(payoutButton.dataset.payoutId));
-      renderApp();
-      return;
-    }
-
-    if (!action) return;
-
-    const name = action.dataset.action;
-    if (!name) return;
-    event.preventDefault();
-    if (isDisabledAction(action)) return;
-
+function showConfirmation({
+  title,
+  content,
+  warning = "",
+  confirmLabel,
+  focusFallback = "",
+  onConfirm,
+}) {
+  const dialog = document.getElementById("confirm-dialog");
+  if (dialog.open) return;
+  lastFocusedElement = document.activeElement;
+  dialog.querySelector("#dialog-title").textContent = title;
+  dialog.querySelector("#dialog-content").textContent = content;
+  const warningNode = dialog.querySelector("#dialog-warning");
+  warningNode.textContent = warning;
+  warningNode.classList.toggle("hidden", !warning);
+  const confirmButton = dialog.querySelector("#dialog-confirm");
+  confirmButton.textContent = confirmLabel;
+  confirmButton.disabled = false;
+  dialog.querySelectorAll("[data-dialog-cancel]").forEach((button) => {
+    button.onclick = () => dialog.close("cancel");
+  });
+  confirmButton.onclick = async () => {
+    if (state.dialogBusy) return;
+    state.dialogBusy = true;
+    confirmButton.disabled = true;
     try {
-      switch (name) {
-        case "dismiss-toast":
-          clearNotification();
+      await onConfirm();
+      if (dialog.open) dialog.close("confirm");
+    } finally {
+      state.dialogBusy = false;
+      confirmButton.disabled = false;
+    }
+  };
+  dialog.addEventListener(
+    "close",
+    () => {
+      if (
+        lastFocusedElement?.isConnected &&
+        !lastFocusedElement.closest(".hidden, [hidden]")
+      )
+        lastFocusedElement.focus();
+      else if (focusFallback && document.querySelector(focusFallback))
+        document.querySelector(focusFallback).focus();
+      else
+        document
+          .querySelector(`[data-mobile-view="${state.activeMobileView}"]`)
+          ?.focus();
+    },
+    { once: true },
+  );
+  dialog.showModal();
+  dialog.querySelector("[data-dialog-cancel]").focus();
+}
+
+function bindEvents() {
+  document.addEventListener("input", (event) => {
+    if (event.target.id !== "users-search") return;
+    state.usersSearch = event.target.value;
+    if (state.searchTimer) clearTimeout(state.searchTimer);
+    state.searchTimer = window.setTimeout(
+      () => loadUsers({ reset: true }),
+      SEARCH_DEBOUNCE_MS,
+    );
+  });
+  bindPeriodInput("period-start", "periodStart");
+  bindPeriodInput("period-end", "periodEnd");
+
+  document.addEventListener("click", async (event) => {
+    const navigation = event.target.closest("[data-mobile-view]");
+    if (navigation) {
+      state.activeMobileView = navigation.dataset.mobileView;
+      renderNavigation();
+      return;
+    }
+
+    const action = event.target.closest("[data-action]");
+    if (action) {
+      switch (action.dataset.action) {
+        case "toggle-preview":
+          state.previewOpen = !state.previewOpen;
           renderApp();
           return;
         case "create-payout":
           await createPayout();
           return;
-        case "send-payout":
-          await sendPayout();
+        case "go-selection":
+          state.activeMobileView = "users";
+          renderNavigation();
           return;
-        case "mark-paid": {
-          const recipientId = action.dataset.recipientId;
-          if (!recipientId) return;
-          await markPaid(Number(recipientId));
+        case "send-payout": {
+          const payout = state.selectedPayoutDetail?.payout;
+          const count = state.selectedUsers.size;
+          if (!payout || !count || state.loading.sendPayout) return;
+          showConfirmation({
+            title: "Подтвердить рассылку?",
+            content: `Выплата #${payout.id}\nПериод: ${payoutPeriodLabel(payout)}\nПолучателей: ${count}`,
+            warning: "Будут отправлены реальные сообщения в Telegram.",
+            confirmLabel: `Разослать ${count} ${plural(count, "человеку", "людям", "людям")}`,
+            onConfirm: sendPayout,
+          });
           return;
         }
+        case "clear-selection":
+          state.selectedUsers.clear();
+          state.selectedUsersByPayout.set(
+            Number(state.selectedPayoutId),
+            new Set(),
+          );
+          renderUsers();
+          document.querySelector('[data-action="send-payout"]').disabled = true;
+          document.getElementById("selection-bar").classList.add("hidden");
+          return;
         case "load-more-users":
           await loadUsers({ reset: false });
           return;
-        case "clear-selection":
-          state.selectedUsers.clear();
+        case "dismiss-toast":
+          clearNotification();
           renderApp();
           return;
-        default:
+        case "mark-paid": {
+          const recipient = state.recipients.find(
+            (item) => Number(item.id) === Number(action.dataset.recipientId),
+          );
+          const payout = state.selectedPayoutDetail?.payout;
+          if (!recipient || !payout || state.loading.markPaid) return;
+          showConfirmation({
+            title: "Подтвердить выплату?",
+            content: `${recipient.full_name}\nВыплата #${payout.id} · ${payoutPeriodLabel(payout)}`,
+            confirmLabel: "Подтвердить оплату",
+            focusFallback: `[data-expand-recipient="${Number(recipient.id)}"]`,
+            onConfirm: () => markPaid(Number(recipient.id)),
+          });
           return;
+        }
+        default:
+          break;
       }
-    } catch (error) {
-      console.error("[topsbottg] action failed", {
-        action: name,
-        error,
-      });
-      setError(error?.message || "Действие не выполнено.");
+    }
+
+    if (event.target.closest("[data-dialog-cancel]")) return;
+    const payoutButton = event.target.closest("[data-payout-id]");
+    if (payoutButton) {
+      await selectPayout(Number(payoutButton.dataset.payoutId));
       renderApp();
+      return;
+    }
+    if (event.target.closest("input[data-user-id]")) return;
+
+    const expander = event.target.closest("[data-expand-recipient]");
+    if (expander) {
+      const id = Number(expander.dataset.expandRecipient);
+      state.expandedRecipients.has(id)
+        ? state.expandedRecipients.delete(id)
+        : state.expandedRecipients.add(id);
+      renderRecipients();
+      return;
+    }
+
+    const copyButton = event.target.closest("[data-copy-recipient]");
+    if (copyButton) {
+      const recipient = state.recipients.find(
+        (item) => Number(item.id) === Number(copyButton.dataset.copyRecipient),
+      );
+      const snapshot = recipient?.payment_profile_snapshot;
+      const text =
+        typeof snapshot === "string"
+          ? snapshot
+          : (snapshot?.raw_payment_details ??
+            (snapshot
+              ? Object.entries(snapshot)
+                  .filter(([, value]) => value != null && value !== "")
+                  .map(([key, value]) => `${key}: ${value}`)
+                  .join("\n")
+              : ""));
+      try {
+        await navigator.clipboard.writeText(text);
+        setToast("Платёжные данные скопированы.", "success");
+      } catch {
+        setToast("Не удалось скопировать. Выделите данные вручную.", "warning");
+      }
+      renderApp();
+      return;
+    }
+
+    const filter = event.target.closest("[data-filter]");
+    if (filter) {
+      state.recipientFilter = filter.dataset.filter;
+      renderRecipients();
     }
   });
 
-  document.addEventListener("submit", async (event) => {
-    const form = event.target;
-    if (!(form instanceof HTMLFormElement)) return;
-    if (!form.matches('[data-action-form="create-payout"]')) return;
-    event.preventDefault();
-    await createPayout();
-  });
-
   document.addEventListener("change", (event) => {
-    const target = event.target;
-    const checkbox = target?.closest?.('input[type="checkbox"][data-user-id]');
+    const checkbox = event.target.closest?.("input[data-user-id]");
     if (!checkbox) return;
     const id = Number(checkbox.dataset.userId);
-    if (checkbox.checked) state.selectedUsers.add(id);
-    else state.selectedUsers.delete(id);
-    renderApp();
+    checkbox.checked
+      ? state.selectedUsers.add(id)
+      : state.selectedUsers.delete(id);
+    state.selectedUsersByPayout.set(
+      Number(state.selectedPayoutId),
+      new Set(state.selectedUsers),
+    );
+    checkbox
+      .closest(".user-row")
+      ?.classList.toggle("selected", checkbox.checked);
+    const count = state.selectedUsers.size;
+    document.getElementById("selected-count").textContent =
+      `${count} ${plural(count, "получатель", "получателя", "получателей")}`;
+    document
+      .getElementById("selection-bar")
+      .classList.toggle("hidden", !count || state.activeMobileView !== "users");
+    document.querySelector('[data-action="send-payout"]').disabled =
+      !count || state.loading.sendPayout;
   });
 
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") renderApp();
+  document.addEventListener("submit", (event) => {
+    if (!event.target.matches('[data-action-form="create-payout"]')) return;
+    event.preventDefault();
+    void createPayout();
   });
 }
 
 export async function bootstrap() {
   setThemeVariables();
-  console.info("[topsbottg] startup", {
-    build: window.__TOPSBOTTG_FRONTEND_BUILD__ || null,
-    userAgent: navigator.userAgent,
-    telegramWebApp: Boolean(window.Telegram?.WebApp),
-    visibilityState: document.visibilityState,
-  });
+  refreshTelegramAuthState();
   const webApp = telegramWebApp();
   if (webApp) {
     webApp.ready();
     webApp.expand();
   }
-  refreshTelegramAuthState();
-  setMobileView("composer");
-
-  state.composer.messageTemplate =
+  state.activeMobileView = "composer";
+  const defaultMessage =
     "Всем привет!\n" +
-    "Выплачиваем ЗАРПЛАТУ за работу в период {period_label}.\n\n" +
-    "Для получения выплаты проверьте или заполните платежные данные.\n\n" +
+    "Выплачиваем зарплату за работу в период {period_label}.\n\n" +
+    "Для получения выплаты проверьте или заполните платёжные данные.\n\n" +
     "Если перевод на ваши данные:\n" +
     "укажите фамилию и имя, номер телефона для перевода / СБП, банк.\n\n" +
     "Если перевод на чужие данные:\n" +
-    "укажите ваши фамилию и имя, имя владельца, номер телефона владельца, банк.\n\n" +
+    "укажите вашу фамилию и имя, имя владельца, номер телефона владельца, банк.\n\n" +
     "После сохранения бот должен ответить: «Ваше сообщение сохранено».";
-
-  const defaultMessage = state.composer.messageTemplate;
   const marker = "{period_label}";
   const markerIndex = defaultMessage.indexOf(marker);
   state.composer.messageBefore = defaultMessage.slice(0, markerIndex);
-  state.composer.messageAfter = defaultMessage.slice(markerIndex + marker.length);
-  state.composer.messageTemplate = undefined;
-
-  syncFilterInputs();
-  syncComposerFields();
-  bindComposerInputs();
+  state.composer.messageAfter = defaultMessage.slice(
+    markerIndex + marker.length,
+  );
+  document.getElementById("message-before").value =
+    state.composer.messageBefore;
+  document.getElementById("message-after").value = state.composer.messageAfter;
   bindMessageEditors();
-  bindFilterInputs();
-  bindDelegatedEvents();
+  bindEvents();
   renderApp();
-  syncLayoutMetrics();
-  bindTelegramViewportEvents(syncLayoutMetrics);
+  bindTelegramViewportEvents(syncViewportVariables);
   window.addEventListener("pagehide", stopAdminEvents);
   window.addEventListener("beforeunload", stopAdminEvents);
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") {
-      scheduleAdminRecoveryRefresh("visibilitychange");
-    }
-  });
-  window.addEventListener("focus", () => scheduleAdminRecoveryRefresh("focus"));
-  window.addEventListener("pageshow", () => scheduleAdminRecoveryRefresh("pageshow"));
-
-  if (!state.initData) return;
+  if (!canUseApi()) return;
   void startAdminEvents();
   await Promise.allSettled([loadUsers({ reset: true }), loadPayouts()]);
 }

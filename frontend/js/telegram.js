@@ -4,63 +4,123 @@ export function telegramWebApp() {
   return window.Telegram?.WebApp || null;
 }
 
+function themeColor(name, fallback) {
+  return telegramWebApp()?.themeParams?.[name] || fallback;
+}
+
 export function setThemeVariables() {
-  const theme = telegramWebApp()?.themeParams || {};
+  const webApp = telegramWebApp();
+  const dark = webApp?.colorScheme === "dark";
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
   const root = document.documentElement.style;
-  root.setProperty("--bg", theme.bg_color || "#0e1621");
-  root.setProperty("--surface", theme.secondary_bg_color || "#17212b");
-  root.setProperty("--surface-2", theme.section_bg_color || "#1f2c38");
-  root.setProperty("--surface-3", "#233445");
-  root.setProperty("--text", theme.text_color || "#f3f7fb");
-  root.setProperty("--muted", theme.hint_color || "#8ea2b5");
-  root.setProperty("--primary", theme.button_color || "#2ea6ff");
-  root.setProperty("--primary-contrast", theme.button_text_color || "#06111a");
-  root.setProperty("--success", "#35c779");
-  root.setProperty("--warning", "#f2b84b");
-  root.setProperty("--danger", theme.destructive_text_color || "#ff5c7a");
-  root.setProperty("--border", "rgba(255,255,255,.08)");
-  root.setProperty("--radius", "18px");
-  root.setProperty("--shadow", "0 12px 28px rgba(0,0,0,.24)");
+  root.setProperty(
+    "--bg",
+    themeColor("bg_color", dark ? "#192229" : "#F4F6F8"),
+  );
+  root.setProperty(
+    "--surface",
+    themeColor("secondary_bg_color", dark ? "#27323B" : "#FFFFFF"),
+  );
+  root.setProperty(
+    "--field",
+    themeColor("section_bg_color", dark ? "#202A32" : "#F0F3F6"),
+  );
+  root.setProperty(
+    "--text",
+    themeColor("text_color", dark ? "#EDF2F6" : "#17212B"),
+  );
+  root.setProperty(
+    "--muted",
+    themeColor("hint_color", dark ? "#B0BEC9" : "#52616F"),
+  );
+  root.setProperty(
+    "--accent",
+    themeColor("button_color", dark ? "#59A8E8" : "#267FC1"),
+  );
+  root.setProperty(
+    "--accent-contrast",
+    themeColor("button_text_color", dark ? "#10212d" : "#FFFFFF"),
+  );
+  root.setProperty(
+    "--button-bg",
+    themeColor("button_color", dark ? "#59A8E8" : "#1D6EA6"),
+  );
+  root.setProperty("--success", dark ? "#53c98b" : "#14703e");
+  root.setProperty("--warning", dark ? "#edbd58" : "#805900");
+  root.setProperty(
+    "--danger",
+    themeColor("destructive_text_color", dark ? "#ff747e" : "#b42332"),
+  );
+  root.setProperty(
+    "--border",
+    dark ? "rgba(255,255,255,.09)" : "rgba(0,0,0,.10)",
+  );
 }
 
 export function syncViewportVariables() {
-  const root = document.documentElement.style;
   const webApp = telegramWebApp();
-  const viewportHeight = Math.max(
-    0,
-    Math.round(webApp?.viewportHeight || window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight)
+  const root = document.documentElement.style;
+  const height = Math.round(
+    webApp?.viewportHeight ||
+      window.visualViewport?.height ||
+      window.innerHeight ||
+      0,
   );
-  root.setProperty("--app-viewport-height", `${viewportHeight}px`);
+  root.setProperty("--app-viewport-height", `${height}px`);
+  const visualViewport = window.visualViewport;
+  const keyboardInset = visualViewport
+    ? Math.max(
+        0,
+        Math.round(
+          window.innerHeight - visualViewport.height - visualViewport.offsetTop,
+        ),
+      )
+    : 0;
+  root.setProperty("--keyboard-inset-bottom", `${keyboardInset}px`);
+  const safe = Math.max(0, Number(webApp?.safeAreaInset?.bottom) || 0);
+  const contentSafe = Math.max(
+    0,
+    Number(webApp?.contentSafeAreaInset?.bottom) || 0,
+  );
+  root.setProperty("--tg-safe-area-inset-bottom", `${safe}px`);
+  root.setProperty("--tg-content-safe-area-inset-bottom", `${contentSafe}px`);
 }
 
 export function bindTelegramViewportEvents(onChange = syncViewportVariables) {
   const webApp = telegramWebApp();
   const sync = () => onChange();
   sync();
-  webApp?.onEvent?.("viewportChanged", sync);
+  for (const eventName of [
+    "viewportChanged",
+    "safeAreaChanged",
+    "contentSafeAreaChanged",
+  ]) {
+    try {
+      webApp?.onEvent?.(eventName, sync);
+    } catch {
+      /* Older Telegram clients may not support this event. */
+    }
+  }
+  try {
+    webApp?.onEvent?.("themeChanged", () => {
+      setThemeVariables();
+      sync();
+    });
+  } catch {
+    /* Optional Telegram event. */
+  }
   window.addEventListener("resize", sync, { passive: true });
-  window.addEventListener("orientationchange", sync, { passive: true });
   window.visualViewport?.addEventListener("resize", sync, { passive: true });
-  window.visualViewport?.addEventListener("scroll", sync, { passive: true });
 }
 
 export function renderAuthState() {
-  const pill = document.getElementById("auth-state");
   const banner = document.getElementById("auth-banner");
-  if (!pill || !banner) return;
-  if (canUseApi()) {
-    pill.textContent = "";
-    pill.className = "auth-pill hidden";
-    banner.classList.add("hidden");
-    banner.textContent = "";
-  } else if (state.authStatus === "telegram_missing_init_data") {
-    pill.textContent = "";
-    pill.className = "auth-pill hidden";
-    banner.textContent = "Telegram открыт, но не передал данные авторизации. Откройте мини-приложение через кнопку бота.";
-    banner.classList.remove("hidden");
-  } else {
-    pill.className = "auth-pill hidden";
-    banner.textContent = "Откройте через Telegram, чтобы загрузить данные.";
-    banner.classList.remove("hidden");
-  }
+  if (!banner) return;
+  const message = canUseApi()
+    ? ""
+    : state.authStatus === "telegram_missing_init_data"
+      ? "Telegram не передал данные авторизации. Откройте Mini App через кнопку бота."
+      : "Откройте приложение через Telegram, чтобы загрузить данные.";
+  banner.textContent = message;
+  banner.classList.toggle("hidden", !message);
 }

@@ -1,145 +1,143 @@
-import { COMPOSER_IDS } from "./constants.js";
-import { renderApp } from "./render-app.js";
 import {
   MAX_PAYOUT_MESSAGE_LENGTH,
   PAYOUT_PERIOD_RESERVED_LENGTH,
   countCharacters,
   fitInsertion,
 } from "./message-limit.js";
-import { state, syncComposerFields } from "./store.js";
-
-const composingEditors = new WeakSet();
-const inputSnapshots = new WeakMap();
-
-function otherText(key) {
-  return state.composer[key === "messageBefore" ? "messageAfter" : "messageBefore"];
-}
-
-function insertionFit(editor, insertedText, start = editor.selectionStart, end = editor.selectionEnd) {
-  const key = editor.dataset.messagePart;
+import { state, $ } from "./store.js";
+const composing = new WeakSet(),
+  snapshots = new WeakMap();
+const other = (k) =>
+  state.composer[k === "messageBefore" ? "messageAfter" : "messageBefore"];
+const snapshot = (editor) => ({
+  text: editor.value,
+  start: editor.selectionStart,
+  end: editor.selectionEnd,
+});
+function fit(
+  editor,
+  text,
+  start = editor.selectionStart,
+  end = editor.selectionEnd,
+) {
   return fitInsertion({
     currentText: editor.value,
     start,
     end,
-    insertedText,
-    otherText: otherText(key),
+    insertedText: text,
+    otherText: other(editor.dataset.messagePart),
   });
 }
-
-function inputText(event) {
-  if (event.inputType === "insertParagraph" || event.inputType === "insertLineBreak") return "\n";
-  if (event.dataTransfer) return event.dataTransfer.getData("text/plain");
-  return typeof event.data === "string" ? event.data : null;
-}
-
-function replaceSelection(editor, text) {
-  const { selectionStart: start, selectionEnd: end } = editor;
-  editor.focus();
-  editor.setSelectionRange(start, end);
-  if (document.execCommand("insertText", false, text)) return;
-
-  editor.setRangeText(text, start, end, "end");
-  updateEditor(editor, false);
-}
-
-function snapshot(editor) {
-  return {
-    text: editor.value,
-    start: editor.selectionStart,
-    end: editor.selectionEnd,
-  };
-}
-
-function clampAfterInput(editor, previous) {
-  const nextText = editor.value;
-  const key = editor.dataset.messagePart;
+function clamp(editor, old) {
+  const next = editor.value,
+    k = editor.dataset.messagePart;
   if (
-    countCharacters(nextText) + countCharacters(otherText(key)) + PAYOUT_PERIOD_RESERVED_LENGTH <= MAX_PAYOUT_MESSAGE_LENGTH
-  ) return;
-
-  const oldText = previous?.text ?? state.composer[key];
-  let prefixLength = 0;
-  while (prefixLength < oldText.length && prefixLength < nextText.length && oldText[prefixLength] === nextText[prefixLength]) {
-    prefixLength += 1;
-  }
-  let suffixLength = 0;
+    countCharacters(next) +
+      countCharacters(other(k)) +
+      PAYOUT_PERIOD_RESERVED_LENGTH <=
+    MAX_PAYOUT_MESSAGE_LENGTH
+  )
+    return;
+  let prefix = 0;
   while (
-    suffixLength < oldText.length - prefixLength &&
-    suffixLength < nextText.length - prefixLength &&
-    oldText[oldText.length - suffixLength - 1] === nextText[nextText.length - suffixLength - 1]
-  ) {
-    suffixLength += 1;
-  }
-
-  const oldEnd = oldText.length - suffixLength;
-  const newEnd = nextText.length - suffixLength;
-  const insertedText = nextText.slice(prefixLength, newEnd);
-  const fitted = fitInsertion({
-    currentText: oldText,
-    start: prefixLength,
+    prefix < old.text.length &&
+    prefix < next.length &&
+    old.text[prefix] === next[prefix]
+  )
+    prefix++;
+  let suffix = 0;
+  while (
+    suffix < old.text.length - prefix &&
+    suffix < next.length - prefix &&
+    old.text[old.text.length - 1 - suffix] === next[next.length - 1 - suffix]
+  )
+    suffix++;
+  const oldEnd = old.text.length - suffix,
+    newEnd = next.length - suffix,
+    inserted = next.slice(prefix, newEnd);
+  const fixed = fitInsertion({
+    currentText: old.text,
+    start: prefix,
     end: oldEnd,
-    insertedText,
-    otherText: otherText(key),
+    insertedText: inserted,
+    otherText: other(k),
   });
-  const cursorDelta = insertedText.length - fitted.acceptedText.length;
-  const cursor = Math.max(prefixLength, editor.selectionStart - cursorDelta);
-  editor.setRangeText(fitted.text, 0, editor.value.length, "preserve");
-  editor.setSelectionRange(Math.min(cursor, fitted.text.length), Math.min(cursor, fitted.text.length));
+  const caret = Math.max(
+    prefix,
+    editor.selectionStart - (inserted.length - fixed.acceptedText.length),
+  );
+  editor.value = fixed.text;
+  editor.setSelectionRange(
+    Math.min(caret, fixed.text.length),
+    Math.min(caret, fixed.text.length),
+  );
 }
-
-function updateEditor(editor, isComposing) {
-  const key = editor.dataset.messagePart;
-  if (!isComposing) {
-    clampAfterInput(editor, inputSnapshots.get(editor));
-    inputSnapshots.delete(editor);
+function update(editor, composingNow = false) {
+  const k = editor.dataset.messagePart,
+    old = snapshots.get(editor);
+  if (!composingNow) {
+    if (old) clamp(editor, old);
+    snapshots.set(editor, snapshot(editor));
   }
-  state.composer[key] = editor.value;
-  syncComposerFields();
-  renderApp();
+  state.composer[k] = editor.value;
+  editor.style.height = "auto";
+  editor.style.height = `${Math.min(editor.scrollHeight, 240)}px`;
+  const n = $("message-count");
+  if (n)
+    n.textContent = `${countCharacters(state.composer.messageBefore) + PAYOUT_PERIOD_RESERVED_LENGTH + countCharacters(state.composer.messageAfter)} / ${MAX_PAYOUT_MESSAGE_LENGTH}`;
+  const p = $("preview");
+  if (p && !p.classList.contains("hidden"))
+    p.textContent = `${state.composer.messageBefore}${state.composer.periodStart || "ДД.ММ"} – ${state.composer.periodEnd || "ДД.ММ"}${state.composer.messageAfter}`;
 }
-
-function bindEditor(editor) {
-  editor.addEventListener("compositionstart", () => {
-    composingEditors.add(editor);
-    inputSnapshots.set(editor, snapshot(editor));
-  });
-
-  editor.addEventListener("compositionend", () => {
-    composingEditors.delete(editor);
-    window.setTimeout(() => updateEditor(editor, false), 0);
-  });
-
-  editor.addEventListener("beforeinput", (event) => {
-    const composing = event.isComposing || composingEditors.has(editor) || event.inputType.includes("Composition");
-    if (composing || !event.inputType.startsWith("insert")) return;
-
-    const text = inputText(event);
-    if (text === null) return;
-    inputSnapshots.set(editor, snapshot(editor));
-    const fit = insertionFit(editor, text);
-    if (fit.truncated) {
-      event.preventDefault();
-      replaceSelection(editor, fit.acceptedText);
-    }
-  });
-
-  editor.addEventListener("paste", (event) => {
-    event.preventDefault();
-    const text = event.clipboardData?.getData("text/plain") || "";
-    inputSnapshots.set(editor, snapshot(editor));
-    replaceSelection(editor, insertionFit(editor, text).acceptedText);
-  });
-
-  editor.addEventListener("input", (event) => {
-    updateEditor(editor, event.isComposing || composingEditors.has(editor));
-  });
+function replace(editor, text) {
+  const s = editor.selectionStart,
+    e = editor.selectionEnd;
+  editor.setRangeText(text, s, e, "end");
+  update(editor);
 }
-
 export function bindMessageEditors() {
-  Object.values(COMPOSER_IDS).forEach((ids) => {
-    [ids.messageBefore, ids.messageAfter].forEach((id) => {
-      const editor = document.getElementById(id);
-      if (editor) bindEditor(editor);
+  document.querySelectorAll("textarea[data-message-part]").forEach((editor) => {
+    snapshots.set(editor, snapshot(editor));
+    editor.addEventListener("compositionstart", () => {
+      composing.add(editor);
+      snapshots.set(editor, snapshot(editor));
     });
+    editor.addEventListener("compositionend", () => {
+      composing.delete(editor);
+      setTimeout(() => update(editor), 0);
+    });
+    editor.addEventListener("beforeinput", (e) => {
+      if (
+        e.isComposing ||
+        composing.has(editor) ||
+        e.inputType?.includes("Composition") ||
+        !e.inputType?.startsWith("insert")
+      )
+        return;
+      const text =
+        e.inputType === "insertLineBreak" || e.inputType === "insertParagraph"
+          ? "\n"
+          : (e.dataTransfer?.getData("text/plain") ?? e.data);
+      if (typeof text !== "string") return;
+      snapshots.set(editor, snapshot(editor));
+      const result = fit(editor, text);
+      if (result.truncated) {
+        e.preventDefault();
+        replace(editor, result.acceptedText);
+      }
+    });
+    editor.addEventListener("paste", (e) => {
+      e.preventDefault();
+      snapshots.set(editor, snapshot(editor));
+      replace(
+        editor,
+        fit(editor, e.clipboardData?.getData("text/plain") || "").acceptedText,
+      );
+    });
+    editor.addEventListener("input", (e) =>
+      update(editor, e.isComposing || composing.has(editor)),
+    );
+    editor.style.height = "auto";
+    editor.style.height = `${Math.min(editor.scrollHeight, 240)}px`;
   });
 }
