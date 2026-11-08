@@ -29,6 +29,7 @@ async def test_profile_update_and_mark_paid_serialize_with_postgres_row_locks():
     schema = f"snapshot_lock_test_{uuid4().hex}"
     admin_engine = create_async_engine(database_url)
     engine = None
+    payment_engine = None
     try:
         async with admin_engine.begin() as connection:
             await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
@@ -36,9 +37,19 @@ async def test_profile_update_and_mark_paid_serialize_with_postgres_row_locks():
             database_url,
             connect_args={"server_settings": {"search_path": schema}},
         )
+        payment_engine = create_async_engine(
+            database_url,
+            connect_args={
+                "server_settings": {
+                    "search_path": schema,
+                    "application_name": "snapshot-payment-waiter",
+                }
+            },
+        )
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
         sessions = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+        payment_sessions = async_sessionmaker(payment_engine, expire_on_commit=False, class_=AsyncSession)
 
         async with sessions() as session:
             user = await get_or_create_user(session, 70001, "Lock test user")
@@ -54,6 +65,7 @@ async def test_profile_update_and_mark_paid_serialize_with_postgres_row_locks():
                 },
             )
             [recipient] = await add_recipients(session, payout, [user.id])
+            user_id, recipient_id = user.id, recipient.id
             payout.status = PayoutStatus.sent.value
             recipient.status = RecipientStatus.payment_received.value
             recipient.payment_profile_snapshot = {"raw_payment_details": "old details"}
@@ -66,7 +78,7 @@ async def test_profile_update_and_mark_paid_serialize_with_postgres_row_locks():
 
         async def update_profile() -> None:
             async with sessions() as session:
-                user = await session.scalar(select(User).where(User.id == 1))
+                user = await session.scalar(select(User).where(User.id == user_id))
                 assert user is not None
                 await save_profile_and_snapshot(
                     session,
@@ -80,8 +92,8 @@ async def test_profile_update_and_mark_paid_serialize_with_postgres_row_locks():
 
         async def mark_payment() -> str:
             await profile_saved.wait()
-            async with sessions() as session:
-                recipient = await session.get(PayoutRecipient, 1)
+            async with payment_sessions() as session:
+                recipient = await session.get(PayoutRecipient, recipient_id)
                 assert recipient is not None
                 payment_started.set()
                 try:
@@ -101,18 +113,36 @@ async def test_profile_update_and_mark_paid_serialize_with_postgres_row_locks():
         await profile_saved.wait()
         payment_task = asyncio.create_task(mark_payment())
         await payment_started.wait()
-        await asyncio.sleep(0.05)
+        deadline = asyncio.get_running_loop().time() + 5
+        blocked = False
+        while asyncio.get_running_loop().time() < deadline:
+            async with admin_engine.connect() as connection:
+                blocked = bool(
+                    await connection.scalar(
+                        text(
+                            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                            "WHERE application_name = 'snapshot-payment-waiter' "
+                            "AND wait_event_type = 'Lock')"
+                        )
+                    )
+                )
+            if blocked:
+                break
+            await asyncio.sleep(0.02)
+        assert blocked, "payment operation did not wait on the profile transaction's user lock"
         allow_profile_commit.set()
         await profile_task
         assert await payment_task == "conflict"
 
         async with sessions() as session:
-            updated = await session.get(PayoutRecipient, 1)
+            updated = await session.get(PayoutRecipient, recipient_id)
             assert updated is not None
             assert updated.status == RecipientStatus.payment_received.value
             assert updated.payment_snapshot_version == 2
             assert updated.payment_profile_snapshot == {"raw_payment_details": "new details"}
     finally:
+        if payment_engine is not None:
+            await payment_engine.dispose()
         if engine is not None:
             await engine.dispose()
         async with admin_engine.begin() as connection:
