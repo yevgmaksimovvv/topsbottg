@@ -12,14 +12,61 @@ from topsbottg.models import Base, PaymentProfile, Payout, PayoutRecipient, Payo
 from topsbottg.services import (
     PayoutClosedConflict,
     SnapshotVersionConflict,
+    _send_locks,
     add_recipients,
     complete_payout,
     create_payout,
     get_or_create_user,
     mark_paid,
+    payout_send_lock,
     save_profile_and_snapshot,
     upsert_payment_profile,
 )
+
+
+@pytest.mark.asyncio
+async def test_payout_send_lock_serializes_across_postgres_engines():
+    database_url = os.getenv("POSTGRES_TEST_URL")
+    if not database_url:
+        pytest.skip("POSTGRES_TEST_URL is not configured")
+
+    first_engine = create_async_engine(database_url)
+    second_engine = create_async_engine(database_url)
+    first_sessions = async_sessionmaker(first_engine, expire_on_commit=False, class_=AsyncSession)
+    second_sessions = async_sessionmaker(second_engine, expire_on_commit=False, class_=AsyncSession)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def first_sender():
+        async with first_sessions() as session, payout_send_lock(2_000_000_001, session):
+            entered.set()
+            await release.wait()
+
+    async def second_sender():
+        await entered.wait()
+        async with second_sessions() as session, payout_send_lock(2_000_000_001, session):
+            second_entered.set()
+
+    first_task = asyncio.create_task(first_sender())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        # Simulate another process, which does not share the local asyncio locks.
+        _send_locks.clear()
+        second_task = asyncio.create_task(second_sender())
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(second_entered.wait(), timeout=0.1)
+        release.set()
+        await asyncio.wait_for(second_entered.wait(), timeout=5)
+        await asyncio.gather(first_task, second_task)
+    finally:
+        release.set()
+        tasks = [first_task]
+        if "second_task" in locals():
+            tasks.append(second_task)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await first_engine.dispose()
+        await second_engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -309,9 +356,9 @@ async def test_close_and_mark_paid_serialize_with_payout_lock(close_first):
         async with first_sessions() as session:
             user = await get_or_create_user(session, 77001, "Closing race user")
             payout = await create_payout(
-                session, actor_telegram_id=1,
-                payload={"period_start_day": 1, "period_start_month": 1,
-                         "period_end_day": 7, "period_end_month": 1},
+                session,
+                actor_telegram_id=1,
+                payload={"period_start_day": 1, "period_start_month": 1, "period_end_day": 7, "period_end_month": 1},
             )
             [recipient] = await add_recipients(session, payout, [user.id])
             payout.status = PayoutStatus.sent.value
@@ -363,10 +410,15 @@ async def test_close_and_mark_paid_serialize_with_payout_lock(close_first):
         waiting = False
         while asyncio.get_running_loop().time() < deadline:
             async with admin_engine.connect() as connection:
-                waiting = bool(await connection.scalar(text(
-                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity "
-                    "WHERE application_name = :app AND wait_event_type = 'Lock')"
-                ), {"app": app_name}))
+                waiting = bool(
+                    await connection.scalar(
+                        text(
+                            "SELECT EXISTS(SELECT 1 FROM pg_stat_activity "
+                            "WHERE application_name = :app AND wait_event_type = 'Lock')"
+                        ),
+                        {"app": app_name},
+                    )
+                )
             if waiting:
                 break
             await asyncio.sleep(0.03)

@@ -13,6 +13,8 @@ export const state = {
   activeMobileView: "composer",
   users: [],
   payouts: [],
+  payoutsHasMore: false,
+  payoutsPageSize: 100,
   recipients: [],
   usersLoadError: null,
   payoutsLoadError: null,

@@ -45,13 +45,13 @@ def main() -> None:
             raise SystemExit(f"Unexpected external module import: {module_url}")
 
         visited.add(module_url)
-        source, content_type, nosniff = fetch(module_url)
+        module_source, content_type, nosniff = fetch(module_url)
         if content_type not in JAVASCRIPT_MIME_TYPES:
             raise SystemExit(f"Wrong JavaScript MIME type for {module_url}: {content_type or '<missing>'}")
         if nosniff != "nosniff":
             raise SystemExit(f"X-Content-Type-Options nosniff missing for {module_url}")
 
-        imports = IMPORT_RE.findall(source) + SIDE_EFFECT_IMPORT_RE.findall(source)
+        imports = IMPORT_RE.findall(module_source) + SIDE_EFFECT_IMPORT_RE.findall(module_source)
         queue.extend(urljoin(module_url, specifier) for specifier in imports)
 
     print(f"Verified {len(visited)} JavaScript modules through Nginx with JavaScript MIME and nosniff")

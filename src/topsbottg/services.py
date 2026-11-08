@@ -5,12 +5,14 @@ import contextlib
 import logging
 import os
 import secrets
+import weakref
 from collections.abc import Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from string import Formatter
 
-from sqlalchemy import event, exists, func, select, update
+from sqlalchemy import event, exists, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, selectinload
 
@@ -21,6 +23,7 @@ from topsbottg.models import (
     PaymentProfile,
     PaymentReply,
     Payout,
+    PayoutReadyNotification,
     PayoutRecipient,
     PayoutStatus,
     RecipientStatus,
@@ -38,6 +41,31 @@ ADMIN_EVENT_PAYOUTS_CHANGED = "payouts_changed"
 ADMIN_EVENT_PAYOUT_CHANGED = "payout_changed"
 ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED = "payout_recipients_changed"
 ADMIN_EVENT_PING = "ping"
+
+_send_locks: weakref.WeakValueDictionary[int, asyncio.Lock] = weakref.WeakValueDictionary()
+
+
+@asynccontextmanager
+async def payout_send_lock(payout_id: int, session: AsyncSession):
+    """Serialize send/cancel/delete locally and across PostgreSQL processes."""
+    lock = _send_locks.get(payout_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _send_locks[payout_id] = lock
+    async with lock:
+        try:
+            if session.get_bind().dialect.name != "sqlite":
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(:namespace, :payout_id)"),
+                    {"namespace": 428, "payout_id": payout_id},
+                )
+            yield
+        except BaseException:
+            await session.rollback()
+            raise
+        else:
+            await session.commit()
+
 
 _ADMIN_EVENT_QUEUE_KEY = "_topsbottg_admin_events"
 
@@ -168,6 +196,7 @@ def _after_commit(sync_session: Session) -> None:
 def _after_rollback(sync_session: Session) -> None:
     sync_session.info.pop(_ADMIN_EVENT_QUEUE_KEY, None)
 
+
 DEFAULT_MESSAGE_TEMPLATE = """Всем привет!
 Выплачиваем ЗАРПЛАТУ за работу в период {period_label}.
 
@@ -243,9 +272,12 @@ def payout_workflow_state(payout: Payout, recipients: list[PayoutRecipient]) -> 
     active_recipients = [recipient for recipient in recipients if recipient.status != cancelled]
     statuses = {recipient.status for recipient in active_recipients}
     allowed = {
-        RecipientStatus.pending.value, RecipientStatus.sending.value,
-        RecipientStatus.sent.value, RecipientStatus.payment_required.value,
-        RecipientStatus.payment_received.value, RecipientStatus.paid.value,
+        RecipientStatus.pending.value,
+        RecipientStatus.sending.value,
+        RecipientStatus.sent.value,
+        RecipientStatus.payment_required.value,
+        RecipientStatus.payment_received.value,
+        RecipientStatus.paid.value,
     }
     unknown = statuses - allowed - {RecipientStatus.failed.value}
     if unknown:
@@ -331,10 +363,7 @@ def _normalize_raw_payment_details(payload: dict | str) -> str:
 
 def _has_payment_details(profile: PaymentProfile | None) -> bool:
     return bool(
-        profile
-        and profile.deleted_at is None
-        and profile.raw_payment_details
-        and profile.raw_payment_details.strip()
+        profile and profile.deleted_at is None and profile.raw_payment_details and profile.raw_payment_details.strip()
     )
 
 
@@ -349,9 +378,7 @@ def validate_message_template(template: str) -> None:
         if field_name is None:
             continue
         if field_name not in allowed_fields:
-            raise ValueError(
-                "В шаблоне можно использовать только {period_start}, {period_end} и {period_label}."
-            )
+            raise ValueError("В шаблоне можно использовать только {period_start}, {period_end} и {period_label}.")
         if format_spec or conversion:
             raise ValueError("Плейсхолдеры шаблона не должны использовать форматирование.")
 
@@ -675,6 +702,16 @@ async def update_payout(session: AsyncSession, payout: Payout, *, actor_telegram
         actor_telegram_id=actor_telegram_id,
     )
     try:
+        locked_payout = await session.scalar(
+            select(Payout).where(Payout.id == payout.id).with_for_update().execution_options(populate_existing=True)
+        )
+        if (
+            locked_payout is None
+            or locked_payout.status != PayoutStatus.draft.value
+            or locked_payout.deleted_at is not None
+        ):
+            raise ValueError("Редактировать можно только черновик.")
+        payout = locked_payout
         payload_before = payload.get("message_before_period")
         payload_after = payload.get("message_after_period")
         if (payload_before is None) != (payload_after is None):
@@ -757,8 +794,16 @@ async def set_payout_sending(session: AsyncSession, payout: Payout, *, actor_tel
         actor_telegram_id=actor_telegram_id,
     )
     try:
-        if payout.status != PayoutStatus.draft.value:
+        locked_payout = await session.scalar(
+            select(Payout).where(Payout.id == payout.id).with_for_update().execution_options(populate_existing=True)
+        )
+        if (
+            locked_payout is None
+            or locked_payout.status != PayoutStatus.draft.value
+            or locked_payout.deleted_at is not None
+        ):
             raise ValueError("payout can only be sent from draft")
+        payout = locked_payout
         payout.status = PayoutStatus.sending.value
         await session.flush()
         await log_audit(
@@ -808,14 +853,12 @@ async def complete_payout(session: AsyncSession, payout: Payout, *, actor_telegr
     try:
         # The API may have loaded this payout before another transaction changed it.
         # Re-read after acquiring the lock so closing and marking paid serialize.
-        payout = await session.scalar(
-            select(Payout)
-            .where(Payout.id == payout.id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
+        locked_payout = await session.scalar(
+            select(Payout).where(Payout.id == payout.id).with_for_update().execution_options(populate_existing=True)
         )
-        if payout is None:
+        if locked_payout is None:
             raise ValueError("payout not found")
+        payout = locked_payout
         if payout.status == PayoutStatus.completed.value:
             return payout
         if payout.status == PayoutStatus.cancelled.value:
@@ -919,6 +962,12 @@ async def cancel_payout(session: AsyncSession, payout: Payout, *, actor_telegram
         actor_telegram_id=actor_telegram_id,
     )
     try:
+        locked_payout = await session.scalar(
+            select(Payout).where(Payout.id == payout.id).with_for_update().execution_options(populate_existing=True)
+        )
+        if locked_payout is None or locked_payout.deleted_at is not None:
+            raise ValueError("payout not found")
+        payout = locked_payout
         if payout.status == PayoutStatus.completed.value:
             raise ValueError("completed payout cannot be cancelled")
         if payout.status == PayoutStatus.cancelled.value:
@@ -970,6 +1019,12 @@ async def add_recipients(session: AsyncSession, payout: Payout, user_ids: Sequen
         recipients_count=len(user_ids),
     )
     try:
+        locked_payout = await session.scalar(
+            select(Payout).where(Payout.id == payout.id).with_for_update().execution_options(populate_existing=True)
+        )
+        if locked_payout is None:
+            raise ValueError("payout not found")
+        payout = locked_payout
         created: list[PayoutRecipient] = []
         existing = await session.scalars(
             select(PayoutRecipient.user_id).where(
@@ -1028,11 +1083,35 @@ async def cancel_recipient(
         actor_telegram_id=actor_telegram_id,
     )
     try:
-        if recipient.status == RecipientStatus.paid.value:
+        payout = await session.scalar(
+            select(Payout)
+            .where(Payout.id == recipient.payout_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if (
+            payout is None
+            or payout.deleted_at is not None
+            or payout.status
+            in {
+                PayoutStatus.completed.value,
+                PayoutStatus.cancelled.value,
+            }
+        ):
+            raise ValueError("Выплата закрыта.")
+        locked_recipient = await session.scalar(
+            select(PayoutRecipient)
+            .where(PayoutRecipient.id == recipient.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if locked_recipient is None or locked_recipient.status == RecipientStatus.paid.value:
             raise ValueError("paid recipient cannot be cancelled")
+        recipient = locked_recipient
         if recipient.status != RecipientStatus.cancelled.value:
             recipient.status = RecipientStatus.cancelled.value
             await session.flush()
+            await queue_payout_ready(session, recipient.payout_id)
             await log_audit(
                 session,
                 actor_telegram_id=actor_telegram_id,
@@ -1078,8 +1157,33 @@ async def retry_failed_recipient(
         actor_telegram_id=actor_telegram_id,
     )
     try:
-        if recipient.status != RecipientStatus.failed.value:
+        payout = await session.scalar(
+            select(Payout)
+            .where(Payout.id == recipient.payout_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if (
+            payout is None
+            or payout.deleted_at is not None
+            or payout.status
+            in {
+                PayoutStatus.cancelled.value,
+                PayoutStatus.completed.value,
+            }
+        ):
+            raise ValueError("Повторная отправка для закрытой выплаты недоступна.")
+        locked_recipient = await session.scalar(
+            select(PayoutRecipient)
+            .where(PayoutRecipient.id == recipient.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if locked_recipient is None or locked_recipient.status != RecipientStatus.failed.value:
             raise ValueError("recipient can only be retried from failed")
+        recipient = locked_recipient
+        if payout.status == PayoutStatus.partially_failed.value:
+            payout.status = PayoutStatus.sending.value
         recipient.status = RecipientStatus.pending.value
         recipient.failed_at = None
         recipient.failure_reason = None
@@ -1110,10 +1214,15 @@ async def retry_failed_recipient(
         actor_telegram_id=actor_telegram_id,
         result_status=recipient.status,
     )
-    queue_admin_event(
+    queue_admin_events(
         session,
-        ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
-        {"payout_id": recipient.payout_id, "reason": "retry_failed_recipient"},
+        [
+            (
+                ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
+                {"payout_id": recipient.payout_id, "reason": "retry_failed_recipient"},
+            ),
+            (ADMIN_EVENT_PAYOUTS_CHANGED, {"payout_id": recipient.payout_id, "reason": "retry_failed_recipient"}),
+        ],
     )
     return recipient
 
@@ -1138,19 +1247,20 @@ async def mark_paid(
         # All payment/profile updates lock User -> Payout -> Recipient.
         # Closing takes the Payout lock, so either action wins atomically.
         user = await session.scalar(select(User).where(User.id == recipient.user_id).with_for_update())
-        payout = await session.scalar(
+        locked_payout = await session.scalar(
             select(Payout)
             .where(Payout.id == recipient.payout_id)
             .with_for_update()
             .execution_options(populate_existing=True)
         )
-        if payout is None:
+        if locked_payout is None:
             raise ValueError("payout not found")
-        if payout.status == PayoutStatus.completed.value:
+        payout = locked_payout
+        if payout.deleted_at is not None or payout.status == PayoutStatus.completed.value:
             raise PayoutClosedConflict("payout_closed")
         if payout.status == PayoutStatus.cancelled.value:
             raise PayoutClosedConflict("payout_cancelled")
-        recipient = await session.scalar(
+        locked_recipient = await session.scalar(
             select(PayoutRecipient)
             .options(selectinload(PayoutRecipient.user))
             .options(selectinload(PayoutRecipient.payment_replies))
@@ -1158,8 +1268,9 @@ async def mark_paid(
             .with_for_update()
             .execution_options(populate_existing=True)
         )
-        if user is None or recipient is None:
+        if user is None or locked_recipient is None:
             raise ValueError("recipient not found")
+        recipient = locked_recipient
         if recipient.payment_snapshot_version != expected_snapshot_version:
             raise SnapshotVersionConflict("payment details changed")
         if recipient.status != RecipientStatus.payment_received.value:
@@ -1204,12 +1315,21 @@ async def mark_paid(
 
 
 async def get_payout(session: AsyncSession, payout_id: int) -> Payout | None:
-    stmt = select(Payout).where(Payout.id == payout_id)
+    stmt = select(Payout).where(Payout.id == payout_id, Payout.deleted_at.is_(None))
     return await session.scalar(stmt)
 
 
-async def list_payouts(session: AsyncSession) -> list[Payout]:
-    rows = await session.scalars(select(Payout).order_by(Payout.id.desc()))
+async def list_payouts(
+    session: AsyncSession, *, limit: int | None = None, offset: int = 0, before_id: int | None = None
+) -> list[Payout]:
+    stmt = select(Payout).where(Payout.deleted_at.is_(None)).order_by(Payout.id.desc())
+    if before_id is not None:
+        stmt = stmt.where(Payout.id < before_id)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    if offset:
+        stmt = stmt.offset(offset)
+    rows = await session.scalars(stmt)
     return list(rows)
 
 
@@ -1217,7 +1337,6 @@ async def get_payout_recipients(session: AsyncSession, payout_id: int) -> list[P
     stmt = (
         select(PayoutRecipient)
         .options(selectinload(PayoutRecipient.user))
-        .options(selectinload(PayoutRecipient.payment_replies))
         .where(PayoutRecipient.payout_id == payout_id)
         .order_by(PayoutRecipient.id.asc())
     )
@@ -1225,9 +1344,7 @@ async def get_payout_recipients(session: AsyncSession, payout_id: int) -> list[P
     return list(rows)
 
 
-async def get_payout_recipients_for_payouts(
-    session: AsyncSession, payout_ids: Sequence[int]
-) -> list[PayoutRecipient]:
+async def get_payout_recipients_for_payouts(session: AsyncSession, payout_ids: Sequence[int]) -> list[PayoutRecipient]:
     if not payout_ids:
         return []
     rows = await session.scalars(
@@ -1246,6 +1363,7 @@ async def get_latest_active_recipient(session: AsyncSession, user_id: int) -> Pa
             PayoutRecipient.user_id == user_id,
             PayoutRecipient.status.in_(list(PAYMENT_RECEIPT_RECIPIENT_STATUSES)),
             Payout.status.in_(list(ACTIVATED_PAYOUT_STATUSES)),
+            Payout.deleted_at.is_(None),
         )
         .order_by(PayoutRecipient.id.desc())
     )
@@ -1281,17 +1399,20 @@ async def save_profile_and_snapshot(
     now = utcnow()
     payout_ids: set[int] = set()
     if old_details != profile.raw_payment_details:
-        active_payout_ids = list(await session.scalars(
-            select(Payout.id)
-            .join(PayoutRecipient)
-            .where(
-                PayoutRecipient.user_id == user.id,
-                PayoutRecipient.status == RecipientStatus.payment_received.value,
-                Payout.status.in_(list(ACTIVATED_PAYOUT_STATUSES)),
+        active_payout_ids = list(
+            await session.scalars(
+                select(Payout.id)
+                .join(PayoutRecipient)
+                .where(
+                    PayoutRecipient.user_id == user.id,
+                    PayoutRecipient.status == RecipientStatus.payment_received.value,
+                    Payout.status.in_(list(ACTIVATED_PAYOUT_STATUSES)),
+                    Payout.deleted_at.is_(None),
+                )
+                .order_by(Payout.id)
+                .with_for_update(of=Payout)
             )
-            .order_by(Payout.id)
-            .with_for_update(of=Payout)
-        ))
+        )
         recipients = await session.scalars(
             select(PayoutRecipient)
             .where(
@@ -1318,10 +1439,15 @@ async def save_profile_and_snapshot(
             .with_for_update()
             .execution_options(populate_existing=True)
         )
-        if active_payout is not None and active_payout.status not in {
-            PayoutStatus.cancelled.value,
-            PayoutStatus.completed.value,
-        }:
+        if (
+            active_payout is not None
+            and active_payout.deleted_at is None
+            and active_payout.status
+            not in {
+                PayoutStatus.cancelled.value,
+                PayoutStatus.completed.value,
+            }
+        ):
             active_recipient = await session.scalar(
                 select(PayoutRecipient)
                 .where(PayoutRecipient.id == active_recipient.id)
@@ -1338,7 +1464,11 @@ async def save_profile_and_snapshot(
                 active_recipient.replied_at = now
                 payout_ids.add(active_recipient.payout_id)
     await session.flush()
-    events = [(ADMIN_EVENT_USERS_CHANGED, {"user_id": user.id, "telegram_user_id": user.telegram_id})]
+    for payout_id in sorted(payout_ids):
+        await queue_payout_ready(session, payout_id)
+    events: list[tuple[str, dict[str, object]]] = [
+        (ADMIN_EVENT_USERS_CHANGED, {"user_id": user.id, "telegram_user_id": user.telegram_id})
+    ]
     events.extend(
         (ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED, {"payout_id": payout_id, "reason": "save_profile_and_snapshot"})
         for payout_id in sorted(payout_ids)
@@ -1360,13 +1490,25 @@ async def confirm_saved_profile(
             PayoutRecipient.user_id == user_id,
         )
     )
-    payout = await session.scalar(
-        select(Payout)
-        .where(Payout.id == recipient_payout_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    ) if recipient_payout_id is not None else None
-    if payout is None or payout.status in {PayoutStatus.cancelled.value, PayoutStatus.completed.value}:
+    payout = (
+        await session.scalar(
+            select(Payout)
+            .where(Payout.id == recipient_payout_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if recipient_payout_id is not None
+        else None
+    )
+    if (
+        payout is None
+        or payout.deleted_at is not None
+        or payout.status
+        in {
+            PayoutStatus.cancelled.value,
+            PayoutStatus.completed.value,
+        }
+    ):
         return None
     recipient = await session.scalar(
         select(PayoutRecipient)
@@ -1386,6 +1528,7 @@ async def confirm_saved_profile(
     recipient.status = RecipientStatus.payment_received.value
     recipient.replied_at = utcnow()
     await session.flush()
+    await queue_payout_ready(session, recipient.payout_id)
     queue_admin_event(
         session,
         ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
@@ -1399,9 +1542,12 @@ async def recover_stale_sending(session: AsyncSession, *, stale_after_minutes: i
     impacted_payout_ids = list(
         await session.scalars(
             select(PayoutRecipient.payout_id)
+            .join(Payout)
             .where(
                 PayoutRecipient.status == RecipientStatus.sending.value,
                 PayoutRecipient.updated_at < threshold,
+                Payout.status == PayoutStatus.sending.value,
+                Payout.deleted_at.is_(None),
             )
             .distinct()
         )
@@ -1411,6 +1557,7 @@ async def recover_stale_sending(session: AsyncSession, *, stale_after_minutes: i
         .where(
             PayoutRecipient.status == RecipientStatus.sending.value,
             PayoutRecipient.updated_at < threshold,
+            PayoutRecipient.payout_id.in_(impacted_payout_ids),
         )
         .values(status=RecipientStatus.pending.value, failure_reason=None)
     )
@@ -1438,6 +1585,7 @@ async def claim_pending_recipients(session: AsyncSession, *, limit: int) -> list
         .where(
             PayoutRecipient.status == RecipientStatus.pending.value,
             Payout.status == PayoutStatus.sending.value,
+            Payout.deleted_at.is_(None),
         )
         .order_by(PayoutRecipient.id.asc())
         .limit(limit)
@@ -1463,8 +1611,20 @@ async def claim_pending_recipients(session: AsyncSession, *, limit: int) -> list
 
 
 async def finalize_payout_after_worker(session: AsyncSession, payout: Payout) -> Payout | None:
-    if payout.status in {PayoutStatus.cancelled.value, PayoutStatus.completed.value}:
+    locked_payout = await session.scalar(
+        select(Payout).where(Payout.id == payout.id).with_for_update().execution_options(populate_existing=True)
+    )
+    if (
+        locked_payout is None
+        or locked_payout.deleted_at is not None
+        or locked_payout.status
+        in {
+            PayoutStatus.cancelled.value,
+            PayoutStatus.completed.value,
+        }
+    ):
         return None
+    payout = locked_payout
     statuses = list(await session.scalars(select(PayoutRecipient.status).where(PayoutRecipient.payout_id == payout.id)))
     if not statuses:
         return None
@@ -1478,6 +1638,7 @@ async def finalize_payout_after_worker(session: AsyncSession, payout: Payout) ->
     if payout.status != next_status:
         payout.status = next_status
         await session.flush()
+        await queue_payout_ready(session, payout.id)
         queue_admin_events(
             session,
             [
@@ -1486,3 +1647,128 @@ async def finalize_payout_after_worker(session: AsyncSession, payout: Payout) ->
             ],
         )
     return payout
+
+
+async def delete_payout(session: AsyncSession, payout: Payout, *, actor_telegram_id: int) -> None:
+    locked_payout = await session.scalar(
+        select(Payout).where(Payout.id == payout.id).with_for_update().execution_options(populate_existing=True)
+    )
+    if locked_payout is None or locked_payout.deleted_at is not None:
+        raise ValueError("payout not found")
+    payout = locked_payout
+    if payout.status == PayoutStatus.sending.value:
+        raise PayoutClosedConflict("payout_sending")
+    previous = payout.status
+    if payout.status not in {PayoutStatus.draft.value, PayoutStatus.completed.value}:
+        payout.status = PayoutStatus.cancelled.value
+    payout.deleted_at = utcnow()
+    await session.flush()
+    await log_audit(
+        session,
+        actor_telegram_id=actor_telegram_id,
+        action="delete_payout",
+        entity_type="payout",
+        entity_id=str(payout.id),
+        metadata={"previous_status": previous},
+    )
+    queue_admin_events(
+        session,
+        [
+            (ADMIN_EVENT_PAYOUTS_CHANGED, {"payout_id": payout.id, "reason": "delete_payout"}),
+            (ADMIN_EVENT_PAYOUT_CHANGED, {"payout_id": payout.id, "reason": "delete_payout"}),
+        ],
+    )
+
+
+async def queue_payout_ready(session: AsyncSession, payout_id: int) -> bool:
+    payout = await session.get(Payout, payout_id)
+    if (
+        payout is None
+        or payout.deleted_at is not None
+        or payout.status
+        not in {
+            PayoutStatus.sent.value,
+            PayoutStatus.partially_failed.value,
+        }
+    ):
+        return False
+    statuses = list(await session.scalars(select(PayoutRecipient.status).where(PayoutRecipient.payout_id == payout_id)))
+    active = [status for status in statuses if status != RecipientStatus.cancelled.value]
+    if not active or RecipientStatus.payment_received.value not in active:
+        return False
+    if any(status not in {RecipientStatus.payment_received.value, RecipientStatus.paid.value} for status in active):
+        return False
+    if await session.scalar(select(PayoutReadyNotification.id).where(PayoutReadyNotification.payout_id == payout_id)):
+        return False
+    period = format_payout_period_label(
+        payout.period_start_day, payout.period_start_month, payout.period_end_day, payout.period_end_month
+    )
+    session.add(
+        PayoutReadyNotification(
+            payout_id=payout_id,
+            telegram_id=payout.created_by_telegram_id,
+            message=(
+                f"Выплата #{payout_id} за период {period} готова к оплате.\n"
+                f"Все {len(active)} получателей подтвердили реквизиты."
+            ),
+        )
+    )
+    await session.flush()
+    return True
+
+
+async def claim_ready_notifications(session: AsyncSession, limit: int = 5) -> list[PayoutReadyNotification]:
+    now = utcnow()
+    stmt = (
+        select(PayoutReadyNotification)
+        .join(Payout)
+        .where(
+            Payout.deleted_at.is_(None),
+            Payout.status.in_([PayoutStatus.sent.value, PayoutStatus.partially_failed.value]),
+            PayoutReadyNotification.delivered_at.is_(None),
+            or_(
+                PayoutReadyNotification.next_attempt_at.is_(None),
+                PayoutReadyNotification.next_attempt_at <= now,
+            ),
+            or_(PayoutReadyNotification.claimed_until.is_(None), PayoutReadyNotification.claimed_until <= now),
+        )
+        .order_by(PayoutReadyNotification.id.asc())
+        .limit(limit)
+    )
+    if _session_dialect_name(session) != "sqlite":
+        stmt = stmt.with_for_update(skip_locked=True, of=PayoutReadyNotification)
+    rows = list(await session.scalars(stmt))
+    for row in rows:
+        row.claimed_until = now + timedelta(minutes=2)
+    await session.flush()
+    return rows
+
+
+async def settle_ready_notification(session: AsyncSession, message_id: int, error: Exception | None = None) -> None:
+    row = await session.get(PayoutReadyNotification, message_id)
+    if row is None or row.delivered_at is not None:
+        return
+    row.claimed_until = None
+    row.attempts += 1
+    if error is None:
+        row.delivered_at = utcnow()
+        row.last_error = None
+    else:
+        row.last_error = f"{type(error).__name__}: {str(error)[:200]}"
+        row.next_attempt_at = utcnow() + timedelta(seconds=min(21600, 30 * 2 ** min(row.attempts, 9)))
+    await session.flush()
+
+
+async def get_latest_replies_for_recipients(
+    session: AsyncSession, recipient_ids: Sequence[int]
+) -> dict[int, PaymentReply]:
+    if not recipient_ids:
+        return {}
+    latest = (
+        select(func.max(PaymentReply.id).label("reply_id"))
+        .where(PaymentReply.payout_recipient_id.in_(recipient_ids))
+        .group_by(PaymentReply.payout_recipient_id)
+        .subquery()
+    )
+    rows = await session.scalars(select(PaymentReply).join(latest, PaymentReply.id == latest.c.reply_id))
+    return {reply.payout_recipient_id: reply for reply in rows}

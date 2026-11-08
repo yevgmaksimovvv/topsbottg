@@ -148,9 +148,13 @@ export function renderRecipientsInto() {
     if (!wanted.has(row.dataset.recipientRow)) row.remove();
   }
 
+  const existingRows = new Map(
+    [...root.querySelectorAll(":scope > [data-recipient-row]")]
+      .map((row) => [row.dataset.recipientRow, row]),
+  );
   recipients.forEach((recipient, index) => {
     const id = String(Number(recipient.id));
-    let row = root.querySelector(`[data-recipient-row="${id}"]`);
+    let row = existingRows.get(id);
     const markup = renderRow(recipient, payoutStatus);
     const signature = JSON.stringify({
       recipient,

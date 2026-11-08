@@ -8,14 +8,14 @@ import urllib.request
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy import select, text
+from sqlalchemy import inspect, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from topsbottg.config import Settings
 from topsbottg.db import get_session
 from topsbottg.logging_utils import log_event
-from topsbottg.models import PaymentProfile, Payout, PayoutRecipient, User
+from topsbottg.models import PaymentProfile, PaymentReply, Payout, PayoutRecipient, PayoutStatus, User
 from topsbottg.schemas import (
     AddRecipientsIn,
     AdminEventsTokenOut,
@@ -43,8 +43,10 @@ from topsbottg.services import (
     configure_admin_events,
     consume_admin_events_token,
     create_payout,
+    delete_payout,
     format_payout_period_label,
     get_admin_events_broadcaster,
+    get_latest_replies_for_recipients,
     get_payment_profile_for_admin_reveal,
     get_payout,
     get_payout_recipients,
@@ -55,6 +57,7 @@ from topsbottg.services import (
     list_users,
     log_audit,
     mark_paid,
+    payout_send_lock,
     payout_workflow_state,
     retry_failed_recipient,
     send_selected_payout,
@@ -159,8 +162,7 @@ def serialize_payout(payout: Payout, recipients: list[PayoutRecipient] | None = 
         active_recipient_count=len(active),
         ready_for_payment_count=sum(recipient.status == "payment_received" for recipient in active),
         awaiting_confirmation_count=sum(
-            recipient.status in {"pending", "sending", "sent", "payment_required"}
-            for recipient in active
+            recipient.status in {"pending", "sending", "sent", "payment_required"} for recipient in active
         ),
         delivery_error_count=sum(recipient.status == "failed" for recipient in active),
         cancelled_recipient_count=len(recipients) - len(active),
@@ -170,24 +172,29 @@ def serialize_payout(payout: Payout, recipients: list[PayoutRecipient] | None = 
     )
 
 
-def serialize_payout_snapshot(payout: Payout, recipients: list[PayoutRecipient]) -> dict[str, object]:
+def serialize_payout_snapshot(
+    payout: Payout, recipients: list[PayoutRecipient], replies: dict[int, PaymentReply] | None = None
+) -> dict[str, object]:
     payout_out = serialize_payout(payout, recipients)
     return {
         "detail": {"payout": payout_out},
         "payout": payout_out,
-        "recipients": [serialize_recipient(recipient) for recipient in recipients],
+        "recipients": [
+            serialize_recipient(recipient, latest_reply=(replies or {}).get(recipient.id)) for recipient in recipients
+        ],
     }
 
 
-def serialize_recipient(recipient: PayoutRecipient) -> RecipientOut:
+def serialize_recipient(recipient: PayoutRecipient, *, latest_reply: PaymentReply | None = None) -> RecipientOut:
     reply = None
-    if recipient.payment_replies:
-        last_reply = recipient.payment_replies[-1]
+    if latest_reply is None and "payment_replies" not in inspect(recipient).unloaded and recipient.payment_replies:
+        latest_reply = max(recipient.payment_replies, key=lambda item: item.id)
+    if latest_reply is not None:
         reply = ReplyOut(
-            id=last_reply.id,
-            raw_text=last_reply.raw_text,
-            parsed=last_reply.parsed,
-            created_at=last_reply.created_at,
+            id=latest_reply.id,
+            raw_text=latest_reply.raw_text,
+            parsed=latest_reply.parsed,
+            created_at=latest_reply.created_at,
         )
     return RecipientOut(
         id=recipient.id,
@@ -270,6 +277,9 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
     app.state.settings = settings
     app.state.session_factory = session_factory
     app.state.admin_events_broadcaster, app.state.admin_events_token_store = configure_admin_events()
+    app.state.telegram_health_checked_until = 0.0
+    app.state.telegram_health_ok = False
+    app.state.telegram_health_lock = asyncio.Lock()
 
     @app.middleware("http")
     async def admin_cache_headers(request: Request, call_next):
@@ -282,7 +292,22 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
-        checks = await get_readiness_checks(settings, session_factory)
+        bot_task = getattr(app.state, "bot_task", None)
+        if bot_task is None:
+            checks = await get_readiness_checks(settings, session_factory)
+        else:
+            # Keep the original real Telegram readiness check, but cache it
+            # for 60 seconds instead of making getMe on every health probe.
+            async with app.state.telegram_health_lock:
+                now = asyncio.get_running_loop().time()
+                if now >= app.state.telegram_health_checked_until:
+                    app.state.telegram_health_ok = await check_telegram_ready(settings.bot_token)
+                    app.state.telegram_health_checked_until = now + 60
+                telegram_ready = app.state.telegram_health_ok and not bot_task.done()
+            checks = {
+                "database": "ok" if await check_database_ready(session_factory) else "failed",
+                "telegram": "ok" if telegram_ready else "failed",
+            }
         status = "ok" if all(value == "ok" for value in checks.values()) else "error"
         return JSONResponse({"status": status, "checks": checks}, status_code=200 if status == "ok" else 503)
 
@@ -475,6 +500,9 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
     async def admin_payouts(
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
+        limit: int | None = Query(default=None, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        before_id: int | None = Query(default=None, ge=1),
     ) -> list[PayoutOut]:
         actor_telegram_id = _require_admin(x_telegram_init_data, settings)
         log_event(
@@ -484,16 +512,11 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             "Админ запросил список выплат",
             actor_telegram_id=actor_telegram_id,
         )
-        payout_rows = await list_payouts(session)
+        payout_rows = await list_payouts(session, limit=limit, offset=offset, before_id=before_id)
         grouped_recipients: dict[int, list[PayoutRecipient]] = {}
-        for recipient in await get_payout_recipients_for_payouts(
-            session, [payout.id for payout in payout_rows]
-        ):
+        for recipient in await get_payout_recipients_for_payouts(session, [payout.id for payout in payout_rows]):
             grouped_recipients.setdefault(recipient.payout_id, []).append(recipient)
-        payouts = [
-            serialize_payout(payout, grouped_recipients.get(payout.id, []))
-            for payout in payout_rows
-        ]
+        payouts = [serialize_payout(payout, grouped_recipients.get(payout.id, [])) for payout in payout_rows]
         log_event(
             logger,
             "INFO",
@@ -564,7 +587,32 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         payout = await get_payout(session, payout_id)
         if payout is None:
             raise HTTPException(status_code=404, detail="payout not found")
-        return {"payout": serialize_payout(payout, await get_payout_recipients(session, payout_id))}
+        recipients = await get_payout_recipients(session, payout_id)
+        replies = await get_latest_replies_for_recipients(session, [recipient.id for recipient in recipients])
+        return {
+            "payout": serialize_payout(payout, recipients),
+            "recipients": [
+                serialize_recipient(recipient, latest_reply=replies.get(recipient.id)) for recipient in recipients
+            ],
+        }
+
+    @app.delete("/api/admin/payouts/{payout_id}", status_code=204)
+    async def admin_delete_payout(
+        payout_id: int,
+        session: AsyncSession = Depends(get_session),
+        x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
+    ) -> None:
+        actor_id = _require_admin(x_telegram_init_data, settings)
+        async with payout_send_lock(payout_id, session):
+            payout = await get_payout(session, payout_id)
+            if payout is None:
+                raise HTTPException(status_code=404, detail="payout not found")
+            try:
+                await delete_payout(session, payout, actor_telegram_id=actor_id)
+            except PayoutClosedConflict as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.patch("/api/admin/payouts/{payout_id}")
     async def admin_update_payout(
@@ -635,10 +683,20 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             payout_id=payout_id,
             recipients_count=len(payload.user_ids),
         )
-        payout = await get_payout(session, payout_id)
+        payout = await session.scalar(
+            select(Payout)
+            .where(Payout.id == payout_id, Payout.deleted_at.is_(None))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         if payout is None:
             raise HTTPException(status_code=404, detail="payout not found")
-        created = await add_recipients(session, payout, payload.user_ids)
+        if payout.status != PayoutStatus.draft.value:
+            raise HTTPException(status_code=409, detail="Добавлять получателей можно только в черновик")
+        try:
+            created = await add_recipients(session, payout, payload.user_ids)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         await session.commit()
         log_event(
             logger,
@@ -668,19 +726,21 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             payout_id=payout_id,
             recipient_id=recipient_id,
         )
-        payout = await get_payout(session, payout_id)
-        if payout is None:
-            raise HTTPException(status_code=404, detail="payout not found")
-        recipient = await session.scalar(
-            select(PayoutRecipient).where(PayoutRecipient.id == recipient_id, PayoutRecipient.payout_id == payout_id)
-        )
-        if recipient is None:
-            raise HTTPException(status_code=404, detail="recipient not found")
-        try:
-            await cancel_recipient(session, recipient, actor_telegram_id=telegram_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        await session.commit()
+        async with payout_send_lock(payout_id, session):
+            payout = await get_payout(session, payout_id)
+            if payout is None:
+                raise HTTPException(status_code=404, detail="payout not found")
+            recipient = await session.scalar(
+                select(PayoutRecipient).where(
+                    PayoutRecipient.id == recipient_id, PayoutRecipient.payout_id == payout_id
+                )
+            )
+            if recipient is None:
+                raise HTTPException(status_code=404, detail="recipient not found")
+            try:
+                await cancel_recipient(session, recipient, actor_telegram_id=telegram_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         log_event(
             logger,
             "INFO",
@@ -771,7 +831,8 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             result_status=payout.status,
             result_count=len(recipients),
         )
-        return serialize_payout_snapshot(payout, recipients)
+        replies = await get_latest_replies_for_recipients(session, [recipient.id for recipient in recipients])
+        return serialize_payout_snapshot(payout, recipients, replies)
 
     @app.post("/api/admin/payouts/{payout_id}/close")
     async def admin_close_payout(
@@ -823,24 +884,24 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             actor_telegram_id=telegram_id,
             payout_id=payout_id,
         )
-        payout = await get_payout(session, payout_id)
-        if payout is None:
-            raise HTTPException(status_code=404, detail="payout not found")
-        try:
-            payout = await cancel_payout(session, payout, actor_telegram_id=telegram_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        await session.commit()
+        async with payout_send_lock(payout_id, session):
+            payout = await get_payout(session, payout_id)
+            if payout is None:
+                raise HTTPException(status_code=404, detail="payout not found")
+            try:
+                payout = await cancel_payout(session, payout, actor_telegram_id=telegram_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            log_event(
+                logger,
+                "INFO",
+                "payout_cancel_completed",
+                "Выплата отменена",
+                actor_telegram_id=telegram_id,
+                payout_id=payout.id,
+                result_status=payout.status,
+            )
         await session.refresh(payout)
-        log_event(
-            logger,
-            "INFO",
-            "payout_cancel_completed",
-            "Выплата отменена",
-            actor_telegram_id=telegram_id,
-            payout_id=payout.id,
-            result_status=payout.status,
-        )
         return serialize_payout(payout, await get_payout_recipients(session, payout_id))
 
     @app.post("/api/admin/payouts/{payout_id}/recipients/{recipient_id}/retry")
@@ -900,8 +961,11 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             actor_telegram_id=actor_telegram_id,
             payout_id=payout_id,
         )
+        if await get_payout(session, payout_id) is None:
+            raise HTTPException(status_code=404, detail="payout not found")
         recipients = await get_payout_recipients(session, payout_id)
-        result = [serialize_recipient(recipient) for recipient in recipients]
+        replies = await get_latest_replies_for_recipients(session, [recipient.id for recipient in recipients])
+        result = [serialize_recipient(recipient, latest_reply=replies.get(recipient.id)) for recipient in recipients]
         log_event(
             logger,
             "INFO",

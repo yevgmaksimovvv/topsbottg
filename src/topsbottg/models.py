@@ -3,7 +3,18 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import JSON, BigInteger, CheckConstraint, DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -82,6 +93,7 @@ class Payout(Base, TimestampMixin):
     message_after_period: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default=PayoutStatus.draft.value)
     created_by_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     recipients: Mapped[list[PayoutRecipient]] = relationship(back_populates="payout")
 
@@ -122,6 +134,23 @@ class PaymentReply(Base, TimestampMixin):
     recipient: Mapped[PayoutRecipient] = relationship(back_populates="payment_replies")
 
 
+class PayoutReadyNotification(Base, TimestampMixin):
+    """Persistent Telegram outbox entry, unique per payout."""
+
+    __tablename__ = "payout_ready_notifications"
+    __table_args__ = (UniqueConstraint("payout_id", name="uq_payout_ready_payout"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    payout_id: Mapped[int] = mapped_column(ForeignKey("payouts.id", ondelete="CASCADE"), nullable=False)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    attempts: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class AuditLog(Base, TimestampMixin):
     __tablename__ = "audit_log"
 
@@ -136,4 +165,7 @@ class AuditLog(Base, TimestampMixin):
 Index("ix_users_full_name_lower", func.lower(User.full_name))
 Index("ix_payout_recipients_payout_status", PayoutRecipient.payout_id, PayoutRecipient.status)
 Index("ix_payout_recipients_user_status", PayoutRecipient.user_id, PayoutRecipient.status)
+Index("ix_payouts_deleted_id", Payout.deleted_at, Payout.id)
+Index("ix_payout_ready_pending", PayoutReadyNotification.delivered_at, PayoutReadyNotification.next_attempt_at)
+Index("ix_payment_replies_recipient", PaymentReply.payout_recipient_id, PaymentReply.id)
 Index("ix_audit_log_created_at", AuditLog.created_at)
