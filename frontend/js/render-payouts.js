@@ -77,6 +77,7 @@ export async function createPayout() {
     button.type = "button";
     button.className = "button button-quiet";
     button.dataset.action = "go-selection";
+    button.dataset.payoutId = String(Number(payout.id));
     button.textContent = "Перейти к выбору пользователей";
     c.append(text, button);
     c.classList.remove("hidden");

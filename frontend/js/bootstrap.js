@@ -29,6 +29,7 @@ import { renderUsers } from "./render-users.js";
 import { parsePeriodInput, plural } from "./utils.js";
 
 let lastFocusedElement = null;
+let goSelectionInFlight = false;
 
 function bindPeriodInput(id, stateKey) {
   const input = document.getElementById(id);
@@ -185,8 +186,35 @@ function bindEvents() {
           await createPayout();
           return;
         case "go-selection":
-          state.activeMobileView = "users";
-          renderNavigation();
+          if (goSelectionInFlight) return;
+          {
+            const payoutId = Number(action.dataset.payoutId);
+            if (!Number.isInteger(payoutId) || payoutId <= 0) {
+              setToast("Не удалось определить созданную выплату.", "error");
+              renderApp();
+              return;
+            }
+            goSelectionInFlight = true;
+            try {
+              if (Number(state.selectedPayoutId) !== payoutId) {
+                const selected = await selectPayout(payoutId, {
+                  requireSuccessfulLoad: true,
+                });
+                if (!selected) {
+                  setToast(
+                    `Не удалось загрузить выплату #${payoutId}. Вы остались в текущем разделе.`,
+                    "error",
+                  );
+                  renderApp();
+                  return;
+                }
+              }
+              state.activeMobileView = "users";
+              renderNavigation();
+            } finally {
+              goSelectionInFlight = false;
+            }
+          }
           return;
         case "send-payout": {
           const payout = state.selectedPayoutDetail?.payout;

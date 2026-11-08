@@ -253,10 +253,10 @@ async function refreshSelectedPayout({ silent = false } = {}) {
   const payoutId = Number(state.selectedPayoutId);
   const hasInitData = canUseApi();
   if (!payoutId) {
-    return;
+    return false;
   }
   if (!hasInitData) {
-    return;
+    return false;
   }
   const requestId = ++state.selectedPayoutRequestId;
   const isCurrentRequest = () =>
@@ -267,21 +267,23 @@ async function refreshSelectedPayout({ silent = false } = {}) {
     setLoadingAndRender("recipients", false);
   try {
     const detail = await api(`/admin/payouts/${payoutId}`);
-    if (!isCurrentRequest()) return;
+    if (!isCurrentRequest()) return false;
     const recipients = await api(`/admin/payouts/${payoutId}/recipients`);
-    if (!isCurrentRequest()) return;
+    if (!isCurrentRequest()) return false;
     state.selectedPayoutDetail = detail;
     state.recipientsLoadError = null;
     state.recipients = recipients;
     upsertPayoutInList(detail?.payout);
     renderSelectedPayoutView();
+    return true;
   } catch (error) {
-    if (!isCurrentRequest()) return;
+    if (!isCurrentRequest()) return false;
     logLoadError("refreshSelectedPayout", error);
     state.recipientsLoadError = error?.message || "Ошибка загрузки";
     renderSelectedPayoutView();
     if (!silent)
       setErrorAndRender(error.message || "Не удалось обновить выплату");
+    return false;
   } finally {
     if (isCurrentRequest() && !silent)
       setLoadingAndRender("recipients", false);
@@ -493,9 +495,28 @@ export async function startAdminEvents(retryTokenRefresh = false) {
   return adminEventsStartPromise;
 }
 
-async function selectPayout(id) {
-  if (!canUseApi()) return;
+async function selectPayout(id, { requireSuccessfulLoad = false } = {}) {
+  if (!canUseApi()) return false;
   const nextId = Number(id);
+  const previous = requireSuccessfulLoad
+    ? {
+        payoutId: state.selectedPayoutId,
+        selectedUsers: new Set(state.selectedUsers),
+        selectedPayoutDetail: state.selectedPayoutDetail,
+        recipients: state.recipients,
+        recipientsLoadError: state.recipientsLoadError,
+        expandedRecipients: new Set(state.expandedRecipients),
+        previousPayoutSelection: state.selectedPayoutId
+          ? new Set(
+              state.selectedUsersByPayout.get(Number(state.selectedPayoutId)) ||
+                state.selectedUsers,
+            )
+          : null,
+        nextPayoutSelection: new Set(
+          state.selectedUsersByPayout.get(nextId) || [],
+        ),
+      }
+    : null;
   const changed = Number(state.selectedPayoutId) !== nextId;
   if (changed) {
     if (state.selectedPayoutId)
@@ -512,8 +533,39 @@ async function selectPayout(id) {
     state.expandedRecipients.clear();
   }
   state.selectedPayoutId = nextId;
-  await refreshSelectedPayout();
+  const refresh = refreshSelectedPayout();
+  const requestId = state.selectedPayoutRequestId;
+  const loaded = await refresh;
+  const loadedForTarget =
+    loaded &&
+    Number(state.selectedPayoutDetail?.payout?.id) === nextId;
+  if (
+    requireSuccessfulLoad &&
+    !loadedForTarget &&
+    Number(state.selectedPayoutId) === nextId &&
+    state.selectedPayoutRequestId === requestId
+  ) {
+    state.selectedPayoutId = previous.payoutId;
+    state.selectedUsers.clear();
+    previous.selectedUsers.forEach((userId) => state.selectedUsers.add(userId));
+    state.selectedPayoutDetail = previous.selectedPayoutDetail;
+    state.recipients = previous.recipients;
+    state.recipientsLoadError = previous.recipientsLoadError;
+    state.expandedRecipients.clear();
+    previous.expandedRecipients.forEach((recipientId) =>
+      state.expandedRecipients.add(recipientId),
+    );
+    if (previous.payoutId)
+      state.selectedUsersByPayout.set(
+        Number(previous.payoutId),
+        previous.previousPayoutSelection,
+      );
+    state.selectedUsersByPayout.set(nextId, previous.nextPayoutSelection);
+    renderApp();
+    return false;
+  }
   renderApp();
+  return loadedForTarget;
 }
 
 async function markPaid(recipientId) {

@@ -101,6 +101,7 @@ test("responsive Mini App and payout workflows", async (t) => {
   const sentUserIds = [];
   let markPaidCalls = 0;
   let createPayoutCalls = 0;
+  const failedPayoutDetails = new Set();
   let server;
   let browser;
 
@@ -244,6 +245,12 @@ test("responsive Mini App and payout workflows", async (t) => {
         payouts.unshift(data);
       } else if (/\/admin\/payouts\/\d+$/.test(path)) {
         const id = Number(path.split("/").at(-1));
+        if (failedPayoutDetails.has(id))
+          return route.fulfill({
+            status: 503,
+            contentType: "application/json",
+            body: JSON.stringify({ detail: "Payout unavailable" }),
+          });
         data = { payout: payouts.find((payout) => payout.id === id) || null };
       } else if (path.endsWith("/recipients") && method === "GET") {
         const payoutId = Number(path.split("/").at(-2));
@@ -424,7 +431,45 @@ test("responsive Mini App and payout workflows", async (t) => {
       await page.locator("#create-success").innerText(),
       /Выплата #39 создана/,
     );
+    await page.waitForTimeout(30);
+    const payout39RequestsBeforeGo = requestLog.filter(
+      ({ path, method }) =>
+        (path === "/api/admin/payouts/39" ||
+          path === "/api/admin/payouts/39/recipients") &&
+        method === "GET",
+    ).length;
     await page.locator('[data-action="go-selection"]').click();
+    await page.waitForFunction(
+      () =>
+        document.querySelector(".nav-button.active")?.dataset.mobileView ===
+        "users",
+    );
+
+    assert.equal(
+      await page
+        .locator('#create-success [data-action="go-selection"]')
+        .getAttribute("data-payout-id"),
+      "39",
+    );
+    assert.deepEqual(
+      await page.evaluate(async () => {
+        const { state } = await import("/miniapp/js/store.js");
+        return [
+          Number(state.selectedPayoutId),
+          Number(state.selectedPayoutDetail?.payout?.id || 0),
+        ];
+      }),
+      [39, 39],
+    );
+    assert.equal(
+      requestLog.filter(
+        ({ path, method }) =>
+          (path === "/api/admin/payouts/39" ||
+            path === "/api/admin/payouts/39/recipients") &&
+          method === "GET",
+      ).length,
+      payout39RequestsBeforeGo,
+    );
 
     const initiallyDisabledSend = page.locator('[data-action="send-payout"]');
     assert.equal(await initiallyDisabledSend.isDisabled(), true);
@@ -465,7 +510,7 @@ test("responsive Mini App and payout workflows", async (t) => {
     await page.locator('input[data-user-id="1"]').check();
     await page.locator('input[data-user-id="2"]').check();
     await page.locator('[data-mobile-view="payouts"]').click();
-    await page.locator('[data-payout-id="40"]').click();
+    await page.locator('.payout-row[data-payout-id="40"]').click();
     await page.locator('[data-mobile-view="users"]').click();
     assert.equal(await page.locator("#selected-count").innerText(), "0 получателей");
     await page.locator('input[data-user-id="2"]').check();
@@ -483,7 +528,7 @@ test("responsive Mini App and payout workflows", async (t) => {
     };
     await assertVisibleSelection([2, 3]);
     await page.locator('[data-mobile-view="payouts"]').click();
-    await page.locator('[data-payout-id="39"]').click();
+    await page.locator('.payout-row[data-payout-id="39"]').click();
     await page.locator('[data-mobile-view="users"]').click();
     await assertVisibleSelection([1, 2]);
     const selectedCheckbox = page.locator('input[data-user-id="1"]');
@@ -499,11 +544,11 @@ test("responsive Mini App and payout workflows", async (t) => {
     assert.equal(await selectedCheckbox.isChecked(), true);
     assert.equal(await selectedCheckbox.evaluate((checkbox) => checkbox === document.querySelector('input[data-user-id="1"]')), true);
     await page.locator('[data-mobile-view="payouts"]').click();
-    await page.locator('[data-payout-id="40"]').click();
+    await page.locator('.payout-row[data-payout-id="40"]').click();
     await page.locator('[data-mobile-view="users"]').click();
     await assertVisibleSelection([2, 3]);
     await page.locator('[data-mobile-view="payouts"]').click();
-    await page.locator('[data-payout-id="39"]').click();
+    await page.locator('.payout-row[data-payout-id="39"]').click();
     await page.locator('[data-mobile-view="users"]').click();
     await assertVisibleSelection([1, 2]);
 
@@ -523,7 +568,7 @@ test("responsive Mini App and payout workflows", async (t) => {
     await page.setViewportSize({ width: 390, height: 844 });
 
     await page.locator('[data-mobile-view="payouts"]').click();
-    await page.locator('[data-payout-id="37"]').click();
+    await page.locator('.payout-row[data-payout-id="37"]').click();
     await page.locator('[data-mobile-view="users"]').click();
     assert.equal(
       await page.locator("input[data-user-id]").first().isEnabled(),
@@ -534,7 +579,7 @@ test("responsive Mini App and payout workflows", async (t) => {
       "0 получателей",
     );
     await page.locator('[data-mobile-view="payouts"]').click();
-    await page.locator('[data-payout-id="39"]').click();
+    await page.locator('.payout-row[data-payout-id="39"]').click();
     await page.locator('[data-mobile-view="users"]').click();
     assert.equal(
       await page.locator('input[data-user-id="1"]').isChecked(),
@@ -575,7 +620,7 @@ test("responsive Mini App and payout workflows", async (t) => {
     assert.deepEqual(sentUserIds[0], [1, 2]);
 
     await page.locator('[data-mobile-view="payouts"]').click();
-    await page.locator('[data-payout-id="38"]').click();
+    await page.locator('.payout-row[data-payout-id="38"]').click();
     await page.locator('[data-mobile-view="recipients"]').click();
     await page.locator("[data-expand-recipient='501']").click();
     assert.equal(await page.locator("[data-expand-recipient='501']").getAttribute("aria-expanded"), "true", await page.locator("[data-recipient-row='501']").evaluate((node) => node.outerHTML));
@@ -705,6 +750,18 @@ test("responsive Mini App and payout workflows", async (t) => {
           selectedUsersByPayout40: [
             ...(state.selectedUsersByPayout.get(40) || new Set()),
           ].sort((a, b) => a - b),
+          selectedUsersByPayout41: [
+            ...(state.selectedUsersByPayout.get(41) || new Set()),
+          ].sort((a, b) => a - b),
+          activeMobileView: state.activeMobileView,
+          visibleUserChecks: [...document.querySelectorAll("input[data-user-id]")]
+            .filter((checkbox) => checkbox.checked)
+            .map((checkbox) => Number(checkbox.dataset.userId))
+            .sort((a, b) => a - b),
+          visibleSelectedRows: [...document.querySelectorAll("[data-user-row]")]
+            .filter((row) => row.classList.contains("selected"))
+            .map((row) => Number(row.dataset.userRow))
+            .sort((a, b) => a - b),
           markPaidErrorIds: Object.keys(state.recipientOperationError).map(Number),
           markPaidLoading: state.loading.markPaid,
           loadingRecipientId: state.loadingRecipientId,
@@ -1091,6 +1148,72 @@ test("responsive Mini App and payout workflows", async (t) => {
       ).length,
       2,
     );
+
+    // The created payout CTA selects its explicit target, and a failed or repeated
+    // activation never opens the current payout under the created payout's label.
+    await page.locator('[data-mobile-view="composer"]').click();
+    const createdPayoutAction = page.locator(
+      '#create-success [data-action="go-selection"]',
+    );
+    assert.equal(await createdPayoutAction.getAttribute("data-payout-id"), "41");
+    failedPayoutDetails.add(41);
+    const detailRequestsBeforeFailure = requestLog.filter(
+      ({ path, method }) => path === "/api/admin/payouts/41" && method === "GET",
+    ).length;
+    await createdPayoutAction.dblclick();
+    await page.waitForFunction(() =>
+      document
+        .querySelector("#toast")
+        ?.textContent.includes("Не удалось загрузить выплату #41"),
+    );
+    assert.equal(
+      requestLog.filter(
+        ({ path, method }) => path === "/api/admin/payouts/41" && method === "GET",
+      ).length,
+      detailRequestsBeforeFailure + 1,
+    );
+    assert.equal((await readPayoutState()).selectedPayoutId, 40);
+    assert.equal((await readPayoutState()).detailPayoutId, 40);
+    assert.deepEqual((await readPayoutState()).selectedUsers, [2, 3]);
+    assert.equal((await readPayoutState()).activeMobileView, "composer");
+
+    failedPayoutDetails.delete(41);
+    const detailRequestBeforeSuccess = requestLog.filter(
+      ({ path, method }) => path === "/api/admin/payouts/41" && method === "GET",
+    ).length;
+    const recipientsRequestBeforeSuccess = requestLog.filter(
+      ({ path, method }) =>
+        path === "/api/admin/payouts/41/recipients" && method === "GET",
+    ).length;
+    await createdPayoutAction.click();
+    await page.waitForFunction(
+      () =>
+        document.querySelector(".nav-button.active")?.dataset.mobileView ===
+        "users",
+    );
+    const createdSelectionState = await readPayoutState();
+    assert.equal(createdSelectionState.selectedPayoutId, 41);
+    assert.equal(createdSelectionState.detailPayoutId, 41);
+    assert.equal(createdSelectionState.activeMobileView, "users");
+    assert.deepEqual(createdSelectionState.selectedUsers, []);
+    assert.deepEqual(createdSelectionState.selectedUsersByPayout41, []);
+    assert.deepEqual(createdSelectionState.visibleUserChecks, []);
+    assert.deepEqual(createdSelectionState.visibleSelectedRows, []);
+    assert.equal(
+      requestLog.filter(
+        ({ path, method }) => path === "/api/admin/payouts/41" && method === "GET",
+      ).length,
+      detailRequestBeforeSuccess + 1,
+    );
+    assert.equal(
+      requestLog.filter(
+        ({ path, method }) =>
+          path === "/api/admin/payouts/41/recipients" && method === "GET",
+      ).length,
+      recipientsRequestBeforeSuccess + 1,
+    );
+    assert.match(await page.locator("#selection-payout-context").innerText(), /#41/);
+    assert.match(await page.locator("#recipients-context").innerText(), /#41/);
 
     await mkdir(evidence, { recursive: true });
     for (const theme of ["light", "dark"]) {
