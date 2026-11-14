@@ -15,7 +15,7 @@ from sqlalchemy.orm import selectinload
 from topsbottg.config import Settings
 from topsbottg.db import get_session
 from topsbottg.logging_utils import log_event
-from topsbottg.models import PaymentProfile, PaymentReply, Payout, PayoutRecipient, PayoutStatus, User
+from topsbottg.models import PaymentProfile, PaymentReply, Payout, PayoutRecipient, PayoutStatus, StudyGroup, User
 from topsbottg.schemas import (
     AddRecipientsIn,
     AdminEventsTokenOut,
@@ -26,6 +26,7 @@ from topsbottg.schemas import (
     PayoutUpdate,
     RecipientOut,
     ReplyOut,
+    StudyGroupOut,
     UserOut,
     UserPageOut,
 )
@@ -123,6 +124,11 @@ def serialize_user(user: User, profile: PaymentProfile | None) -> UserOut:
         telegram_user_id=user.telegram_id,
         telegram_id=user.telegram_id,
         full_name=user.full_name,
+        study_group=(
+            StudyGroupOut(id=user.study_group.id, code=user.study_group.display_code)
+            if user.study_group is not None
+            else None
+        ),
         has_payment_profile=has_payment_profile,
         payment_profile_id=getattr(profile, "id", None) if has_payment_profile else None,
     )
@@ -340,10 +346,26 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         response.headers["Connection"] = "keep-alive"
         return response
 
+    @app.get("/api/admin/study-groups", response_model=list[StudyGroupOut])
+    async def admin_study_groups(
+        session: AsyncSession = Depends(get_session),
+        x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
+    ) -> list[StudyGroupOut]:
+        _require_admin(x_telegram_init_data, settings)
+        groups = await session.scalars(
+            select(StudyGroup)
+            .where(
+                select(User.id).where(User.study_group_id == StudyGroup.id).exists()
+            )
+            .order_by(StudyGroup.normalized_code, StudyGroup.id)
+        )
+        return [StudyGroupOut(id=group.id, code=group.display_code) for group in groups]
+
     @app.get("/api/admin/users")
     async def admin_users(
         search: str | None = Query(default=None),
         has_payment_profile: bool | None = Query(default=None),
+        study_group_id: int | None = Query(default=None, ge=1),
         limit: int = Query(default=50, ge=1, le=100),
         offset: int = Query(default=0, ge=0),
         session: AsyncSession = Depends(get_session),
@@ -363,6 +385,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             session,
             search=search,
             has_payment_profile=has_payment_profile,
+            study_group_id=study_group_id,
             limit=limit + 1,
             offset=offset,
         )
@@ -372,6 +395,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
                 session,
                 search=search,
                 has_payment_profile=has_payment_profile,
+                study_group_id=study_group_id,
                 limit=1,
                 offset=offset + limit,
             )
@@ -410,7 +434,9 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             actor_telegram_id=actor_telegram_id,
             user_id=user_id,
         )
-        user = await session.get(User, user_id)
+        user = await session.scalar(
+            select(User).options(selectinload(User.study_group)).where(User.id == user_id)
+        )
         if user is None:
             log_event(
                 logger,

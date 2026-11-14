@@ -1,9 +1,37 @@
 ﻿import { state, canUseApi, $ } from "./store.js";
 import { escapeHtml, plural } from "./utils.js";
+function userGroupLabel(user) {
+  return user.study_group?.code ? `Группа: ${user.study_group.code}` : "Группа не указана";
+}
+
 function userMarkup(user, locked) {
   const id = Number(user.id),
     selected = state.selectedUsers.has(id);
-  return `<label class="user-row${selected ? " selected" : ""}${locked ? " is-locked" : ""}" data-user-row="${id}"><span class="user-name">${escapeHtml(user.full_name || "")}</span><input type="checkbox" data-user-id="${id}" aria-label="Выбрать ${escapeHtml(user.full_name || "")}" ${selected ? "checked" : ""} ${locked ? "disabled" : ""}></label>`;
+  return `<label class="user-row${selected ? " selected" : ""}${locked ? " is-locked" : ""}" data-user-row="${id}"><span class="user-identity"><span class="user-name">${escapeHtml(user.full_name || "")}</span><span class="user-group">${escapeHtml(userGroupLabel(user))}</span></span><input type="checkbox" data-user-id="${id}" aria-label="Выбрать ${escapeHtml(user.full_name || "")}" ${selected ? "checked" : ""} ${locked ? "disabled" : ""}></label>`;
+}
+
+function renderStudyGroupFilter() {
+  const dropdown = $("users-group-filter");
+  if (!dropdown) return;
+  const key = JSON.stringify(state.studyGroups);
+  if (dropdown.dataset.groupsKey !== key) {
+    const options = [new Option("Все группы", "")];
+    for (const group of state.studyGroups) {
+      options.push(new Option(group.code, String(group.id)));
+    }
+    if (
+      state.usersStudyGroupId &&
+      !state.studyGroups.some((group) => String(group.id) === state.usersStudyGroupId)
+    ) {
+      options.push(new Option("Ранее выбранная группа", state.usersStudyGroupId));
+    }
+    dropdown.replaceChildren(...options);
+    dropdown.dataset.groupsKey = key;
+  }
+  dropdown.value = state.usersStudyGroupId;
+  dropdown.disabled = !canUseApi();
+  const status = $("study-groups-state");
+  if (status) status.textContent = state.studyGroupsLoadError || "";
 }
 export function renderUsersInto() {
   const root = $("users-list");
@@ -53,6 +81,9 @@ export function renderUsersInto() {
     const name = row?.querySelector(".user-name");
     if (name && name.textContent !== (user.full_name || ""))
       name.textContent = user.full_name || "";
+    const group = row?.querySelector(".user-group");
+    if (group && group.textContent !== userGroupLabel(user))
+      group.textContent = userGroupLabel(user);
     if (checkbox) {
       checkbox.disabled = locked;
       checkbox.setAttribute(
@@ -107,5 +138,6 @@ export function renderUsersInto() {
             : "";
 }
 export function renderUsers() {
+  renderStudyGroupFilter();
   renderUsersInto();
 }

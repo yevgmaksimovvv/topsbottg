@@ -202,6 +202,13 @@
               placeholder="Поиск по ФИО"
               aria-label="Поиск по ФИО"
           /></label>
+          <label class="group-filter-field" for="users-group-filter">
+            <span>Учебная группа</span>
+            <select id="users-group-filter" aria-label="Фильтр по учебной группе">
+              <option value="">Все группы</option>
+            </select>
+          </label>
+          <div id="study-groups-state" class="group-filter-state" role="status"></div>
           <div id="users-lock-note" class="notice hidden"></div>
           <div id="users-state" class="list-state" role="status"></div>
           <div id="users-list" class="user-list" aria-live="polite"></div>

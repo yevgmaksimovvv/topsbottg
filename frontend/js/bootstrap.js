@@ -16,6 +16,7 @@ import {
 } from "./store.js";
 import {
   loadPayouts,
+  loadStudyGroups,
   loadUsers,
   markPaid,
   clearPayoutSelection,
@@ -173,6 +174,12 @@ function bindEvents() {
       () => loadUsers({ reset: true }),
       SEARCH_DEBOUNCE_MS,
     );
+  });
+  document.addEventListener("change", (event) => {
+    if (event.target.id !== "users-group-filter") return;
+    state.usersStudyGroupId = event.target.value;
+    if (state.searchTimer) clearTimeout(state.searchTimer);
+    void loadUsers({ reset: true });
   });
   bindPeriodInput("period-start", "periodStart");
   bindPeriodInput("period-end", "periodEnd");
@@ -437,5 +444,5 @@ export async function bootstrap() {
   window.addEventListener("beforeunload", stopAdminEvents);
   if (!canUseApi()) return;
   void startAdminEvents();
-  await Promise.allSettled([loadUsers({ reset: true }), loadPayouts()]);
+  await Promise.allSettled([loadStudyGroups(), loadUsers({ reset: true }), loadPayouts()]);
 }

@@ -59,6 +59,8 @@ for (const [width, height] of [[320, 740], [390, 844], [768, 900]]) {
           result = { token: "test-admin", expires_in: 300 };
         } else if (request.method() === "GET" && path === "/api/admin/payouts") {
           result = [];
+        } else if (request.method() === "GET" && path === "/api/admin/study-groups") {
+          result = [];
         } else if (request.method() === "GET" && path === "/api/admin/users") {
           result = { items: [], limit: 50, offset: 0, has_more: false };
         } else if (request.method() === "GET" && path === "/api/admin/me") {
