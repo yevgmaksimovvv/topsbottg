@@ -11,6 +11,7 @@ from fastapi.routing import APIRoute
 ADMIN_ROUTES = [
     ("GET", "/api/admin/me", None),
     ("POST", "/api/admin/events-token", None),
+    ("GET", "/api/admin/study-groups", None),
     ("GET", "/api/admin/users", None),
     ("GET", "/api/admin/users/10", None),
     ("GET", "/api/admin/users/10/payment-details", None),

@@ -8,11 +8,17 @@ from pydantic import BaseModel, ConfigDict, Field
 from topsbottg.constants import MAX_PAYOUT_MESSAGE_LENGTH
 
 
+class StudyGroupOut(BaseModel):
+    id: int
+    code: str
+
+
 class UserOut(BaseModel):
     id: int
     telegram_user_id: int
     telegram_id: int
     full_name: str
+    study_group: StudyGroupOut | None = None
     has_payment_profile: bool
     payment_profile_id: int | None = None
 

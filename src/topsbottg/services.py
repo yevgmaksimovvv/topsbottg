@@ -621,6 +621,7 @@ async def list_users(
     *,
     search: str | None = None,
     has_payment_profile: bool | None = None,
+    study_group_id: int | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> list[tuple[User, PaymentProfile | None]]:
@@ -635,6 +636,8 @@ async def list_users(
         )
     )
     stmt = select(User.id).order_by(func.lower(User.full_name), User.id)
+    if study_group_id is not None:
+        stmt = stmt.where(User.study_group_id == study_group_id)
     if search:
         needle = search.strip()
         if needle:
@@ -652,7 +655,9 @@ async def list_users(
         return []
     selected_ids = user_ids[:limit]
     rows = await session.scalars(
-        select(User).options(selectinload(User.payment_profile)).where(User.id.in_(selected_ids))
+        select(User)
+        .options(selectinload(User.payment_profile), selectinload(User.study_group))
+        .where(User.id.in_(selected_ids))
     )
     users_by_id = {user.id: user for user in rows}
     result: list[tuple[User, PaymentProfile | None]] = []

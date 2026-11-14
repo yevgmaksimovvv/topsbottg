@@ -208,6 +208,8 @@ async function loadUsers({ reset = true, silent = false } = {}) {
     params.set("offset", String(state.usersOffset));
     if (state.usersSearch.trim())
       params.set("search", state.usersSearch.trim());
+    if (state.usersStudyGroupId)
+      params.set("study_group_id", state.usersStudyGroupId);
     const page = await api(`/admin/users?${params.toString()}`);
     if (requestId !== state.usersRequestId) return;
     state.users = reset ? page.items : [...state.users, ...page.items];
@@ -229,6 +231,23 @@ async function loadUsers({ reset = true, silent = false } = {}) {
     if (requestId === state.usersRequestId) {
       if (!silent) setLoadingAndRender("users", false);
     }
+  }
+}
+
+async function loadStudyGroups() {
+  if (!canUseApi()) return;
+  const requestId = ++state.studyGroupsRequestId;
+  try {
+    const groups = await api("/admin/study-groups");
+    if (requestId !== state.studyGroupsRequestId) return;
+    state.studyGroups = Array.isArray(groups) ? groups : [];
+    state.studyGroupsLoadError = null;
+  } catch (error) {
+    if (requestId !== state.studyGroupsRequestId) return;
+    logLoadError("loadStudyGroups", error);
+    state.studyGroupsLoadError = "Не удалось загрузить список групп.";
+  } finally {
+    if (requestId === state.studyGroupsRequestId) renderUsers();
   }
 }
 
@@ -454,6 +473,7 @@ export function handleAdminEvent(type, payload = {}) {
   if (type === "ping" || !state.initData) return;
   if (type === "users_changed") {
     void loadUsers({ reset: true, silent: true });
+    void loadStudyGroups();
     return;
   }
   if (payload.reason === "delete_payout" && payload.payout_id) {
@@ -731,6 +751,7 @@ export {
   api,
   renderCreatePayout as createPayout,
   loadPayouts,
+  loadStudyGroups,
   loadUsers,
   markPaid,
   refreshSelectedPayout,

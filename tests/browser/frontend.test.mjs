@@ -186,6 +186,7 @@ test("responsive Mini App and payout workflows", async (t) => {
         (method === "POST" && path === "/api/admin/events-token") ||
         (method === "GET" && path === "/api/admin/events") ||
         (method === "GET" && path === "/api/admin/users") ||
+        (method === "GET" && path === "/api/admin/study-groups") ||
         ((method === "GET" || method === "POST") && path === "/api/admin/payouts") ||
         (method === "GET" && new RegExp("^/api/admin/payouts/[0-9]+$").test(path)) ||
         (method === "GET" && new RegExp("^/api/admin/payouts/[0-9]+/recipients$").test(path)) ||
@@ -204,6 +205,7 @@ test("responsive Mini App and payout workflows", async (t) => {
         path,
         method,
         search: url.searchParams.get("search") || "",
+        studyGroupId: url.searchParams.get("study_group_id") || "",
         body: method === "POST" ? req.postDataJSON() : null,
       });
       if (method === "POST" && path.endsWith("/send-selected")) {
@@ -245,8 +247,15 @@ test("responsive Mini App and payout workflows", async (t) => {
           contentType: "text/event-stream",
           body: ": connected\n\n",
         });
+      else if (path.endsWith("/admin/study-groups"))
+        data = [
+          { id: 1, code: "М3О-207СВ-25" },
+          { id: 2, code: "М3О-208СВ-25" },
+        ];
       else if (path.endsWith("/admin/users")) {
         const search = url.searchParams.get("search") || "";
+        const studyGroupId = url.searchParams.get("study_group_id") || "";
+        const offset = Number(url.searchParams.get("offset") || 0);
         if (search === "empty")
           data = { items: [], offset: 0, has_more: false };
         else if (search === "load-error")
@@ -257,21 +266,34 @@ test("responsive Mini App and payout workflows", async (t) => {
           });
         else if (search)
           data = {
-            items: [{ id: 901, full_name: "Найденный пользователь" }],
+            items: studyGroupId && studyGroupId !== "1" ? [] : [{
+              id: 901,
+              full_name: "Найденный пользователь",
+              study_group: { id: 1, code: "М3О-207СВ-25" },
+            }],
             offset: 0,
             has_more: false,
           };
         else {
-          const offset = Number(url.searchParams.get("offset") || 0);
-          const items = Array.from(
-            { length: Math.min(50, 120 - offset) },
-            (_, index) => ({
-              id: offset + index + 1,
-              full_name: `${renamedUserId === offset + index + 1 ? "Новое ФИО" : "Пользователь"} ${offset + index + 1} с длинной фамилией для плотного списка`,
-            }),
-          );
-          data = { items, offset, has_more: offset + items.length < 120 };
-          users = [...users.slice(0, offset), ...items];
+          const allUsers = Array.from({ length: 120 }, (_, index) => {
+            const id = index + 1;
+            const group = id % 3 === 0
+              ? { id: 2, code: "М3О-208СВ-25" }
+              : id % 2 === 0
+                ? { id: 1, code: "М3О-207СВ-25" }
+                : null;
+            return {
+              id,
+              full_name: `${renamedUserId === id ? "Новое ФИО" : "Пользователь"} ${id} с длинной фамилией для плотного списка`,
+              study_group: group,
+            };
+          });
+          const matching = studyGroupId
+            ? allUsers.filter((user) => String(user.study_group?.id) === studyGroupId)
+            : allUsers;
+          const items = matching.slice(offset, offset + 50);
+          data = { items, offset, has_more: offset + items.length < matching.length };
+          if (!studyGroupId) users = [...users.slice(0, offset), ...items];
         }
       } else if (path.endsWith("/admin/payouts") && method === "GET")
         data = payouts;
@@ -640,6 +662,38 @@ test("responsive Mini App and payout workflows", async (t) => {
       assert.equal(await page.locator("#selected-count").innerText(), `${expected.length} ${expected.length === 1 ? "получатель" : "получателя"}`);
     };
     await assertVisibleSelection([2, 3]);
+    assert.equal(await page.locator('[data-user-row="1"] .user-group').innerText(), "Группа не указана");
+    assert.equal(await page.locator('[data-user-row="2"] .user-group').innerText(), "Группа: М3О-207СВ-25");
+    await page.locator("#users-group-filter").selectOption("1");
+    await page.locator('[data-user-row="2"]').waitFor();
+    await page.waitForFunction(() => document.querySelectorAll('[data-user-row="3"]').length === 0);
+    assert.equal(await page.locator('[data-user-row="2"] input').isChecked(), true);
+    assert.equal(await page.locator("#selected-count").innerText(), "2 получателя");
+    assert.ok(requestLog.some((item) => item.path === "/api/admin/users" && item.studyGroupId === "1"));
+
+    const staleGroupRequest = delayNextRequest("/api/admin/users");
+    await page.locator("#users-group-filter").selectOption("2");
+    await page.waitForTimeout(60);
+    await page.locator("#users-group-filter").selectOption("1");
+    await page.locator('[data-user-row="2"]').waitFor();
+    staleGroupRequest.release();
+    await page.waitForTimeout(60);
+    assert.equal(await page.locator("#users-group-filter").inputValue(), "1");
+    assert.equal(await page.locator('[data-user-row="3"]').count(), 0);
+
+    await page.locator("#users-group-filter").selectOption("2");
+    await page.locator('[data-user-row="3"]').waitFor();
+    assert.equal(await page.locator('[data-user-row="3"] input').isChecked(), true);
+    await page.locator("#users-search").fill("Иван");
+    await page.waitForTimeout(350);
+    assert.equal(await page.locator("[data-user-row]").count(), 0);
+    assert.ok(requestLog.some((item) => item.search === "Иван" && item.studyGroupId === "2"));
+    await page.locator("#users-search").fill("");
+    await page.waitForTimeout(350);
+    await page.locator("#users-group-filter").selectOption("");
+    await page.locator('input[data-user-id="3"]').waitFor();
+    await assertVisibleSelection([2, 3]);
+
     await page.setViewportSize({ width: 320, height: 640 });
     const narrowBar = await page.locator("#selection-bar").evaluate((bar) => {
       const rect = (element) => {
