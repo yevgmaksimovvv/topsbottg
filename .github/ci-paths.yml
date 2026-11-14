@@ -14,25 +14,30 @@ lint:
   - 'tests/**'
   - 'migrations/**'
   - 'scripts/**'
+  - '!**/*.md'
 python:
   - 'src/**'
   - 'tests/**/*.py'
   - 'scripts/**/*.py'
   - 'migrations/**'
+  - '!**/*.md'
 postgres:
   - 'src/**'
   - 'migrations/**'
   - 'tests/conftest.py'
   - 'tests/test_postgres*.py'
   - 'alembic.ini'
+  - '!**/*.md'
 browser:
   - 'frontend/**'
   - 'tests/browser/**'
+  - '!**/*.md'
 migrations:
   - 'migrations/**'
   - 'src/topsbottg/models.py'
   - 'alembic.ini'
   - 'tests/test_postgres_legacy_migrations.py'
+  - '!**/*.md'
 package:
   - 'src/**'
   - 'frontend/**'
@@ -43,6 +48,7 @@ package:
   - '.dockerignore'
   - 'docker-compose.yml'
   - 'alembic.ini'
+  - '!**/*.md'
 # Any file outside the explicitly classified areas forces a full CI run.
 # Markdown files (including README and docs/) are documentation-only.
 unclassified:
