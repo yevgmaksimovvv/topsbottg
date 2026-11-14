@@ -9,7 +9,7 @@ import { chromium } from "playwright";
 
 const repository = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const frontend = resolve(repository, "frontend");
-const evidence = resolve(tmpdir(), "topsbottg-browser-evidence");
+const evidence = process.env.BROWSER_EVIDENCE_DIR || resolve(tmpdir(), "topsbottg-browser-evidence");
 const mime = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -95,6 +95,7 @@ test("responsive Mini App and payout workflows", async (t) => {
     },
   ];
   const requestLog = [];
+  const unhandledApiRequests = [];
   const delayedRequests = new Map();
   const delayNextRequest = (path) => {
     let release;
@@ -181,6 +182,23 @@ test("responsive Mini App and payout workflows", async (t) => {
       const url = new URL(req.url());
       const path = url.pathname;
       const method = req.method();
+      const supported =
+        (method === "POST" && path === "/api/admin/events-token") ||
+        (method === "GET" && path === "/api/admin/events") ||
+        (method === "GET" && path === "/api/admin/users") ||
+        ((method === "GET" || method === "POST") && path === "/api/admin/payouts") ||
+        (method === "GET" && /^\\/api\\/admin\\/payouts\\/\\d+$/.test(path)) ||
+        (method === "GET" && /^\\/api\\/admin\\/payouts\\/\\d+\\/recipients$/.test(path)) ||
+        (method === "POST" && /^\\/api\\/admin\\/payouts\\/\\d+\\/send-selected$/.test(path)) ||
+        (method === "POST" && /^\\/api\\/admin\\/payouts\\/\\d+\\/recipients\\/\\d+\\/mark-paid$/.test(path));
+      if (!supported) {
+        unhandledApiRequests.push(`${method} ${path}`);
+        return route.fulfill({
+          status: 501,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "Unhandled mock API route" }),
+        });
+      }
       let conflict = false;
       requestLog.push({
         path,
@@ -1516,6 +1534,7 @@ test("responsive Mini App and payout workflows", async (t) => {
         }
       }
     }
+    assert.deepEqual(unhandledApiRequests, [], `Unexpected mocked API routes: ${unhandledApiRequests.join(', ')}`);
     assert.deepEqual(pageErrors, []);
     assert.equal(sendCalls, 3);
     assert.equal(markPaidCalls, 8);

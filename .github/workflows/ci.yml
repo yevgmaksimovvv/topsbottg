@@ -11,31 +11,15 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  checks:
-    concurrency:
-      group: ci-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
+  lint:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_DB: topsbottg
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d topsbottg"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-
+    timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -54,13 +38,78 @@ jobs:
       - name: Install project and development dependencies
         run: uv sync --locked --extra dev
 
-      - name: Run pytest
-        env:
-          POSTGRES_TEST_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/topsbottg
-        run: uv run --locked python -m pytest -q
-
       - name: Run Ruff
         run: uv run --locked ruff check .
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check JavaScript syntax
+        shell: bash
+        run: find frontend -type f \( -name '*.js' -o -name '*.mjs' \) -print0 | xargs -0 -n1 node --check
+
+      - name: Test payout message length helpers
+        run: node --test tests/js/*.test.mjs
+
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: topsbottg
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d topsbottg"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project and development dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Run pytest and collect branch coverage
+        env:
+          POSTGRES_TEST_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/topsbottg
+        run: uv run --locked --with pytest-cov==6.3.0 python -m pytest -q --cov=topsbottg --cov-branch --cov-report=term-missing --cov-report=xml:coverage.xml
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BROWSER_EVIDENCE_DIR: ${{ github.workspace }}/browser-evidence
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -73,15 +122,52 @@ jobs:
       - name: Install Chromium for Mini App browser checks
         run: npx playwright install --with-deps chromium
 
-      - name: Check JavaScript syntax
-        shell: bash
-        run: find frontend -type f \( -name '*.js' -o -name '*.mjs' \) -print0 | xargs -0 -n1 node --check
-
-      - name: Test payout message length helpers
-        run: node --test tests/js/*.test.mjs
-
       - name: Test Mini App workflows in Chromium
         run: npm run test:browser
+
+      - name: Upload browser screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-evidence
+          path: browser-evidence/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: topsbottg
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d topsbottg"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project and development dependencies
+        run: uv sync --locked --extra dev
 
       - name: Check JavaScript modules through Nginx
         shell: bash
@@ -109,9 +195,29 @@ jobs:
       - name: Build Docker image
         run: docker build --tag topsbottg:ci .
 
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [lint, python, browser, package]
+    steps:
+      - name: Require all CI suites to pass
+        env:
+          LINT: ${{ needs.lint.result }}
+          PYTHON: ${{ needs.python.result }}
+          BROWSER: ${{ needs.browser.result }}
+          PACKAGE: ${{ needs.package.result }}
+        run: |
+          for result in "$LINT" "$PYTHON" "$BROWSER" "$PACKAGE"; do
+            if [[ "$result" != "success" ]]; then
+              echo "One or more required CI suites failed or were skipped: lint=$LINT python=$PYTHON browser=$BROWSER package=$PACKAGE"
+              exit 1
+            fi
+          done
+
   deploy:
     name: Deploy production
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: checks
     runs-on: ubuntu-latest
     environment: production
