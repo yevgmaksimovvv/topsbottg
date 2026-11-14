@@ -37,6 +37,8 @@ from topsbottg.services import (
 )
 from topsbottg.worker import deliver_ready_notification, deliver_ready_notifications, process_recipient
 
+pytestmark = pytest.mark.postgres
+
 
 @pytest.mark.asyncio
 async def test_payout_send_lock_serializes_across_postgres_engines():
