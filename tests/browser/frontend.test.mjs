@@ -575,6 +575,37 @@ test("responsive Mini App and payout workflows", async (t) => {
     await page.locator('input[data-user-id="2"]').check();
     await page.locator('[data-mobile-view="payouts"]').click();
     await page.locator('.payout-row[data-payout-id="40"]').click();
+    await page.locator("#history-current-context .history-payout-actions").waitFor();
+    for (const width of [320, 359, 390, 768, 1024]) {
+      await page.setViewportSize({ width, height: 844 });
+      const bounds = await page.locator("#history-current-context").evaluate((context) => {
+        const rect = (selector) => {
+          const box = context.querySelector(selector).getBoundingClientRect();
+          return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, height: box.height };
+        };
+        return {
+          scrollWidth: document.documentElement.scrollWidth,
+          viewportWidth: innerWidth,
+          label: rect(":scope > span"),
+          actions: rect(".history-payout-actions"),
+          clear: rect('[data-action="clear-payout"]'),
+          remove: rect('[data-action="delete-payout"]'),
+        };
+      });
+      assert.ok(bounds.scrollWidth <= bounds.viewportWidth, `horizontal overflow in payout actions at ${width}px`);
+      assert.ok(bounds.clear.left >= bounds.actions.left - 1, `clear button outside its container at ${width}px`);
+      assert.ok(bounds.remove.right <= bounds.actions.right + 1, `delete button outside its container at ${width}px`);
+      assert.ok(bounds.clear.right <= bounds.remove.left + 1, `payout buttons overlap at ${width}px`);
+      assert.ok(Math.abs(bounds.clear.top - bounds.remove.top) <= 1, `payout buttons not aligned at ${width}px`);
+      assert.ok(Math.abs(bounds.clear.height - bounds.remove.height) <= 1, `payout buttons have different heights at ${width}px`);
+      assert.ok(bounds.clear.height >= 44, `payout button tap target too small at ${width}px`);
+      if (width < 760) {
+        assert.ok(bounds.actions.top >= bounds.label.bottom - 1, `payout actions overlap description at ${width}px`);
+      } else {
+        assert.ok(bounds.actions.left >= bounds.label.right - 1, `payout actions overlap description at ${width}px`);
+      }
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
     await page.locator('[data-mobile-view="users"]').click();
     assert.equal(await page.locator("#selected-count").innerText(), "0 получателей");
     await page.locator('input[data-user-id="2"]').check();
@@ -591,6 +622,26 @@ test("responsive Mini App and payout workflows", async (t) => {
       assert.equal(await page.locator("#selected-count").innerText(), `${expected.length} ${expected.length === 1 ? "получатель" : "получателя"}`);
     };
     await assertVisibleSelection([2, 3]);
+    await page.setViewportSize({ width: 320, height: 640 });
+    const narrowBar = await page.locator("#selection-bar").evaluate((bar) => {
+      const rect = (element) => {
+        const box = element.getBoundingClientRect();
+        return { left: box.left, right: box.right, top: box.top, bottom: box.bottom };
+      };
+      return {
+        container: rect(bar),
+        clear: rect(bar.querySelector('[data-action="clear-selection"]')),
+        send: rect(bar.querySelector('[data-action="send-payout"]')),
+        viewportWidth: innerWidth,
+        documentWidth: document.documentElement.scrollWidth,
+      };
+    });
+    assert.ok(narrowBar.documentWidth <= narrowBar.viewportWidth, "horizontal overflow in narrow selection bar");
+    for (const button of [narrowBar.clear, narrowBar.send]) {
+      assert.ok(button.left >= narrowBar.container.left - 1 && button.right <= narrowBar.container.right + 1, "selection action outside bar");
+      assert.ok(button.top >= narrowBar.container.top - 1 && button.bottom <= narrowBar.container.bottom + 1, "selection action vertically outside bar");
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
     await page.locator('[data-mobile-view="payouts"]').click();
     await page.locator('.payout-row[data-payout-id="39"]').click();
     await page.locator('[data-mobile-view="users"]').click();
