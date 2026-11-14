@@ -33,7 +33,19 @@ for (const width of [320, 390, 768]) {
           const first = document.querySelector('[data-action="clear-payout"]').getBoundingClientRect();
           const second = document.querySelector('[data-action="delete-payout"]').getBoundingClientRect();
           const box = document.querySelector("#history-current-context").getBoundingClientRect();
+          const textFit = (selector) => {
+            const button = document.querySelector(selector);
+            const range = document.createRange();
+            range.selectNodeContents(button);
+            const textRects = [...range.getClientRects()];
+            const style = getComputedStyle(button);
+            const availableWidth = button.clientWidth
+              - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+            return { lines: textRects.length, textWidth: textRects[0]?.width ?? 0, availableWidth };
+          };
           return {
+            clearText: textFit('[data-action="clear-payout"]'),
+            deleteText: textFit('[data-action="delete-payout"]'),
             docWidth: document.documentElement.scrollWidth,
             viewport: innerWidth,
             first: { left: first.left, right: first.right, top: first.top, width: first.width },
@@ -46,6 +58,11 @@ for (const width of [320, 390, 768]) {
         assert.ok(Math.abs(result.first.top - result.second.top) <= 1, `Buttons should share a row: ${JSON.stringify(result)}`);
         assert.ok(result.first.right + 3 <= result.second.left, `Overlapping buttons: ${JSON.stringify(result)}`);
         assert.ok(result.first.left >= result.box.left && result.second.right <= result.box.right, `Actions outside context: ${JSON.stringify(result)}`);
+        for (const button of [result.clearText, result.deleteText]) {
+          assert.equal(button.lines, 1, `Button label wrapped: ${JSON.stringify(result)}`);
+          assert.ok(button.textWidth <= button.availableWidth + 2,
+            `Button text does not fit: ${JSON.stringify(result)}`);
+        }
         await mkdir(evidence, { recursive: true });
         await page.screenshot({ path: resolve(evidence, `payout-actions-${width}-${theme}.png`) });
         await page.close();
