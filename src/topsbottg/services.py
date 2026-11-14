@@ -13,6 +13,8 @@ from datetime import UTC, datetime, timedelta
 from string import Formatter
 
 from sqlalchemy import event, exists, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session, selectinload
 
@@ -27,8 +29,10 @@ from topsbottg.models import (
     PayoutRecipient,
     PayoutStatus,
     RecipientStatus,
+    StudyGroup,
     User,
 )
+from topsbottg.study_groups import normalize_study_group_code
 
 logger = logging.getLogger(__name__)
 
@@ -451,7 +455,14 @@ async def get_or_create_user(session: AsyncSession, telegram_id: int, full_name:
     user = await session.scalar(select(User).where(User.telegram_id == telegram_id))
     if user:
         return user
-    user = User(telegram_id=telegram_id, full_name=full_name or "Без ФИО")
+    user = User(
+        telegram_id=telegram_id,
+        full_name=full_name or "Без ФИО",
+        # Explicitly provisioned named users are already registered; bot /start creates unnamed drafts.
+        registration_completed_at=datetime.now(UTC)
+        if full_name and full_name.strip() and full_name.strip() != "Без ФИО"
+        else None,
+    )
     session.add(user)
     await session.flush()
     return user
@@ -465,6 +476,37 @@ async def start_user(session: AsyncSession, telegram_id: int) -> tuple[User, boo
     session.add(user)
     await session.flush()
     return user, True
+
+
+async def set_user_study_group(
+    session: AsyncSession, user: User, raw_code: str, *, complete_registration: bool = False
+) -> StudyGroup:
+    """Assign a canonical study group, safely sharing one row across concurrent registrations."""
+    code = normalize_study_group_code(raw_code)
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        statement = pg_insert(StudyGroup).values(display_code=code, normalized_code=code)
+    elif dialect == "sqlite":
+        statement = sqlite_insert(StudyGroup).values(display_code=code, normalized_code=code)
+    else:
+        raise RuntimeError(f"Unsupported database dialect for study groups: {dialect}")
+    await session.execute(statement.on_conflict_do_nothing(index_elements=[StudyGroup.normalized_code]))
+    group = await session.scalar(select(StudyGroup).where(StudyGroup.normalized_code == code))
+    if group is None:
+        raise RuntimeError("Unable to resolve study group after insertion")
+
+    user.study_group_id = group.id
+    if complete_registration:
+        user.registration_completed_at = datetime.now(UTC)
+    await session.flush()
+    queue_admin_event(
+        session, ADMIN_EVENT_USERS_CHANGED, {"user_id": user.id, "telegram_user_id": user.telegram_id}
+    )
+    return group
+
+
+async def get_user_study_group(session: AsyncSession, user: User) -> StudyGroup | None:
+    return await session.get(StudyGroup, user.study_group_id) if user.study_group_id is not None else None
 
 
 async def get_payment_profile(session: AsyncSession, user_id: int) -> PaymentProfile | None:

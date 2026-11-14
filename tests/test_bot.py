@@ -175,6 +175,7 @@ async def test_main_keyboard_regular_user_has_no_admin_button():
     assert keyboard == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
+        ["Изменить группу"],
     ]
 
 
@@ -183,6 +184,7 @@ async def test_main_keyboard_admin_has_no_admin_button(settings):
     assert _keyboard_texts(keyboard) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
+        ["Изменить группу"],
     ]
     assert all(button.web_app is None for row in keyboard.keyboard for button in row)
 
@@ -202,6 +204,7 @@ async def test_start_for_registered_user_shows_main_keyboard(session_factory, se
     assert _keyboard_texts(method.reply_markup) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
+        ["Изменить группу"],
     ]
 
 
@@ -221,6 +224,7 @@ async def test_start_registered_admin_has_no_admin_button_in_reply_keyboard(sess
     assert _keyboard_texts(method.reply_markup) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
+        ["Изменить группу"],
     ]
     assert all(button.web_app is None for row in method.reply_markup.keyboard for button in row)
 
@@ -241,6 +245,7 @@ async def test_start_registered_non_admin_has_no_admin_button(session_factory, s
     assert _keyboard_texts(method.reply_markup) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
+        ["Изменить группу"],
     ]
     assert all(button.web_app is None for row in method.reply_markup.keyboard for button in row)
 
@@ -319,11 +324,99 @@ async def test_registration_full_name_asks_payment_decision_only_on_first_regist
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Иван Иванов", 2))
 
     method = _last_method(recording_session)
-    assert method.text == "ФИО сохранено. Хотите добавить платёжные данные сейчас?"
-    assert _keyboard_texts(method.reply_markup) == [["Да", "Заполнить позже"]]
+    assert method.text == "ФИО сохранено. Укажите учебную группу, например М3О-207СВ-25."
+    assert isinstance(method.reply_markup, ReplyKeyboardRemove)
     async with session_factory() as session:
         db_user = await get_or_create_user(session, 111)
         assert db_user.full_name == "Иван Иванов"
+        assert db_user.registration_completed_at is None
+
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "м3о - 207св - 25", 3))
+    method = _last_method(recording_session)
+    assert method.text == "Группа сохранена. Хотите добавить платёжные данные сейчас?"
+    assert _keyboard_texts(method.reply_markup) == [["Да", "Заполнить позже"]]
+    async with session_factory() as session:
+        db_user = await get_or_create_user(session, 111)
+        assert db_user.registration_completed_at is not None
+        assert db_user.study_group_id is not None
+
+
+@pytest.mark.asyncio
+async def test_group_is_required_and_invalid_input_does_not_finish_registration(session_factory, settings):
+    bot, recording_session = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "/start", 1))
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "Иван Иванов", 2))
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "Заполнить позже", 3))
+
+    method = _last_method(recording_session)
+    assert "Введите код учебной группы" in method.text
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 111)
+        assert user.registration_completed_at is None
+        assert user.study_group_id is None
+
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "М3О-207СВ-25", 4))
+    method = _last_method(recording_session)
+    assert method.text == "Группа сохранена. Хотите добавить платёжные данные сейчас?"
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 111)
+        assert user.registration_completed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_start_resumes_unfinished_group_registration_after_restart(session_factory, settings):
+    bot, recording_session = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "/start", 1))
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "Иван Иванов", 2))
+
+    # New dispatcher has no FSM state: registration progress lives in PostgreSQL/SQLite.
+    restarted = _make_dispatcher(session_factory, settings)
+    await restarted.feed_update(bot, _make_update(bot, 111, "/start", 3))
+    assert _last_method(recording_session).text == "Укажите учебную группу, например М3О-207СВ-25."
+    await restarted.feed_update(bot, _make_update(bot, 111, "М3О-207СВ-25", 4))
+    assert _last_method(recording_session).text.startswith("Группа сохранена.")
+    await restarted.feed_update(bot, _make_update(bot, 111, "Заполнить позже", 5))
+    await restarted.feed_update(bot, _make_update(bot, 111, "/start", 6))
+    assert _last_method(recording_session).text == "Вы уже зарегистрированы. Что хотите изменить?"
+
+
+@pytest.mark.asyncio
+async def test_existing_user_can_change_group_without_re_registration(session_factory, settings):
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 111, "Иван Иванов")
+        await upsert_payment_profile(session, user, "СБП +79990000000")
+        completed_at = user.registration_completed_at
+        await session.commit()
+
+    bot, recording_session = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "/start", 1))
+    assert _last_method(recording_session).text == "Вы уже зарегистрированы. Что хотите изменить?"
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "Изменить группу", 2))
+    assert _last_method(recording_session).text == "Введите новую учебную группу."
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "bad group", 3))
+    assert "Введите код учебной группы" in _last_method(recording_session).text
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "м3о - 207св - 25", 4))
+    assert _last_method(recording_session).text == "Учебная группа изменена: М3О-207СВ-25."
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "Мои данные", 5))
+    assert _last_method(recording_session).text == (
+        "ФИО: Иван Иванов\nУчебная группа: М3О-207СВ-25"
+        "\nПлатёжные данные:\nСБП +79990000000"
+    )
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 111)
+        assert user.study_group_id is not None
+        assert user.registration_completed_at is not None
+        assert user.registration_completed_at.replace(tzinfo=None) == completed_at.replace(tzinfo=None)
+        profile = await get_payment_profile(session, user.id)
+        assert profile.raw_payment_details == "СБП +79990000000"
+
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "Изменить группу", 6))
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "/start", 7))
+    assert _last_method(recording_session).text == "Вы уже зарегистрированы. Что хотите изменить?"
 
 
 @pytest.mark.asyncio
@@ -345,6 +438,7 @@ async def test_payment_later_returns_main_keyboard(session_factory, settings):
 
     await dispatcher.feed_update(bot, _make_update(bot, 111, "/start", 1))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Иван Иванов", 2))
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "М3О-207СВ-25", 71))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Заполнить позже", 3))
 
     method = _last_method(recording_session)
@@ -352,6 +446,7 @@ async def test_payment_later_returns_main_keyboard(session_factory, settings):
     assert _keyboard_texts(method.reply_markup) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
+        ["Изменить группу"],
     ]
 
     async with session_factory() as session:
@@ -385,6 +480,7 @@ async def test_payment_details_saved_returns_main_keyboard(
 
     await dispatcher.feed_update(bot, _make_update(bot, 111, "/start", 1))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Иван Иванов", 2))
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "М3О-207СВ-25", 71))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Да", 3))
 
     method = _last_message_method(recording_session)
@@ -401,6 +497,7 @@ async def test_payment_details_saved_returns_main_keyboard(
     assert _keyboard_texts(method.reply_markup) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
+        ["Изменить группу"],
     ]
 
     async with session_factory() as session:
@@ -597,6 +694,7 @@ async def test_empty_payment_details_rejected(session_factory, settings):
 
     await dispatcher.feed_update(bot, _make_update(bot, 111, "/start", 1))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Иван Иванов", 2))
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "М3О-207СВ-25", 71))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "что-то не то", 3))
 
     method = _last_method(recording_session)
@@ -629,6 +727,7 @@ async def test_change_full_name_does_not_ask_payment_decision(session_factory, s
 
     await dispatcher.feed_update(bot, _make_update(bot, 111, "/start", 1))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Иван Иванов", 2))
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "М3О-207СВ-25", 71))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Заполнить позже", 3))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Изменить платёжные данные", 4))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Сбер\n+7 999 123 45 67\nИван", 5))
@@ -649,6 +748,7 @@ async def test_change_full_name_does_not_ask_payment_decision(session_factory, s
     assert _keyboard_texts(method.reply_markup) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
+        ["Изменить группу"],
     ]
 
     async with session_factory() as session:
@@ -671,6 +771,7 @@ async def test_change_full_name_keeps_main_keyboard(session_factory, settings):
 
     await dispatcher.feed_update(bot, _make_update(bot, 111, "/start", 1))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Иван Иванов", 2))
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "М3О-207СВ-25", 71))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Заполнить позже", 3))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Изменить ФИО", 4))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Иван Петров", 5))
@@ -680,6 +781,7 @@ async def test_change_full_name_keeps_main_keyboard(session_factory, settings):
     assert _keyboard_texts(method.reply_markup) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
+        ["Изменить группу"],
     ]
 
 
@@ -709,6 +811,7 @@ async def test_payment_details_saved_admin_keeps_admin_button(session_factory, s
     assert _keyboard_texts(method.reply_markup) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
+        ["Изменить группу"],
     ]
     assert all(button.web_app is None for row in method.reply_markup.keyboard for button in row)
 
@@ -731,6 +834,7 @@ async def test_change_full_name_admin_keeps_admin_button(session_factory, settin
     assert _keyboard_texts(method.reply_markup) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
+        ["Изменить группу"],
     ]
     assert all(button.web_app is None for row in method.reply_markup.keyboard for button in row)
 
@@ -746,6 +850,7 @@ async def test_change_payment_details_same_telegram_user(session_factory, settin
 
     await dispatcher.feed_update(bot, _make_update(bot, 111, "/start", 1))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Иван Иванов", 2))
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "М3О-207СВ-25", 71))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Заполнить позже", 3))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Изменить платёжные данные", 4))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Петр Петров\n+79990000001\nSber", 5))
@@ -798,10 +903,14 @@ async def test_my_data_shows_raw_payment_details(session_factory, settings):
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Мои данные", 6))
 
     method = _last_method(recording_session)
-    assert method.text == "ФИО: Иван Иванов\nПлатёжные данные:\nИван Иванов\n+79990000000\nT-Bank"
+    assert method.text == (
+        "ФИО: Иван Иванов\nУчебная группа: не указана\n"
+        "Платёжные данные:\nИван Иванов\n+79990000000\nT-Bank"
+    )
     assert _keyboard_texts(method.reply_markup) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
+        ["Изменить группу"],
     ]
 
 
@@ -817,10 +926,11 @@ async def test_my_data_without_payment_details(session_factory, settings):
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Мои данные", 7))
 
     method = _last_method(recording_session)
-    assert method.text == "ФИО: Иван Иванов\nПлатёжные данные: не заполнены"
+    assert method.text == "ФИО: Иван Иванов\nУчебная группа: не указана\nПлатёжные данные: не заполнены"
     assert _keyboard_texts(method.reply_markup) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
+        ["Изменить группу"],
     ]
 
 
@@ -835,6 +945,7 @@ async def test_legacy_payment_details_button_still_starts_flow(session_factory, 
 
     await dispatcher.feed_update(bot, _make_update(bot, 111, "/start", 1))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Иван Иванов", 2))
+    await dispatcher.feed_update(bot, _make_update(bot, 111, "М3О-207СВ-25", 71))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Заполнить позже", 3))
     await dispatcher.feed_update(bot, _make_update(bot, 111, "Платёжные данные", 4))
 
@@ -869,6 +980,7 @@ async def test_main_keyboard_ignores_admin_flag_when_mini_app_url_missing():
     assert _keyboard_texts(keyboard) == [
         ["Мои данные", "Изменить ФИО"],
         ["Изменить платёжные данные"],
+        ["Изменить группу"],
     ]
 
 

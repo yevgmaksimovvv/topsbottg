@@ -12,6 +12,8 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -56,6 +58,10 @@ async def test_postgres_legacy_payout_survives_upgrade_to_head():
                 VALUES (1, 987654321, 'Existing user', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """))
             await connection.execute(text("""
+                INSERT INTO users (id, telegram_id, full_name, created_at, updated_at)
+                VALUES (2, 987654322, 'Без ФИО', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """))
+            await connection.execute(text("""
                 INSERT INTO payouts (
                     id, message_template, status, created_by_telegram_id,
                     period_start_day, period_start_month,
@@ -87,6 +93,17 @@ async def test_postgres_legacy_payout_survives_upgrade_to_head():
             assert user.telegram_id == 987654321
             assert user.full_name == "Existing user"
 
+            registered = (await connection.execute(text(
+                "SELECT study_group_id, registration_completed_at FROM users WHERE id = 1"
+            ))).one()
+            assert registered.study_group_id is None
+            assert registered.registration_completed_at is not None
+            draft = (await connection.execute(text(
+                "SELECT study_group_id, registration_completed_at FROM users WHERE id = 2"
+            ))).one()
+            assert draft.study_group_id is None
+            assert draft.registration_completed_at is None
+
             payout = (await connection.execute(text("""
                 SELECT message_template, message_before_period,
                        message_after_period, status
@@ -110,7 +127,8 @@ async def test_postgres_legacy_payout_survives_upgrade_to_head():
             revision = (await connection.execute(text(
                 "SELECT version_num FROM alembic_version"
             ))).scalar_one()
-            assert revision.startswith("0010_")
+            migration_head = ScriptDirectory.from_config(Config(str(repository / "alembic.ini"))).get_current_head()
+            assert revision == migration_head
     finally:
         if db_engine is not None:
             await db_engine.dispose()
