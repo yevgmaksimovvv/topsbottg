@@ -42,7 +42,7 @@ for (const width of [320, 390, 768]) {
             const availableWidth = button.clientWidth
               - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
             const node = button.firstChild;
-            const wordSegments = [...node.textContent.matchAll(/\\S+/gu)];
+            const wordSegments = [...node.textContent.matchAll(/\S+/gu)];
             const brokenWords = wordSegments.filter((match) => {
               const word = document.createRange();
               word.setStart(node, match.index);
