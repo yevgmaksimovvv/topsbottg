@@ -1,87 +1,75 @@
-# CI и релизы
+# Проверки и выкладка
 
-## Selective CI
+CI запускается при каждом обновлении PR и при коммитах в `main`. Но все тесты подряд нужны далеко не всегда. Если поправить README, нет смысла поднимать PostgreSQL, скачивать Chromium и собирать Docker-образ.
 
-Pull Request и push в `main` всегда запускают workflow `CI`, но тяжёлые jobs
-выполняются **только для затронутых компонентов**. Файлы и зависимости
-описаны в [`.github/ci-paths.yml`](../.github/ci-paths.yml). Изменения
-определяет `dorny/paths-filter@v4`.
+Какие проверки нужны, GitHub определяет по изменённым файлам. Правила лежат в [`.github/ci-paths.yml`](../.github/ci-paths.yml).
 
-| Изменение | Запускаются |
+## Что запускается
+
+| Что изменилось | Какие проверки нужны |
 | --- | --- |
-| Только `README.md` или `docs/**` | `changes` и `checks` |
-| `frontend/**` | `lint`, `browser`, `package` |
-| `src/**` (кроме доп. зависимостей) | `lint`, `python`, `postgres`, `package` |
-| `src/topsbottg/models.py` | как backend + `migrations` |
-| `migrations/**` | `lint`, `python`, `postgres`, `migrations`, `package` |
-| `tests/browser/**` | `lint`, `browser` |
-| `tests/js/**` | `lint` |
-| `nginx/**` или `Dockerfile` | `package` |
-| `.github/**`, `uv.lock`, `pyproject.toml`, `package*.json`, `AGENTS.md` | **Все jobs** |
-| Любой неизвестный путь | **Все jobs** (fail-safe) |
-| Ручной `workflow_dispatch` перед production | **Все jobs**, независимо от diff |
+| Только Markdown или файлы в `docs/` | Только определение изменений и итоговая проверка |
+| `frontend/` | Проверка кода, браузерные тесты, Docker и Nginx |
+| `src/` | Проверка кода, Python, PostgreSQL, Docker и Nginx |
+| `src/topsbottg/models.py` | То же самое, плюс миграции |
+| `migrations/` | Python, PostgreSQL, миграции, Docker и Nginx |
+| `tests/browser/` | Проверка кода и браузерные тесты |
+| `tests/js/` | Проверка кода и JS-тесты |
+| `nginx/`, `Dockerfile` | Docker и Nginx |
+| Настройки GitHub Actions, зависимости или незнакомый файл | Все проверки |
 
-При смешанных изменениях запускается объединение необходимых jobs.
-Backend-код запускает PostgreSQL integration даже без правки схемы:
-транзакционные инварианты могут зависеть от сервисной логики.
-`package` **не** поднимает PostgreSQL: проверки миграций выделены в `migrations`.
+При изменении нескольких частей проекта запускаются все проверки, необходимые для каждой из них. Например, изменение Python-сервисов запускает тесты PostgreSQL, даже если таблицы не менялись: ошибки транзакций могут появиться и в бизнес-логике.
 
-### Состав проверок
+Сами проверки разделены на отдельные задачи:
+- `lint` — Ruff, синтаксис JavaScript и небольшие JS-тесты;
+- `python` — Python-тесты и отчёт о покрытии;
+- `postgres` — интеграционные и конкурентные тесты на PostgreSQL 16;
+- `browser` — Chromium, интерфейс Mini App и адаптивность;
+- `migrations` — применение всех миграций на чистой PostgreSQL;
+- `package` — проверка Nginx и сборка Docker-образа.
 
-- `changes` — определяет затронутые компоненты; ошибка определения блокирует PR;
-- `lint` — Ruff, синтаксис JavaScript, JS unit-тесты;
-- `python` — pytest без PostgreSQL-only, branch coverage с артефактом XML;
-- `postgres` — PostgreSQL 16: реальная API-проверка, блокировки и конкурентность;
-- `browser` — Chromium: Mini App, адаптивность и независимые smoke-тесты;
-- `migrations` — чистое `alembic upgrade head` на PostgreSQL 16;
-- `package` — Nginx MIME и сборка Docker без PostgreSQL;
-- `checks` — **постоянный статус для branch protection**.
+У `package` нет PostgreSQL. Он используется только в задачах `postgres` и `migrations`.
 
-`checks` пропускает лишь те jobs, которые не нужны согласно `changes`.
-Если нужный job пропущен, упал, отменён или список изменений не определён,
-`checks` завершается ошибкой. Недостаточно просто проверить, что
-«всё зелёное»: GitHub сам считает skipped job успешным для branch protection.
-Эта логика проверяется в `tests/js/ci-selective.test.mjs`.
+## Как понять, что PR можно сливать
 
-В GitHub Settings для `main` нужно сделать `checks` обязательным
-Required Status Check и настроить защиту production environment.
-Это изменение настроек репозитория выполняется отдельно, не кодом PR.
+GitHub всегда запускает две короткие задачи:
 
-## Деплой
+1. `Detect affected components` определяет, что нужно проверить.
+2. `checks` проверяет результаты и решает, можно ли считать CI успешным.
 
-Push/merge в `main` выполняет selective CI, **но не деплой**.
-Production deployment доступен только после ручного
-**Actions → CI → Run workflow** на `main`. При ручном запуске `changes`
-принудительно выбирает **все** проверки; после успешного `checks` может
-выполниться `Deploy production` с защитой GitHub environment.
-Без явного разрешения на deploy этот workflow не запускать.
+Если задача не имеет отношения к изменению, её статус будет `Skipped`. Это нормально. Но если нужный тест не запустился, упал или был отменён, `checks` завершится ошибкой. Ошибка определения изменённых файлов тоже блокирует PR.
 
-## Запуск локально
+Отдельные тесты этой логики находятся в `tests/js/ci-paths.test.mjs` и `tests/js/ci-selective.test.mjs`.
+
+**Важно:** в настройках GitHub для `main` нужно сделать `checks` обязательной проверкой (Settings → Branches или Rulesets). Код workflow сам по себе не запрещает слияние при красном CI.
+
+## Как выкладывать изменения
+
+**Слияние PR в `main` больше не выкладывает приложение на сервер.**
+
+Для выкладки нужно вручную запустить **Actions → CI → Run workflow**, выбрав `main`. Такой запуск всегда выполняет все тесты, даже если изменений в отдельных компонентах не было. Только после успешного CI запускается задача `Deploy production`.
+
+Чтобы случайно не запустить выкладку, доступ к production environment следует ограничить в настройках GitHub.
+
+## Как запустить тесты самому
 
 ```sh
 uv sync --locked --extra dev
 uv run --locked python -m pytest -q -m "not postgres"
 uv run --locked ruff check .
+
 npm ci
 node --test tests/js/*.test.mjs
 npx playwright install chromium
 npm run test:browser
 ```
 
-PostgreSQL integration-тесты имеют маркер `postgres` и требуют
-`POSTGRES_TEST_URL`. `tests/test_admin_authorization_matrix.py` проверяет
-авторизацию каждого admin endpoint. `tests/test_postgres_legacy_migrations.py`
-проверяет миграцию исторических записей на PostgreSQL до `head`.
+Для PostgreSQL-тестов нужна доступная база и переменная `POSTGRES_TEST_URL`. В GitHub Actions она уже настроена.
 
-## Ограничения
+## Что пока не покрыто
 
-Старый `tests/browser/frontend.test.mjs` остаётся большим тестом с общим
-состоянием. `layout-guard.test.mjs` и `navigation-smoke.test.mjs`
-запускаются независимо. Browser screenshots и геометрические проверки
-не являются пиксельными golden snapshots. Метрика branch coverage собирается
-без искусственного порога.
+Большой браузерный тест `tests/browser/frontend.test.mjs` всё ещё выполняет несколько сценариев последовательно. Независимые проверки навигации и вёрстки находятся в отдельных файлах.
 
-Пока этот PR изменяет сами workflow-файлы, его `full`-фильтр запускает
-все jobs. Проверки selective policy для чистых документационных/frontend/backend
-диффов покрыты unit-тестами агрегатора; полноценный GitHub PR-only прогон с
-такими diff следует дополнительно проверить после merge, не обходя защиту `main`.
+CI сохраняет скриншоты, но пока не сравнивает их с эталонными изображениями. Отчёт о покрытии Python создаётся без обязательного процента.
+
+Пока меняется сама конфигурация CI, все проверки выполняются полностью. Выборочный запуск для отдельных изменений проверяется тестами правил; проверить реальные PR только с документацией или frontend можно будет после слияния этой конфигурации.

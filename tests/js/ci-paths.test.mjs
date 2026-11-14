@@ -29,11 +29,20 @@ const filters = readFilters(source);
 const suites = ["lint", "python", "postgres", "browser", "migrations", "package"];
 assert.deepEqual(Object.keys(filters), ["full", ...suites, "unclassified"]);
 
+// GitHub's paths-filter matches hidden files too; Node's matchesGlob does not.
+// Mask leading dots in both the path and glob so the test uses the same policy.
+function matchWithHiddenFiles(file, glob) {
+  const normalize = (value) => value.split("/").map((segment) =>
+    segment.startsWith(".") ? `__dot__${segment.slice(1)}` : segment
+  ).join("/");
+  return path.matchesGlob(normalize(file), normalize(glob));
+}
+
 function matches(file, rules) {
   const included = rules.filter((rule) => !rule.startsWith("!"));
   const excluded = rules.filter((rule) => rule.startsWith("!")).map((rule) => rule.slice(1));
-  return included.some((glob) => path.matchesGlob(file, glob)) &&
-    !excluded.some((glob) => path.matchesGlob(file, glob));
+  return included.some((glob) => matchWithHiddenFiles(file, glob)) &&
+    !excluded.some((glob) => matchWithHiddenFiles(file, glob));
 }
 
 function jobsFor(files) {
