@@ -54,6 +54,41 @@ jobs:
         run: node --test tests/js/*.test.mjs
 
   python:
+    name: Python tests and branch coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project and development dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Run pytest without PostgreSQL-only cases
+        run: uv run --locked --with pytest-cov==6.3.0 python -m pytest -q -m "not postgres" --cov=topsbottg --cov-branch --cov-report=term-missing --cov-report=xml:coverage.xml
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  postgres:
+    name: PostgreSQL integration
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -88,19 +123,10 @@ jobs:
       - name: Install project and development dependencies
         run: uv sync --locked --extra dev
 
-      - name: Run pytest and collect branch coverage
+      - name: Exercise concurrent workers and real API on PostgreSQL 16
         env:
           POSTGRES_TEST_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/topsbottg
-        run: uv run --locked --with pytest-cov==6.3.0 python -m pytest -q --cov=topsbottg --cov-branch --cov-report=term-missing --cov-report=xml:coverage.xml
-
-      - name: Upload coverage report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-coverage
-          path: coverage.xml
-          if-no-files-found: ignore
-          retention-days: 7
+        run: uv run --locked python -m pytest -q -m postgres
 
   browser:
     runs-on: ubuntu-latest
@@ -199,18 +225,19 @@ jobs:
     name: checks
     runs-on: ubuntu-latest
     if: always()
-    needs: [lint, python, browser, package]
+    needs: [lint, python, postgres, browser, package]
     steps:
       - name: Require all CI suites to pass
         env:
           LINT: ${{ needs.lint.result }}
           PYTHON: ${{ needs.python.result }}
+          POSTGRES: ${{ needs.postgres.result }}
           BROWSER: ${{ needs.browser.result }}
           PACKAGE: ${{ needs.package.result }}
         run: |
-          for result in "$LINT" "$PYTHON" "$BROWSER" "$PACKAGE"; do
+          for result in "$LINT" "$PYTHON" "$POSTGRES" "$BROWSER" "$PACKAGE"; do
             if [[ "$result" != "success" ]]; then
-              echo "One or more required CI suites failed or were skipped: lint=$LINT python=$PYTHON browser=$BROWSER package=$PACKAGE"
+              echo "One or more required CI suites failed or were skipped: lint=$LINT python=$PYTHON postgres=$POSTGRES browser=$BROWSER package=$PACKAGE"
               exit 1
             fi
           done
