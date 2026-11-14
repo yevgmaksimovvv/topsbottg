@@ -27,7 +27,9 @@ from topsbottg.services import (
     get_latest_active_recipient,
     get_or_create_user,
     get_payment_profile,
+    get_user_study_group,
     save_profile_and_snapshot,
+    set_user_study_group,
     start_user,
     upsert_full_name,
 )
@@ -37,7 +39,9 @@ logger = logging.getLogger(__name__)
 
 class RegistrationFSM(StatesGroup):
     registration_full_name = State()
+    registration_study_group = State()
     change_full_name = State()
+    change_study_group = State()
     payment_decision = State()
     payment_details = State()
 
@@ -46,6 +50,8 @@ YES_BUTTON_TEXT = "Да"
 PAYMENT_LATER_BUTTON_TEXT = "Заполнить позже"
 MY_DATA_BUTTON_TEXT = "Мои данные"
 CHANGE_NAME_BUTTON_TEXT = "Изменить ФИО"
+CHANGE_GROUP_BUTTON_TEXT = "Изменить группу"
+GROUP_PROMPT = "Укажите учебную группу, например М3О-207СВ-25."
 PAYMENT_DETAILS_BUTTON_TEXT = "Платёжные данные"
 PAYMENT_DETAILS_BUTTON_TEXT_ALT = "Платежные данные"
 CHANGE_PAYMENT_DETAILS_BUTTON_TEXT = "Изменить платёжные данные"
@@ -64,6 +70,7 @@ def main_keyboard(*, is_admin: bool = False, mini_app_url: str | None = None) ->
     keyboard = [
         [KeyboardButton(text=MY_DATA_BUTTON_TEXT), KeyboardButton(text=CHANGE_NAME_BUTTON_TEXT)],
         [KeyboardButton(text=CHANGE_PAYMENT_DETAILS_BUTTON_TEXT)],
+        [KeyboardButton(text=CHANGE_GROUP_BUTTON_TEXT)],
     ]
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -316,7 +323,8 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
             is_admin=_is_admin(_settings, message.from_user.id),
         )
         async with session_factory() as session:
-            _user, needs_name = await start_user(session, message.from_user.id)
+            user, needs_name = await start_user(session, message.from_user.id)
+            needs_group = not needs_name and user.registration_completed_at is None
             await session.commit()
         await state.clear()
         if needs_name:
@@ -329,6 +337,12 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
                 telegram_user_id=message.from_user.id,
             )
             await _safe_message_answer(message, message.from_user.id, "Здравствуйте. Для регистрации укажите ФИО.")
+            return
+        if needs_group:
+            await state.set_state(RegistrationFSM.registration_study_group)
+            await _safe_message_answer(
+                message, message.from_user.id, GROUP_PROMPT, reply_markup=ReplyKeyboardRemove()
+            )
             return
         main_markup = _main_keyboard_for(message, _settings)
         await _safe_message_answer(
@@ -375,12 +389,33 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
             active_recipient = await get_latest_active_recipient(session, user.id)
             await session.commit()
         await state.clear()
+        await state.set_state(RegistrationFSM.registration_study_group)
+        await state.update_data(active_recipient_id=active_recipient.id if active_recipient is not None else None)
+        await _safe_message_answer(
+            message, message.from_user.id, f"ФИО сохранено. {GROUP_PROMPT}", reply_markup=ReplyKeyboardRemove()
+        )
+
+    @router.message(RegistrationFSM.registration_study_group)
+    async def save_registration_group(message: Message, state: FSMContext):
+        async with session_factory() as session:
+            user = await get_or_create_user(session, message.from_user.id)
+            if user.full_name == "Без ФИО":
+                await state.set_state(RegistrationFSM.registration_full_name)
+                await _safe_message_answer(message, message.from_user.id, "Для регистрации укажите ФИО.")
+                return
+            try:
+                await set_user_study_group(session, user, message.text or "", complete_registration=True)
+            except ValueError as exc:
+                await _safe_message_answer(message, message.from_user.id, str(exc))
+                return
+            active_recipient = await get_latest_active_recipient(session, user.id)
+            await session.commit()
         await state.set_state(RegistrationFSM.payment_decision)
         await state.update_data(active_recipient_id=active_recipient.id if active_recipient is not None else None)
         await _safe_message_answer(
             message,
             message.from_user.id,
-            "ФИО сохранено. Хотите добавить платёжные данные сейчас?",
+            "Группа сохранена. Хотите добавить платёжные данные сейчас?",
             reply_markup=payment_decision_keyboard(),
         )
 
@@ -398,6 +433,24 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
             message,
             message.from_user.id,
             "ФИО обновлено.",
+            reply_markup=_main_keyboard_for(message, _settings),
+        )
+
+    @router.message(RegistrationFSM.change_study_group)
+    async def save_changed_group(message: Message, state: FSMContext):
+        async with session_factory() as session:
+            user = await get_or_create_user(session, message.from_user.id)
+            try:
+                group = await set_user_study_group(session, user, message.text or "")
+            except ValueError as exc:
+                await _safe_message_answer(message, message.from_user.id, str(exc))
+                return
+            await session.commit()
+        await state.clear()
+        await _safe_message_answer(
+            message,
+            message.from_user.id,
+            f"Учебная группа изменена: {group.display_code}.",
             reply_markup=_main_keyboard_for(message, _settings),
         )
 
@@ -437,10 +490,12 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
         async with session_factory() as session:
             user = await get_or_create_user(session, message.from_user.id)
             profile = await get_payment_profile(session, user.id)
+            group = await get_user_study_group(session, user)
+            summary = f"ФИО: {user.full_name}\nУчебная группа: {group.display_code if group else 'не указана'}"
             text = (
-                f"ФИО: {user.full_name}\nПлатёжные данные: не заполнены"
+                f"{summary}\nПлатёжные данные: не заполнены"
                 if profile is None
-                else f"ФИО: {user.full_name}\nПлатёжные данные:\n{profile.raw_payment_details}"
+                else f"{summary}\nПлатёжные данные:\n{profile.raw_payment_details}"
             )
         await _safe_message_answer(
             message,
@@ -454,6 +509,29 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
         await state.clear()
         await state.set_state(RegistrationFSM.change_full_name)
         await _safe_message_answer(message, message.from_user.id, "Введите новое ФИО.")
+
+    @router.message(F.text == CHANGE_GROUP_BUTTON_TEXT)
+    async def change_group(message: Message, state: FSMContext):
+        async with session_factory() as session:
+            user, needs_name = await start_user(session, message.from_user.id)
+            registered = user.registration_completed_at is not None
+            await session.commit()
+        if not registered:
+            await state.clear()
+            await state.set_state(
+                RegistrationFSM.registration_full_name if needs_name else RegistrationFSM.registration_study_group
+            )
+            await _safe_message_answer(
+                message, message.from_user.id,
+                "Для регистрации укажите ФИО." if needs_name else GROUP_PROMPT,
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            return
+        await state.clear()
+        await state.set_state(RegistrationFSM.change_study_group)
+        await _safe_message_answer(
+            message, message.from_user.id, "Введите новую учебную группу.", reply_markup=ReplyKeyboardRemove()
+        )
 
     @router.message(F.text.in_([PAYMENT_DETAILS_BUTTON_TEXT, PAYMENT_DETAILS_BUTTON_TEXT_ALT]))
     async def payment_start(message: Message, state: FSMContext):

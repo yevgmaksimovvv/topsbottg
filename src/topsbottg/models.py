@@ -52,13 +52,29 @@ class PayoutStatus(StrEnum):
     cancelled = "cancelled"
 
 
+class StudyGroup(Base, TimestampMixin):
+    __tablename__ = "study_groups"
+    __table_args__ = (UniqueConstraint("normalized_code", name="uq_study_groups_normalized_code"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    display_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    normalized_code: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    users: Mapped[list[User]] = relationship(back_populates="study_group")
+
+
 class User(Base, TimestampMixin):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
     full_name: Mapped[str] = mapped_column(Text, nullable=False)
+    study_group_id: Mapped[int | None] = mapped_column(
+        ForeignKey("study_groups.id", ondelete="SET NULL"), nullable=True
+    )
+    registration_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    study_group: Mapped[StudyGroup | None] = relationship(back_populates="users")
     payment_profile: Mapped[PaymentProfile | None] = relationship(back_populates="user")
     payout_recipients: Mapped[list[PayoutRecipient]] = relationship(back_populates="user")
 
@@ -164,6 +180,7 @@ class AuditLog(Base, TimestampMixin):
 
 
 Index("ix_users_full_name_lower", func.lower(User.full_name))
+Index("ix_users_study_group_id", User.study_group_id)
 Index("ix_payout_recipients_payout_status", PayoutRecipient.payout_id, PayoutRecipient.status)
 Index("ix_payout_recipients_user_status", PayoutRecipient.user_id, PayoutRecipient.status)
 Index("ix_payouts_deleted_id", Payout.deleted_at, Payout.id)
