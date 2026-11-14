@@ -187,10 +187,10 @@ test("responsive Mini App and payout workflows", async (t) => {
         (method === "GET" && path === "/api/admin/events") ||
         (method === "GET" && path === "/api/admin/users") ||
         ((method === "GET" || method === "POST") && path === "/api/admin/payouts") ||
-        (method === "GET" && /^\\/api\\/admin\\/payouts\\/\\d+$/.test(path)) ||
-        (method === "GET" && /^\\/api\\/admin\\/payouts\\/\\d+\\/recipients$/.test(path)) ||
-        (method === "POST" && /^\\/api\\/admin\\/payouts\\/\\d+\\/send-selected$/.test(path)) ||
-        (method === "POST" && /^\\/api\\/admin\\/payouts\\/\\d+\\/recipients\\/\\d+\\/mark-paid$/.test(path));
+        (method === "GET" && new RegExp("^/api/admin/payouts/[0-9]+$").test(path)) ||
+        (method === "GET" && new RegExp("^/api/admin/payouts/[0-9]+/recipients$").test(path)) ||
+        (method === "POST" && new RegExp("^/api/admin/payouts/[0-9]+/send-selected$").test(path)) ||
+        (method === "POST" && new RegExp("^/api/admin/payouts/[0-9]+/recipients/[0-9]+/mark-paid$").test(path));
       if (!supported) {
         unhandledApiRequests.push(`${method} ${path}`);
         return route.fulfill({
