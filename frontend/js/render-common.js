@@ -38,7 +38,7 @@ export function renderCurrentPayout() {
   const label = p ? `\u0422\u0435\u043a\u0443\u0449\u0430\u044f: #${state.selectedPayoutId} \u00b7 ${payoutPeriodLabel(p)} \u00b7 ${nameFor(PAYOUT_WORKFLOW_LABELS, p.workflow_state)} \u00b7 ${payoutProgress(p)}` : "";
   const history = $("history-current-context");
   if (history) history.innerHTML = p
-    ? `<span>${escapeHtml(label)}</span><button type="button" class="button button-quiet" data-action="clear-payout">Снять выбор</button><button type="button" class="button button-quiet" data-action="delete-payout" ${p.status === "sending" ? 'disabled title="Дождитесь завершения рассылки"' : ""}>Удалить выплату</button>`
+    ? `<span>${escapeHtml(label)}</span><div class="history-payout-actions"><button type="button" class="button button-quiet" data-action="clear-payout">Снять выбор</button><button type="button" class="button button-quiet" data-action="delete-payout" ${p.status === "sending" ? 'disabled title="Дождитесь завершения рассылки"' : ""}>Удалить выплату</button></div>`
     : "";
   for (const id of ["selection-payout-context", "recipients-context"]) {
     const el = $(id);
