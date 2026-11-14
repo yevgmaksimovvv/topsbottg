@@ -11,31 +11,45 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  checks:
-    concurrency:
-      group: ci-${{ github.event.pull_request.number || github.ref }}
-      cancel-in-progress: true
+  changes:
+    name: Detect affected components
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_DB: topsbottg
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d topsbottg"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      lint: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.full == 'true' || steps.filter.outputs.unclassified == 'true' || steps.filter.outputs.lint == 'true' }}
+      python: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.full == 'true' || steps.filter.outputs.unclassified == 'true' || steps.filter.outputs.python == 'true' }}
+      postgres: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.full == 'true' || steps.filter.outputs.unclassified == 'true' || steps.filter.outputs.postgres == 'true' }}
+      browser: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.full == 'true' || steps.filter.outputs.unclassified == 'true' || steps.filter.outputs.browser == 'true' }}
+      migrations: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.full == 'true' || steps.filter.outputs.unclassified == 'true' || steps.filter.outputs.migrations == 'true' }}
+      package: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.full == 'true' || steps.filter.outputs.unclassified == 'true' || steps.filter.outputs.package == 'true' }}
+    steps:
+      - name: Check out repository for push diff
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/checkout@v4
+      - name: Determine changed components
+        if: github.event_name != 'workflow_dispatch'
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          predicate-quantifier: some-with-excludes
+          filters: .github/ci-paths.yml
+      - name: Manual release requires all checks
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "Running full CI for manually requested production release."
 
+  lint:
+    needs: changes
+    if: needs.changes.outputs.lint == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -54,13 +68,110 @@ jobs:
       - name: Install project and development dependencies
         run: uv sync --locked --extra dev
 
-      - name: Run pytest
-        env:
-          POSTGRES_TEST_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/topsbottg
-        run: uv run --locked python -m pytest -q
-
       - name: Run Ruff
         run: uv run --locked ruff check .
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check JavaScript syntax
+        shell: bash
+        run: find frontend -type f \( -name '*.js' -o -name '*.mjs' \) -print0 | xargs -0 -n1 node --check
+
+      - name: Test payout message length helpers
+        run: node --test tests/js/*.test.mjs
+
+  python:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    name: Python tests and branch coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project and development dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Run pytest without PostgreSQL-only cases
+        run: uv run --locked --with pytest-cov==6.3.0 python -m pytest -q -m "not postgres" --cov=topsbottg --cov-branch --cov-report=term-missing --cov-report=xml:coverage.xml
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  postgres:
+    needs: changes
+    if: needs.changes.outputs.postgres == 'true'
+    name: PostgreSQL integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: topsbottg
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d topsbottg"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project and development dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Exercise concurrent workers and real API on PostgreSQL 16
+        env:
+          POSTGRES_TEST_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/topsbottg
+        run: uv run --locked python -m pytest -q -m postgres
+
+  browser:
+    needs: changes
+    if: needs.changes.outputs.browser == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BROWSER_EVIDENCE_DIR: ${{ github.workspace }}/browser-evidence
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -73,15 +184,84 @@ jobs:
       - name: Install Chromium for Mini App browser checks
         run: npx playwright install --with-deps chromium
 
-      - name: Check JavaScript syntax
-        shell: bash
-        run: find frontend -type f \( -name '*.js' -o -name '*.mjs' \) -print0 | xargs -0 -n1 node --check
-
-      - name: Test payout message length helpers
-        run: node --test tests/js/*.test.mjs
-
       - name: Test Mini App workflows in Chromium
         run: npm run test:browser
+
+      - name: Upload browser screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-evidence
+          path: browser-evidence/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  migrations:
+    name: Alembic migrations
+    needs: changes
+    if: needs.changes.outputs.migrations == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: topsbottg
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d topsbottg"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project and development dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Apply Alembic migrations
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/topsbottg
+        run: uv run --locked alembic upgrade head
+
+  package:
+    name: Docker and Nginx
+    needs: changes
+    if: needs.changes.outputs.package == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project and development dependencies
+        run: uv sync --locked --extra dev
 
       - name: Check JavaScript modules through Nginx
         shell: bash
@@ -101,17 +281,42 @@ jobs:
           done
           NGINX_BASE_URL=http://127.0.0.1:18081 uv run --locked python scripts/check_nginx_mime.py
 
-      - name: Apply Alembic migrations
-        env:
-          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/topsbottg
-        run: uv run --locked alembic upgrade head
 
       - name: Build Docker image
         run: docker build --tag topsbottg:ci .
 
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [changes, lint, python, postgres, browser, migrations, package]
+    steps:
+      - name: Check out verification script
+        uses: actions/checkout@v4
+      - name: Set up Node.js for CI gate
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Verify every relevant suite ran and succeeded
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUN_LINT: ${{ needs.changes.outputs.lint }}
+          RESULT_LINT: ${{ needs.lint.result }}
+          RUN_PYTHON: ${{ needs.changes.outputs.python }}
+          RESULT_PYTHON: ${{ needs.python.result }}
+          RUN_POSTGRES: ${{ needs.changes.outputs.postgres }}
+          RESULT_POSTGRES: ${{ needs.postgres.result }}
+          RUN_BROWSER: ${{ needs.changes.outputs.browser }}
+          RESULT_BROWSER: ${{ needs.browser.result }}
+          RUN_MIGRATIONS: ${{ needs.changes.outputs.migrations }}
+          RESULT_MIGRATIONS: ${{ needs.migrations.result }}
+          RUN_PACKAGE: ${{ needs.changes.outputs.package }}
+          RESULT_PACKAGE: ${{ needs.package.result }}
+        run: node scripts/ci/check-results.mjs
+
   deploy:
     name: Deploy production
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: checks
     runs-on: ubuntu-latest
     environment: production

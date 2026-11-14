@@ -37,6 +37,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = ["postgres: requires PostgreSQL 16 and POSTGRES_TEST_URL"]
 
 [tool.ruff]
 line-length = 120
