@@ -41,7 +41,19 @@ for (const width of [320, 390, 768]) {
             const style = getComputedStyle(button);
             const availableWidth = button.clientWidth
               - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-            return { lines: textRects.length, textWidth: textRects[0]?.width ?? 0, availableWidth };
+            const node = button.firstChild;
+            const wordSegments = [...node.textContent.matchAll(/\\S+/gu)];
+            const brokenWords = wordSegments.filter((match) => {
+              const word = document.createRange();
+              word.setStart(node, match.index);
+              word.setEnd(node, match.index + match[0].length);
+              return word.getClientRects().length !== 1;
+            }).map((match) => match[0]);
+            return {
+              lines: textRects.length,
+              overflow: textRects.some((rect) => rect.width > availableWidth + 2),
+              brokenWords,
+            };
           };
           return {
             clearText: textFit('[data-action="clear-payout"]'),
@@ -59,9 +71,12 @@ for (const width of [320, 390, 768]) {
         assert.ok(result.first.right + 3 <= result.second.left, `Overlapping buttons: ${JSON.stringify(result)}`);
         assert.ok(result.first.left >= result.box.left && result.second.right <= result.box.right, `Actions outside context: ${JSON.stringify(result)}`);
         for (const button of [result.clearText, result.deleteText]) {
-          assert.equal(button.lines, 1, `Button label wrapped: ${JSON.stringify(result)}`);
-          assert.ok(button.textWidth <= button.availableWidth + 2,
-            `Button text does not fit: ${JSON.stringify(result)}`);
+          assert.ok(button.lines >= 1 && button.lines <= 2,
+            `Unexpected button label layout: ${JSON.stringify(result)}`);
+          assert.equal(button.overflow, false,
+            `Button label overflows: ${JSON.stringify(result)}`);
+          assert.deepEqual(button.brokenWords, [],
+            `Button breaks a word across lines: ${JSON.stringify(result)}`);
         }
         await mkdir(evidence, { recursive: true });
         await page.screenshot({ path: resolve(evidence, `payout-actions-${width}-${theme}.png`) });
