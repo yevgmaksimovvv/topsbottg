@@ -17,7 +17,37 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect affected components
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      lint: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.full == 'true' || steps.filter.outputs.unclassified == 'true' || steps.filter.outputs.lint == 'true' }}
+      python: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.full == 'true' || steps.filter.outputs.unclassified == 'true' || steps.filter.outputs.python == 'true' }}
+      postgres: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.full == 'true' || steps.filter.outputs.unclassified == 'true' || steps.filter.outputs.postgres == 'true' }}
+      browser: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.full == 'true' || steps.filter.outputs.unclassified == 'true' || steps.filter.outputs.browser == 'true' }}
+      migrations: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.full == 'true' || steps.filter.outputs.unclassified == 'true' || steps.filter.outputs.migrations == 'true' }}
+      package: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.full == 'true' || steps.filter.outputs.unclassified == 'true' || steps.filter.outputs.package == 'true' }}
+    steps:
+      - name: Check out repository for push diff
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/checkout@v4
+      - name: Determine changed components
+        if: github.event_name != 'workflow_dispatch'
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          predicate-quantifier: some-with-excludes
+          filters: .github/ci-paths.yml
+      - name: Manual release requires all checks
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "Running full CI for manually requested production release."
+
   lint:
+    needs: changes
+    if: needs.changes.outputs.lint == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -54,6 +84,8 @@ jobs:
         run: node --test tests/js/*.test.mjs
 
   python:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     name: Python tests and branch coverage
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -88,6 +120,8 @@ jobs:
           retention-days: 7
 
   postgres:
+    needs: changes
+    if: needs.changes.outputs.postgres == 'true'
     name: PostgreSQL integration
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -129,6 +163,8 @@ jobs:
         run: uv run --locked python -m pytest -q -m postgres
 
   browser:
+    needs: changes
+    if: needs.changes.outputs.browser == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -160,7 +196,10 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  package:
+  migrations:
+    name: Alembic migrations
+    needs: changes
+    if: needs.changes.outputs.migrations == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
@@ -177,6 +216,35 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project and development dependencies
+        run: uv sync --locked --extra dev
+
+      - name: Apply Alembic migrations
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/topsbottg
+        run: uv run --locked alembic upgrade head
+
+  package:
+    name: Docker and Nginx
+    needs: changes
+    if: needs.changes.outputs.package == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -213,10 +281,6 @@ jobs:
           done
           NGINX_BASE_URL=http://127.0.0.1:18081 uv run --locked python scripts/check_nginx_mime.py
 
-      - name: Apply Alembic migrations
-        env:
-          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/topsbottg
-        run: uv run --locked alembic upgrade head
 
       - name: Build Docker image
         run: docker build --tag topsbottg:ci .
@@ -225,22 +289,30 @@ jobs:
     name: checks
     runs-on: ubuntu-latest
     if: always()
-    needs: [lint, python, postgres, browser, package]
+    needs: [changes, lint, python, postgres, browser, migrations, package]
     steps:
-      - name: Require all CI suites to pass
+      - name: Check out verification script
+        uses: actions/checkout@v4
+      - name: Set up Node.js for CI gate
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Verify every relevant suite ran and succeeded
         env:
-          LINT: ${{ needs.lint.result }}
-          PYTHON: ${{ needs.python.result }}
-          POSTGRES: ${{ needs.postgres.result }}
-          BROWSER: ${{ needs.browser.result }}
-          PACKAGE: ${{ needs.package.result }}
-        run: |
-          for result in "$LINT" "$PYTHON" "$POSTGRES" "$BROWSER" "$PACKAGE"; do
-            if [[ "$result" != "success" ]]; then
-              echo "One or more required CI suites failed or were skipped: lint=$LINT python=$PYTHON postgres=$POSTGRES browser=$BROWSER package=$PACKAGE"
-              exit 1
-            fi
-          done
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUN_LINT: ${{ needs.changes.outputs.lint }}
+          RESULT_LINT: ${{ needs.lint.result }}
+          RUN_PYTHON: ${{ needs.changes.outputs.python }}
+          RESULT_PYTHON: ${{ needs.python.result }}
+          RUN_POSTGRES: ${{ needs.changes.outputs.postgres }}
+          RESULT_POSTGRES: ${{ needs.postgres.result }}
+          RUN_BROWSER: ${{ needs.changes.outputs.browser }}
+          RESULT_BROWSER: ${{ needs.browser.result }}
+          RUN_MIGRATIONS: ${{ needs.changes.outputs.migrations }}
+          RESULT_MIGRATIONS: ${{ needs.migrations.result }}
+          RUN_PACKAGE: ${{ needs.changes.outputs.package }}
+          RESULT_PACKAGE: ${{ needs.package.result }}
+        run: node scripts/ci/check-results.mjs
 
   deploy:
     name: Deploy production
