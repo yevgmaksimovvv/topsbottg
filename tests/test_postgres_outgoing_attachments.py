@@ -213,3 +213,57 @@ async def test_pg_telegram_crash_window_and_claim_token_do_not_duplicate_databas
         attachment = await session.get(ChatAttachment, message_id)
         assert attachment.telegram_file_id == "private701" and attachment.available
     assert telegram_receipts == [700, 701]
+
+
+@pytest.mark.postgres
+async def test_pg_slow_media_upload_cannot_be_claimed_while_sending(
+    postgres_attachment_client, settings, admin_init_data, monkeypatch
+):
+    import topsbottg.worker as worker
+    from topsbottg.chat_outbox import CHAT_MEDIA_CLAIM_LEASE, CHAT_MEDIA_SEND_TIMEOUT_SECONDS
+
+    client, factory, cid = postgres_attachment_client
+    response = await client.post(**_post_args(cid, {
+        "X-Telegram-Init-Data": admin_init_data, "Idempotency-Key": "pg-slow-file",
+    }))
+    assert response.status_code == 202
+    monkeypatch.setattr(worker, "CHAT_SEND_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(worker, "CHAT_MEDIA_SEND_TIMEOUT_SECONDS", 0.25)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class DelayedBot:
+        async def send_document(self, chat_id, document, **kwargs):
+            entered.set()
+            await release.wait()
+            return SimpleNamespace(
+                message_id=903, document=SimpleNamespace(
+                    file_id="private903", file_unique_id="unique903",
+                ),
+            )
+
+    task = asyncio.create_task(deliver_chat_outbox(DelayedBot(), factory, settings.chat_staging_dir))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=3)
+        async with factory() as session:
+            current = await session.scalar(select(ChatMessageOutbox))
+            assert current.attempts == 1 and current.status == "sending"
+            assert current.claimed_until.replace(tzinfo=UTC) > (
+                datetime.now(UTC) + CHAT_MEDIA_CLAIM_LEASE - timedelta(seconds=2)
+            )
+            # Simulate the full 300-second send budget passing on the claim clock.
+            waiting = await asyncio.wait_for(
+                claim_chat_outbox(
+                    session, now=datetime.now(UTC) + timedelta(seconds=CHAT_MEDIA_SEND_TIMEOUT_SECONDS)
+                ),
+                timeout=3,
+            )
+            assert waiting == []
+    finally:
+        release.set()
+        await asyncio.wait_for(task, timeout=4)
+    async with factory() as session:
+        row = await session.scalar(select(ChatMessageOutbox))
+        assert row.status == "sent" and row.attempts == 1
+        att = await session.scalar(select(ChatAttachment))
+        assert att.staging_key is None and att.telegram_file_id == "private903"

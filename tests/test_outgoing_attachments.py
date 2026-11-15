@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from topsbottg.attachment_staging import (
     ORPHAN_TTL,
     cleanup_staging,
     staging_path,
 )
+from topsbottg.chat_outbox import CHAT_MEDIA_CLAIM_LEASE, CHAT_MEDIA_SEND_TIMEOUT_SECONDS, claim_chat_outbox
 from topsbottg.conversations import record_incoming_message
 from topsbottg.models import (
     AdminGrant,
@@ -127,6 +130,7 @@ async def test_document_upload_reply_and_worker_cleanup(client, settings, sessio
         assert attachment.available and attachment.telegram_file_id == "private-file-1001"
         assert message.telegram_message_id == row.telegram_message_id == 1001
         assert row.status == "sent" and row.attempts == 1
+        assert attachment.staging_key is None
         assert await session.scalar(select(func.count(Payout.id))) == payout_count
     history = await client.get(f"/api/admin/conversations/{cid}/messages", headers=headers)
     result = history.json()["items"][-1]
@@ -299,3 +303,158 @@ async def test_staging_quota_rejects_upload_without_database_or_file_leak(
         assert await session.scalar(select(func.count(ChatMessage.id))) == 0
     root = Path(settings.chat_staging_dir)
     assert all(len(p.name) != 48 for p in root.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_post_commit_cancellation_preserves_queued_media(
+    client, session_factory, settings, admin_init_data, monkeypatch
+):
+    cid, _ = await _conversation(session_factory)
+    original = AsyncSession.commit
+    did_raise = False
+
+    async def committed_then_cancel(self):
+        nonlocal did_raise
+        await original(self)
+        if not did_raise:
+            did_raise = True
+            raise asyncio.CancelledError()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(AsyncSession, "commit", committed_then_cancel)
+        with pytest.raises(asyncio.CancelledError):
+            await client.post(
+                f"/api/admin/conversations/{cid}/attachments",
+                headers={"X-Telegram-Init-Data": admin_init_data, "Idempotency-Key": "cancel-after-commit"},
+                data={"kind": "document"},
+                files={"file": ("report.pdf", PDF, "application/pdf")},
+            )
+    assert did_raise
+    async with session_factory() as session:
+        job = await session.scalar(select(ChatMessageOutbox))
+        assert job.status == "queued"
+        attached = await session.get(ChatAttachment, job.message_id)
+        path = staging_path(settings.chat_staging_dir, attached.staging_key)
+        assert path.read_bytes() == PDF
+
+    bot = FakeMediaBot()
+    await deliver_chat_outbox(bot, session_factory, settings.chat_staging_dir)
+    assert len(bot.calls) == 1 and not path.exists()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_queries_only_existing_files_and_drops_terminal_staging_keys(
+    client, settings, session_factory, admin_init_data
+):
+    cid, _ = await _conversation(session_factory)
+    response = await client.post(
+        f"/api/admin/conversations/{cid}/attachments",
+        headers={"X-Telegram-Init-Data": admin_init_data, "Idempotency-Key": "still-active"},
+        data={"kind": "document"},
+        files={"file": ("report.pdf", PDF, "application/pdf")},
+    )
+    assert response.status_code == 202
+    key = await _key_for_message(session_factory, response.json()["message"]["id"])
+
+    async with session_factory() as session:
+        historical = []
+        for number in range(120):
+            message = ChatMessage(
+                conversation_id=cid, direction="outgoing", kind="document",
+                author_admin_telegram_id=123, source="admin",
+            )
+            message.attachment = ChatAttachment(
+                telegram_file_id=f"file-{number}", kind="document",
+                staging_key=f"{number + 1:048x}", available=True,
+            )
+            message.outbox = ChatMessageOutbox(
+                conversation_id=cid, admin_telegram_id=123,
+                idempotency_key=f"archived-{number}", payload_fingerprint="0" * 64,
+                status="sent", attempts=1,
+            )
+            historical.append(message)
+        session.add_all(historical)
+        await session.commit()
+
+    observed = []
+
+    def track_sql(conn, cursor, statement, parameters, context, executemany):
+        if "FROM chat_attachments JOIN chat_message_outbox" in statement:
+            observed.append(statement)
+
+    engine = session_factory.kw["bind"]
+    event.listen(engine.sync_engine, "before_cursor_execute", track_sql)
+    try:
+        assert await cleanup_staging(settings.chat_staging_dir, session_factory) == 0
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", track_sql)
+    assert len(observed) == 1
+    assert "staging_key IN" in observed[0]
+    assert staging_path(settings.chat_staging_dir, key).exists()
+
+    async with session_factory() as session:
+        # Rows from long-finished deliveries remain history, not minute-scan candidates.
+        assert await session.scalar(select(func.count(ChatAttachment.chat_message_id))) == 121
+
+    async with session_factory() as session:
+        job = await session.scalar(
+            select(ChatMessageOutbox).where(ChatMessageOutbox.idempotency_key == "still-active")
+        )
+        job.status = "failed"
+        await session.commit()
+    assert await cleanup_staging(settings.chat_staging_dir, session_factory) == 1
+    async with session_factory() as session:
+        attached = await session.get(ChatAttachment, response.json()["message"]["id"])
+        assert attached.staging_key is None
+    assert not staging_path(settings.chat_staging_dir, key).exists()
+
+
+async def _key_for_message(session_factory, message_id):
+    async with session_factory() as session:
+        attachment = await session.get(ChatAttachment, message_id)
+        return attachment.staging_key
+
+
+@pytest.mark.asyncio
+async def test_media_send_exceeds_text_timeout_without_reclaim(
+    client, settings, session_factory, admin_init_data, monkeypatch
+):
+    import topsbottg.worker as worker
+
+    cid, _ = await _conversation(session_factory)
+    response = await client.post(
+        f"/api/admin/conversations/{cid}/attachments",
+        headers={"X-Telegram-Init-Data": admin_init_data, "Idempotency-Key": "slow-file"},
+        data={"kind": "document"}, files={"file": ("report.pdf", PDF, "application/pdf")},
+    )
+    assert response.status_code == 202
+    monkeypatch.setattr(worker, "CHAT_SEND_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(worker, "CHAT_MEDIA_SEND_TIMEOUT_SECONDS", 0.25)
+    entered = asyncio.Event()
+
+    class SlowBot(FakeMediaBot):
+        async def send_document(self, chat_id, document, **kwargs):
+            entered.set()
+            await asyncio.sleep(0.05)
+            return await super().send_document(chat_id, document, **kwargs)
+
+    bot = SlowBot()
+    task = asyncio.create_task(deliver_chat_outbox(bot, session_factory, settings.chat_staging_dir))
+    await asyncio.wait_for(entered.wait(), timeout=3)
+    try:
+        async with session_factory() as session:
+            assert await claim_chat_outbox(
+                session, now=datetime.now(UTC) + timedelta(seconds=CHAT_MEDIA_SEND_TIMEOUT_SECONDS)
+            ) == []
+            job = await session.scalar(select(ChatMessageOutbox))
+            assert job.claimed_until is not None
+            assert job.attempts == 1
+            assert job.claimed_until.replace(tzinfo=UTC) > (
+                datetime.now(UTC) + CHAT_MEDIA_CLAIM_LEASE - timedelta(seconds=2)
+            )
+    finally:
+        await asyncio.wait_for(task, timeout=3)
+    assert len(bot.calls) == 1
+    async with session_factory() as session:
+        job = await session.scalar(select(ChatMessageOutbox))
+        assert job.status == "sent" and job.attempts == 1
