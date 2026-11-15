@@ -72,9 +72,11 @@ function renderInvitations() {
     ? pending.map((item) => `<article class="admins-member">
         <div class="admins-member-identity">
           <strong>${escapeHtml(nameFor(item))}</strong>
-          <span>${item.delivered_at
+          <span>${item.delivery_state === "delivered" || item.delivered_at
             ? "Ожидает ответа"
-            : item.delivery_attempts > 0 ? "Повторяем отправку" : "Отправляем приглашение"}</span>
+            : item.delivery_state === "unknown" ? "Результат отправки неизвестен"
+            : item.delivery_state === "sending" ? "Отправляется"
+            : "В очереди на отправку"}</span>
         </div>
         <button type="button" class="admins-text-button"
           data-admin-action="cancel-invite" data-invite-id="${Number(item.id)}"
