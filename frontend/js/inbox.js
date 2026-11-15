@@ -38,6 +38,7 @@ const inbox = {
   historyError: "",
   readThrough: null,
   seenIncoming: new Set(),
+  authorLabels: new Map(),
   replyTo: null,
   unread: 0,
   searchTimer: null,
@@ -355,9 +356,14 @@ function renderHistory({ preserveScroll = false } = {}) {
   const unread = Math.max(0, Number(inbox.current?.unread_count) || 0);
   const inbound = inbox.messages.filter((message) => message.direction === "incoming");
   const unreadStart = unread > 0 && inbound.length >= unread ? inbound.at(-unread)?.id : null;
-  const authors = new Set(inbox.messages.filter((message) => message.direction === "outgoing" &&
-    message.author_admin_telegram_id != null).map((message) => String(message.author_admin_telegram_id)));
-  const multipleAuthors = authors.size > 1;
+  for (const message of inbox.messages) {
+    if (message.direction !== "outgoing" || message.author_admin_telegram_id == null) continue;
+    const id = String(message.author_admin_telegram_id);
+    if (!inbox.authorLabels.has(id)) {
+      inbox.authorLabels.set(id, "Администратор " + (inbox.authorLabels.size + 1));
+    }
+  }
+  const multipleAuthors = inbox.authorLabels.size > 1;
   list.innerHTML = inbox.messages.map((message, index) => {
     const outgoing = message.direction === "outgoing";
     const delivery = outgoing && message.delivery_status ? message.delivery_status : null;
@@ -379,7 +385,8 @@ function renderHistory({ preserveScroll = false } = {}) {
       '<article class="inbox-message ' + (outgoing ? "is-outgoing" : "is-incoming") +
       (delivery === "failed" ? ' has-failure' : "") + '" data-inbox-message="' + text(message.id) +
       '" tabindex="0">' +
-      (showAuthor ? '<span class="inbox-message-author">Админ · ' + text(authorId) + '</span>' : "") +
+      (showAuthor ? '<span class="inbox-message-author" title="Telegram ID: ' + text(authorId) +
+        '">' + text(inbox.authorLabels.get(String(authorId))) + '</span>' : "") +
       quote +
       '<span class="inbox-message-body">' + text(body) + '</span>' +
       '<span class="inbox-message-meta"><time>' + text(messageClock(message.created_at)) + '</time>' +
@@ -525,6 +532,7 @@ async function openConversation(conversation) {
   inbox.current = conversation;
   inbox.messages = [];
   inbox.seenIncoming.clear();
+  inbox.authorLabels.clear();
   inbox.historyCursor = null;
   inbox.readThrough = null;
   inbox.readingId = null;
@@ -538,6 +546,7 @@ async function openConversation(conversation) {
   el("inbox-back").hidden = false;
   el("inbox-title").textContent = label(conversation.user);
   el("inbox-text").value = "";
+  resizeComposer();
   renderHistory();
   el("inbox-text").focus();
   await loadMessages();
@@ -699,6 +708,7 @@ export function configureInboxClient(client) {
     inbox.messages = [];
     inbox.newUsers = [];
     inbox.seenIncoming.clear();
+    inbox.authorLabels.clear();
     inbox.current = null;
     inbox.nextCursor = null;
     inbox.historyCursor = null;
