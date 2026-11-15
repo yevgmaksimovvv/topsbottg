@@ -66,11 +66,12 @@
 html {
   min-width: 320px;
   min-height: 100%;
+  scrollbar-gutter: stable;
   background: var(--bg);
 }
 body {
   margin: 0;
-  min-width: 320px;
+  min-width: 0;
   min-height: 100vh;
   background: var(--bg);
   color: var(--text);
@@ -135,18 +136,22 @@ textarea:focus-visible {
   gap: 12px;
 }
 .app-header h1 {
+  flex: 1 1 auto;
   min-width: 0;
   overflow-wrap: anywhere;
 }
 .header-actions {
   display: flex;
   align-items: center;
-  flex-shrink: 0;
+  align-self: flex-start;
+  flex: none;
+  gap: 8px;
 }
 .header-icon-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: 0 0 44px;
   width: 44px;
   height: 44px;
   padding: 9px;
@@ -446,6 +451,14 @@ textarea::placeholder {
   color: var(--muted);
   padding: 10px 2px;
 }
+#recipients-state.is-empty {
+  padding: 0;
+  text-align: left;
+}
+#recipients-state.is-empty .button {
+  display: inline-flex;
+  width: auto;
+}
 .user-list,
 .recipient-list,
 .payout-list {
@@ -743,7 +756,8 @@ textarea::placeholder {
 .admins-dialog {
   width: min(calc(100% - 24px), 520px);
   max-width: 520px;
-  max-height: min(92dvh, 740px);
+  height: min(92dvh, 680px);
+  max-height: min(92dvh, 680px);
   padding: 0;
   overflow: hidden;
   color: var(--text);
@@ -757,7 +771,8 @@ textarea::placeholder {
 .admins-panel {
   display: flex;
   flex-direction: column;
-  max-height: min(92dvh, 740px);
+  height: 100%;
+  max-height: 100%;
   min-height: 0;
 }
 .admins-panel-header {
@@ -805,7 +820,26 @@ textarea::placeholder {
   display: grid;
   gap: 8px;
   margin-top: 12px;
+  min-height: 184px;
+  align-content: start;
 }
+.admins-member-placeholder {
+  height: 56px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 13px 12px;
+}
+.admins-member-placeholder::before,
+.admins-member-placeholder::after {
+  content: "";
+  display: block;
+  height: 10px;
+  border-radius: 6px;
+  background: var(--field);
+}
+.admins-member-placeholder::before { width: 55%; }
+.admins-member-placeholder::after { width: 30%; margin-top: 8px; }
 .admins-member,
 .admins-candidate-card {
   min-width: 0;
@@ -1076,7 +1110,7 @@ textarea::placeholder {
 }
 @media (max-width: 759px) {
   .admins-dialog {
-    width: 100%;
+    width: 100vw;
     max-width: none;
     height: var(--app-viewport-height, 100dvh);
     max-height: var(--app-viewport-height, 100dvh);

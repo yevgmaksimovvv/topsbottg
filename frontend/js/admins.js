@@ -30,8 +30,9 @@ function renderMembers() {
   const list = $("admins-members");
   if (!list || !status) return;
   status.textContent = memberError || (loadingMembers ? "Загружаем список…" : "");
+  list.setAttribute("aria-busy", String(loadingMembers));
   if (loadingMembers && !members.length) {
-    list.replaceChildren();
+    list.innerHTML = '<div class="admins-member-placeholder" aria-hidden="true"></div>'.repeat(3);
     return;
   }
   if (!members.length) {
@@ -154,6 +155,14 @@ async function refreshDirectory() {
     invitations = Array.isArray(pending) ? pending : [];
   } catch (error) {
     if (requestId !== dialogRequestId || !dialog()?.open) return;
+    if (error?.status === 401 || error?.status === 403) {
+      members = [];
+      invitations = [];
+      state.adminRole = null;
+      $("admins-open")?.classList.add("hidden");
+      closeAdminDialog();
+      return;
+    }
     memberError = error?.message || "Не удалось обновить список.";
   } finally {
     if (requestId === dialogRequestId && dialog()?.open) {

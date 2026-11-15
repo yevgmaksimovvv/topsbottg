@@ -1429,7 +1429,7 @@ test("responsive Mini App and payout workflows", async (t) => {
     await delayedClearStarted;
     await page.locator('[data-action="clear-payout"]').click();
     assert.equal((await readPayoutState()).selectedPayoutId, 0);
-    assert.equal(await page.locator("#recipients-state").innerText(), "Выберите выплату в истории Открыть историю");
+    assert.equal(await page.locator("#recipients-state").innerText(), "Открыть историю");
     assert.equal(await page.locator("#recipient-summary").isVisible(), false);
     assert.equal(await page.locator("#recipient-filters").isVisible(), false);
     assert.equal(await page.locator("#recipients-list").isVisible(), false);
