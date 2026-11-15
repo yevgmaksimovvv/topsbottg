@@ -512,6 +512,9 @@ async function markRead() {
 }
 
 async function openConversation(conversation) {
+  ++inbox.newRequest;
+  inbox.newController?.abort();
+  clearTimeout(inbox.newSearchTimer);
   ++inbox.openRequest;
   inbox.openController?.abort();
   inbox.openingUser = false;
@@ -527,7 +530,9 @@ async function openConversation(conversation) {
   inbox.replyTo = null;
   ++inbox.historyRequest;
   el("inbox-list-screen").hidden = true;
+  el("inbox-new-screen").hidden = true;
   el("inbox-history-screen").hidden = false;
+  el("inbox-new").hidden = true;
   el("inbox-back").hidden = false;
   el("inbox-title").textContent = label(conversation.user);
   el("inbox-text").value = "";
@@ -536,17 +541,15 @@ async function openConversation(conversation) {
   await loadMessages();
 }
 
-async function openForUser(userId) {
+async function openForUser(userId, user) {
   if (!inbox.client || inbox.openingUser) return;
   inbox.openingUser = true;
-  const user = state.users.find((item) => Number(item.id) === Number(userId));
   const generation = ++inbox.openRequest;
   inbox.openController?.abort();
   const controller = new AbortController();
   inbox.openController = controller;
   const client = inbox.client;
   try {
-    if (!isOpen()) openInbox();
     const result = await client.open(Number(userId), { signal: controller.signal });
     if (generation !== inbox.openRequest || controller.signal.aborted || client !== inbox.client || !isOpen()) return;
     const existing = inbox.conversations.find((item) => Number(item.id) === Number(result.conversation_id));
@@ -556,7 +559,9 @@ async function openForUser(userId) {
   } catch (error) {
     if (!isAbort(error) && generation === inbox.openRequest && client === inbox.client &&
         !handleRequestError(error))
-      status("inbox-list-status", error?.message || "Не удалось открыть диалог.");
+      status("inbox-new-status", error?.status === 404
+        ? "Пользователь ещё не завершил регистрацию."
+        : error?.message || "Не удалось открыть диалог.");
   } finally {
     if (inbox.openController === controller) inbox.openController = null;
     if (generation === inbox.openRequest) inbox.openingUser = false;
@@ -597,6 +602,13 @@ async function deliverPending(pending) {
   }
 }
 
+function resizeComposer() {
+  const field = el("inbox-text");
+  if (!field) return;
+  field.style.height = "44px";
+  field.style.height = Math.min(140, Math.max(44, field.scrollHeight)) + "px";
+}
+
 function sendMessage(textValue, replyTo = null) {
   if (!inbox.client || !inbox.current || inbox.sending || !textValue.trim()) return;
   const messageKey = key();
@@ -623,6 +635,7 @@ function sendMessage(textValue, replyTo = null) {
   };
   inbox.messages.push(pending);
   el("inbox-text").value = "";
+  resizeComposer();
   inbox.replyTo = null;
   renderHistory();
   void deliverPending(pending);
@@ -633,11 +646,16 @@ function openInbox() {
   inbox.opener = document.activeElement;
   dialog().showModal();
   const back = telegramWebApp()?.BackButton;
-  inbox.backHandler = closeInbox;
+  inbox.backHandler = navigateBack;
   back?.onClick?.(inbox.backHandler);
   back?.show?.();
   renderGroups();
   showList();
+}
+
+function navigateBack() {
+  if (!el("inbox-list-screen")?.hidden) closeInbox();
+  else showList();
 }
 
 function closeInbox() {
@@ -655,6 +673,7 @@ function cleanup() {
   cancelRequests();
   inbox.openingUser = false;
   clearTimeout(inbox.searchTimer);
+  clearTimeout(inbox.newSearchTimer);
   const back = telegramWebApp()?.BackButton;
   if (inbox.backHandler) back?.offClick?.(inbox.backHandler);
   inbox.backHandler = null;
@@ -666,7 +685,7 @@ function cleanup() {
 }
 
 export function configureInboxClient(client) {
-  if (client !== null && (!client || ["summary", "conversations", "open", "messages", "send", "read"].some((method) => typeof client[method] !== "function")))
+  if (client !== null && (!client || ["summary", "conversations", "users", "open", "messages", "send", "read"].some((method) => typeof client[method] !== "function")))
     throw new TypeError("Inbox client does not implement contract #24");
   if (isOpen()) closeInbox();
   inbox.client = client;
@@ -676,6 +695,7 @@ export function configureInboxClient(client) {
     ++inbox.summaryRequest;
     inbox.conversations = [];
     inbox.messages = [];
+    inbox.newUsers = [];
     inbox.seenIncoming.clear();
     inbox.current = null;
     inbox.nextCursor = null;
@@ -687,11 +707,6 @@ export function configureInboxClient(client) {
   }
   paintBadge();
   el("inbox-open")?.classList.toggle("hidden", !client);
-  const list = el("users-list");
-  if (list) {
-    list.dataset.userIds = "";
-    void import("./render-users.js").then(({ renderUsers }) => renderUsers());
-  }
   if (client) void loadSummary();
 }
 
@@ -701,6 +716,28 @@ export function bindInbox() {
   el("inbox-open")?.addEventListener("click", openInbox);
   el("inbox-close")?.addEventListener("click", closeInbox);
   el("inbox-back")?.addEventListener("click", showList);
+  el("inbox-new")?.addEventListener("click", showNewDialog);
+  el("inbox-new-search")?.addEventListener("input", (event) => {
+    inbox.newQuery = event.target.value;
+    ++inbox.newRequest;
+    clearTimeout(inbox.newSearchTimer);
+    inbox.newController?.abort();
+    inbox.newSearchTimer = window.setTimeout(() => void loadNewUsers(true), SEARCH_DEBOUNCE_MS);
+  });
+  el("inbox-new-group")?.addEventListener("change", (event) => {
+    inbox.newGroup = event.target.value;
+    ++inbox.newRequest;
+    clearTimeout(inbox.newSearchTimer);
+    void loadNewUsers(true);
+  });
+  el("inbox-new-more")?.addEventListener("click", () => void loadNewUsers());
+  el("inbox-new-retry")?.addEventListener("click", () => void loadNewUsers(true));
+  el("inbox-new-users")?.addEventListener("click", (event) => {
+    const row = event.target.closest("[data-inbox-new-user]");
+    if (!row) return;
+    const user = inbox.newUsers.find((item) => Number(item.id) === Number(row.dataset.inboxNewUser));
+    if (user) void openForUser(user.id, user);
+  });
   dialog()?.addEventListener("close", cleanup);
   el("inbox-search")?.addEventListener("input", (event) => {
     inbox.query = event.target.value;
@@ -717,7 +754,6 @@ export function bindInbox() {
   el("inbox-more")?.addEventListener("click", () => void loadConversations());
   el("inbox-list-retry")?.addEventListener("click", () => void loadConversations(true));
   el("inbox-older")?.addEventListener("click", () => void loadMessages({ older: true }));
-  el("inbox-refresh")?.addEventListener("click", () => void loadMessages({ refresh: true }));
   el("inbox-conversations")?.addEventListener("click", (event) => {
     const row = event.target.closest("[data-inbox-conversation]");
     if (!row) return;
@@ -759,14 +795,11 @@ export function bindInbox() {
     renderReply();
     el("inbox-text").focus();
   });
+  el("inbox-text")?.addEventListener("input", resizeComposer);
   el("inbox-composer")?.addEventListener("submit", (event) => {
     event.preventDefault();
     status("inbox-compose-status", "");
     void sendMessage(el("inbox-text").value, inbox.replyTo);
-  });
-  document.addEventListener("click", (event) => {
-    const write = event.target.closest("[data-inbox-write]");
-    if (write && inbox.client) void openForUser(write.dataset.inboxWrite);
   });
 }
 
@@ -774,7 +807,7 @@ export function refreshInboxFromEvent(conversationId = null, { reconnect = false
   if (!inbox.client) return;
   void loadSummary();
   if (!isOpen()) return;
-  void loadConversations(true);
+  if (!el("inbox-list-screen")?.hidden || inbox.current) void loadConversations(true);
   if (el("inbox-list-screen")?.hidden && inbox.current &&
       (reconnect || conversationId == null || Number(inbox.current.id) === Number(conversationId))) {
     void loadMessages({ refresh: true });
