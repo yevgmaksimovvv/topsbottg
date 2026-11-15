@@ -53,6 +53,9 @@ async def _download(bot, attachment: ChatAttachment) -> tuple[BinaryIO, int]:
             if total > MAX_ATTACHMENT_BYTES:
                 raise HTTPException(status_code=413, detail="attachment too large")
             buffer.write(chunk)
+        expected_size = info.file_size if info.file_size is not None else attachment.size
+        if expected_size is not None and total != expected_size:
+            raise HTTPException(status_code=502, detail="attachment download incomplete")
         buffer.seek(0)
         return buffer, total
     except HTTPException:
