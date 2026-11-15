@@ -505,7 +505,11 @@ test("Telegram-style bubbles and composer remain readable across mobile and desk
   await withPage(async ({ page }) => {
     await installFixture(page);
     await page.locator("#inbox-open").click();
+    assert.equal(await page.locator("#inbox-new").isVisible(), true);
+    assert.equal(await page.locator("#inbox-back").isVisible(), false);
     await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    assert.equal(await page.locator("#inbox-new").isVisible(), false);
+    assert.equal(await page.locator("#inbox-back").isVisible(), true);
     await page.locator("#inbox-history [data-inbox-message='54']").waitFor();
 
     assert.equal(await page.locator("#inbox-refresh").count(), 0);
