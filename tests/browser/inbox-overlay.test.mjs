@@ -392,6 +392,8 @@ test("Unread stays unread when history is scrolled up during refresh", async () 
     await page.locator("#inbox-open").click();
     await page.locator("#inbox-conversations .inbox-conversation").first().click();
     await page.locator("#inbox-history [data-inbox-message='54']").waitFor();
+    await page.locator("#inbox-older").click();
+    await page.locator("#inbox-history [data-inbox-message='2']").waitFor();
     await page.waitForFunction(() => window.__inboxFixture.read.length > 0);
     const scrollHeight = await page.evaluate(() => {
       const list = document.getElementById("inbox-history");
