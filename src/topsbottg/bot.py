@@ -4,7 +4,7 @@ import logging
 from contextlib import suppress
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -22,6 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from topsbottg.access import AccessDenied, get_principal
+from topsbottg.conversations import get_or_create_conversation, record_incoming_message
 from topsbottg.invitations import decide_invitation
 from topsbottg.logging_utils import log_event
 from topsbottg.models import PayoutRecipient, RecipientStatus
@@ -30,7 +31,9 @@ from topsbottg.services import (
     get_latest_active_recipient,
     get_or_create_user,
     get_payment_profile,
+    get_user_by_telegram_id,
     get_user_study_group,
+    queue_admin_event,
     save_profile_and_snapshot,
     set_user_study_group,
     start_user,
@@ -63,6 +66,7 @@ PAYMENT_DETAILS_CONFIRM_TEXT = "Данные подтверждены."
 PAYMENT_DETAILS_ALREADY_CONFIRMED_TEXT = "Данные уже подтверждены."
 ADMIN_ENTRYPOINT_TEXT = "Админка"
 ADMIN_INLINE_BUTTON_TEXT = "Открыть админку"
+CHAT_ENTRYPOINT_TEXT = "Написать администратору"
 
 
 async def _is_admin(settings, telegram_id: int, session_factory) -> bool:
@@ -80,17 +84,23 @@ async def _is_admin(settings, telegram_id: int, session_factory) -> bool:
         return False
 
 
-def main_keyboard(*, is_admin: bool = False, mini_app_url: str | None = None) -> ReplyKeyboardMarkup:
+def main_keyboard(
+    *, is_admin: bool = False, mini_app_url: str | None = None, chat_entrypoint_enabled: bool = False
+) -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(text=MY_DATA_BUTTON_TEXT), KeyboardButton(text=CHANGE_NAME_BUTTON_TEXT)],
         [KeyboardButton(text=CHANGE_PAYMENT_DETAILS_BUTTON_TEXT)],
         [KeyboardButton(text=CHANGE_GROUP_BUTTON_TEXT)],
     ]
+    if chat_entrypoint_enabled:
+        keyboard.append([KeyboardButton(text=CHAT_ENTRYPOINT_TEXT)])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
 def _main_keyboard_for(message: Message, settings) -> ReplyKeyboardMarkup:
-    return main_keyboard(mini_app_url=settings.mini_app_url)
+    return main_keyboard(
+        mini_app_url=settings.mini_app_url, chat_entrypoint_enabled=settings.chat_entrypoint_enabled
+    )
 
 
 def admin_keyboard(mini_app_url: str) -> InlineKeyboardMarkup:
@@ -759,5 +769,46 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
             PAYMENT_DETAILS_CONFIRM_TEXT,
             show_alert=False,
         )
+
+
+    if _settings.chat_entrypoint_enabled:
+        @router.message(StateFilter(None), F.chat.type == "private", F.text == CHAT_ENTRYPOINT_TEXT)
+        async def chat_entrypoint(message: Message):
+            if message.from_user is None or message.from_user.is_bot:
+                return
+            async with session_factory() as session:
+                user = await get_user_by_telegram_id(session, message.from_user.id)
+                if user is None or user.registration_completed_at is None:
+                    return
+            await _safe_message_answer(message, message.from_user.id, "Напишите сообщение администратору.")
+
+    @router.message(
+        StateFilter(None),
+        F.chat.type == "private",
+        F.text,
+        ~F.text.startswith("/"),
+    )
+    async def incoming_chat_text(message: Message):
+        if message.from_user is None or message.from_user.is_bot:
+            return
+        async with session_factory() as session:
+            user = await get_user_by_telegram_id(session, message.from_user.id)
+            if user is None or user.registration_completed_at is None:
+                return
+            conversation = await get_or_create_conversation(session, user_id=user.id)
+            _, created = await record_incoming_message(
+                session,
+                conversation_id=conversation.id,
+                telegram_chat_id=message.chat.id,
+                telegram_message_id=message.message_id,
+                text=message.text,
+                reply_to_telegram_message_id=(
+                    message.reply_to_message.message_id if message.reply_to_message is not None else None
+                ),
+                source="telegram_reply" if message.reply_to_message is not None else "telegram",
+            )
+            if created:
+                queue_admin_event(session, "chat.changed", {"conversation_id": conversation.id})
+            await session.commit()
 
     return router
