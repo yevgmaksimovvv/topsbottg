@@ -60,7 +60,6 @@ const time = (value) => {
     : new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date);
 };
 const label = (user) => user?.full_name || "Пользователь";
-const groupLabel = (user) => user?.study_group_name || "Группа не указана";
 const statusText = {
   queued: "В очереди",
   sending: "Отправляется",
@@ -157,7 +156,7 @@ function renderConversations() {
     return '<button type="button" class="inbox-conversation" data-inbox-conversation="' + Number(item.id) + '">' +
       '<span class="inbox-row-heading"><strong>' + text(label(user)) + '</strong>' +
       '<time>' + text(time(item.last_message_at)) + '</time></span>' +
-      '<span class="inbox-row-subtitle">' + text(groupLabel(user)) + '</span>' +
+      (user.study_group_name ? '<span class="inbox-row-subtitle">' + text(user.study_group_name) + '</span>' : "") +
       '<span class="inbox-row-bottom"><span class="inbox-snippet">' + text(snippet) + '</span>' +
       (unread ? '<span class="inbox-count" aria-label="Непрочитанных: ' + unread + '">' + (unread > 99 ? "99+" : unread) + '</span>' : "") +
       '</span></button>';
@@ -220,7 +219,7 @@ function renderNewUsers() {
   list.innerHTML = inbox.newUsers.map((user) =>
     '<button type="button" class="inbox-new-user" data-inbox-new-user="' + Number(user.id) + '">' +
     '<span class="inbox-row-heading"><strong>' + text(user.full_name) + '</strong></span>' +
-    '<span class="inbox-row-subtitle">' + text(user.study_group?.code || "Группа не указана") + '</span>' +
+    (user.study_group?.code ? '<span class="inbox-row-subtitle">' + text(user.study_group.code) + '</span>' : "") +
     '</button>'
   ).join("");
   el("inbox-new-more")?.classList.toggle("hidden", !inbox.newHasMore);
