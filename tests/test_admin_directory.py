@@ -1,144 +1,145 @@
-"""Owner-facing admin directory presents names without exposing source configuration."""
+"""Owner-only directory, username lookup and invitation API contracts."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
-
 import pytest
 from conftest import make_init_data
-from sqlalchemy import select
 
-import topsbottg.api as api_module
-from topsbottg.access import grant_admin
-from topsbottg.invitations import create_invitation, find_candidate, observe_telegram_profile
-from topsbottg.models import User
+from topsbottg.access import grant_admin, revoke_admin
+from topsbottg.invitations import create_invitation
 from topsbottg.services import get_or_create_user
 
 
+class StubResolver:
+    def __init__(self, mapping=None):
+        self.mapping = mapping or {}
+
+    async def resolve(self, username: str) -> int | None:
+        return self.mapping.get(username)
+
+
 @pytest.mark.asyncio
-async def test_admin_me_observes_signed_telegram_profile(client, settings, session_factory):
+async def test_admin_me_returns_role_without_mutating_profile(client, settings, session_factory):
     async with session_factory() as session:
-        await get_or_create_user(session, 123, "Евгений")
+        await get_or_create_user(session, 123, "Евгений Максимов")
         await session.commit()
-    headers = {
-        "X-Telegram-Init-Data": make_init_data(
-            settings.bot_token, 123, username="owner_new",
-        ),
-    }
+    headers = {"X-Telegram-Init-Data": make_init_data(settings.bot_token, 123, username="changed_owner")}
     response = await client.get("/api/admin/me", headers=headers)
     assert response.status_code == 200
-    async with session_factory() as session:
-        found = await find_candidate(session, username="owner_new")
-        assert found is not None and found.telegram_id == 123
-        assert (await session.scalar(select(User).where(User.telegram_id == 123))).telegram_display_name == "Test"
-    candidate = await client.get(
-        "/api/admin/admin-candidates", params={"username": "owner_new"}, headers=headers,
-    )
-    assert candidate.status_code == 200
-    assert candidate.json()[0]["role"] == "owner"
+    assert response.json()["role"] == "owner"
 
 
 @pytest.mark.asyncio
-async def test_owner_username_lookup_refreshes_missing_cached_profile(
-    client, settings, session_factory, monkeypatch,
+async def test_username_lookup_uses_mtproto_and_registration_db(
+    client, app, settings, session_factory,
 ):
     settings.admin_telegram_ids = "123,456"
     async with session_factory() as session:
         await get_or_create_user(session, 123, "Первый владелец")
         await get_or_create_user(session, 456, "Второй владелец")
+        await get_or_create_user(session, 555, "Иван Иванов")
         await session.commit()
 
-    class FakeBot:
-        def __init__(self, token):
-            pass
+    app.state.username_resolver = StubResolver({"shem2001": 456, "valid_name": 555, "other_user": 999})
+    headers = {"X-Telegram-Init-Data": make_init_data(settings.bot_token, 123)}
 
-        async def __aenter__(self):
-            return self
+    owner = await client.get("/api/admin/admin-candidates", params={"username": "@SHEM2001"}, headers=headers)
+    assert owner.status_code == 200
+    assert owner.json() == [{
+        "telegram_id": 456, "username": "shem2001", "role": "owner",
+        "full_name": "Второй владелец", "study_group": None,
+    }]
 
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
-
-        async def get_chat(self, telegram_id):
-            return SimpleNamespace(
-                username="shem2001" if telegram_id == 456 else "first_owner",
-                first_name="Владимир", last_name="Шемяков",
-            )
-
-    monkeypatch.setattr(api_module, "Bot", FakeBot)
-    response = await client.get(
-        "/api/admin/admin-candidates",
-        params={"username": "@shem2001"},
-        headers={"X-Telegram-Init-Data": make_init_data(settings.bot_token, 123)},
+    candidate = await client.get(
+        "/api/admin/admin-candidates", params={"username": "@valid_name"}, headers=headers
     )
-    assert response.status_code == 200
-    assert response.json()[0]["telegram_id"] == 456
-    assert response.json()[0]["role"] == "owner"
-    async with session_factory() as session:
-        assert (await find_candidate(session, username="shem2001")).telegram_id == 456
+    assert candidate.status_code == 200
+    assert candidate.json()[0]["telegram_id"] == 555
+    assert candidate.json()[0]["full_name"] == "Иван Иванов"
+
+    unknown = await client.get(
+        "/api/admin/admin-candidates", params={"username": "@other_user"}, headers=headers
+    )
+    assert unknown.status_code == 200
+    assert unknown.json() == []  # Telegram user exists, but is not registered in TOPSBOT.
+
+    missing = await client.get(
+        "/api/admin/admin-candidates", params={"username": "@no_such_user"}, headers=headers
+    )
+    assert missing.status_code == 200
+    assert missing.json() == []
 
 
 @pytest.mark.asyncio
-async def test_owner_directory_includes_all_owners_and_active_grants(
-    client, settings, session_factory
+async def test_missing_mtproto_credentials_do_not_break_numeric_id_search(
+    client, app, settings, session_factory,
 ):
+    async with session_factory() as session:
+        await get_or_create_user(session, 555, "Иван Иванов")
+        await session.commit()
+    app.state.username_resolver = None
+    headers = {"X-Telegram-Init-Data": make_init_data(settings.bot_token, 123)}
+    by_id = await client.get("/api/admin/admin-candidates", params={"telegram_id": 555}, headers=headers)
+    assert by_id.status_code == 200
+    assert by_id.json()[0]["full_name"] == "Иван Иванов"
+    assert by_id.json()[0]["username"] is None
+
+    no_mtproto = await client.get(
+        "/api/admin/admin-candidates", params={"username": "known_name"}, headers=headers
+    )
+    assert no_mtproto.status_code == 503
+    malformed = await client.get("/api/admin/admin-candidates", params={"username": "@bad"}, headers=headers)
+    assert malformed.status_code == 422
+
+    absent = await client.get("/api/admin/admin-candidates", params={"telegram_id": 999}, headers=headers)
+    assert absent.status_code == 200 and absent.json() == []
+
+
+@pytest.mark.asyncio
+async def test_owner_directory_includes_all_owners_and_active_grants(client, settings, session_factory):
     settings.admin_telegram_ids = "123,456"
     async with session_factory() as session:
         await get_or_create_user(session, 123, "Евгений Максимов")
-        await observe_telegram_profile(session, 123, "owner_name", "Евгений", "Максимов")
         await get_or_create_user(session, 555, "Иван Иванов")
-        await observe_telegram_profile(session, 555, "admin_name", "Иван", "Иванов")
         await grant_admin(
-            session, actor_telegram_id=456, target_telegram_id=555,
-            owner_ids=settings.admin_ids_set,
+            session, actor_telegram_id=456, target_telegram_id=555, owner_ids=settings.admin_ids_set
         )
         await session.commit()
 
     for owner_id in (123, 456):
-        resp = await client.get(
+        response = await client.get(
             "/api/admin/admin-directory",
             headers={"X-Telegram-Init-Data": make_init_data(settings.bot_token, owner_id)},
         )
-        assert resp.status_code == 200
-        assert resp.headers["cache-control"] == "no-store"
-        assert resp.json() == [
-            {"telegram_id": 123, "role": "owner", "username": "owner_name",
-             "display_name": "Евгений Максимов", "full_name": "Евгений Максимов"},
-            {"telegram_id": 456, "role": "owner", "username": None,
-             "display_name": None, "full_name": None},
-            {"telegram_id": 555, "role": "admin", "username": "admin_name",
-             "display_name": "Иван Иванов", "full_name": "Иван Иванов"},
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        assert response.json() == [
+            {"telegram_id": 123, "role": "owner", "full_name": "Евгений Максимов"},
+            {"telegram_id": 456, "role": "owner", "full_name": None},
+            {"telegram_id": 555, "role": "admin", "full_name": "Иван Иванов"},
         ]
-        assert all("source" not in person for person in resp.json())
+        assert all("source" not in person for person in response.json())
 
-    resp = await client.get(
+    forbidden = await client.get(
         "/api/admin/admin-directory",
         headers={"X-Telegram-Init-Data": make_init_data(settings.bot_token, 555)},
     )
-    assert resp.status_code == 403
+    assert forbidden.status_code == 403
 
 
 @pytest.mark.asyncio
-async def test_directory_excludes_revoked_and_stale_usernames(client, settings, session_factory):
-    from topsbottg.access import revoke_admin
-
+async def test_directory_excludes_revoked_admin(client, settings, session_factory):
     async with session_factory() as session:
-        stale_user = await get_or_create_user(session, 555, "Старое имя")
-        await observe_telegram_profile(session, 555, "old_handle", "Старое", "Имя")
-        stale_user.telegram_profile_seen_at = datetime.now(UTC) - timedelta(days=15)
+        await get_or_create_user(session, 555, "Иван Иванов")
         await grant_admin(
-            session, actor_telegram_id=123, target_telegram_id=555,
-            owner_ids=settings.admin_ids_set,
+            session, actor_telegram_id=123, target_telegram_id=555, owner_ids=settings.admin_ids_set
         )
         await session.commit()
 
     headers = {"X-Telegram-Init-Data": make_init_data(settings.bot_token, 123)}
     first = await client.get("/api/admin/admin-directory", headers=headers)
     assert first.status_code == 200
-    assert first.json()[1] == {
-        "telegram_id": 555, "role": "admin",
-        "username": None, "display_name": "Старое имя", "full_name": "Старое имя",
-    }
+    assert first.json()[1] == {"telegram_id": 555, "role": "admin", "full_name": "Иван Иванов"}
 
     async with session_factory() as session:
         assert await revoke_admin(
@@ -152,22 +153,18 @@ async def test_directory_excludes_revoked_and_stale_usernames(client, settings, 
 
 
 @pytest.mark.asyncio
-async def test_invitation_list_includes_user_display_without_source(
-    client, session_factory, settings
-):
+async def test_invitation_list_uses_registered_name(client, session_factory, settings):
     async with session_factory() as session:
         await get_or_create_user(session, 555, "Иван Иванов")
-        await observe_telegram_profile(session, 555, "first_handle", "Иван", "Иванов")
         invitation = await create_invitation(
             session, actor_id=123, target_id=555, owner_ids=settings.admin_ids_set
         )
         await session.commit()
         invitation_id = invitation.id
     headers = {"X-Telegram-Init-Data": make_init_data(settings.bot_token, 123)}
-    result = await client.get("/api/admin/admin-invitations", headers=headers)
-    assert result.status_code == 200
-    assert result.json()[0]["id"] == invitation_id
-    assert result.json()[0]["username"] == "first_handle"
-    assert result.json()[0]["display_name"] == "Иван Иванов"
-    assert "bot_token" not in result.text
-    assert "env" not in result.text
+    response = await client.get("/api/admin/admin-invitations", headers=headers)
+    assert response.status_code == 200
+    assert response.json()[0]["id"] == invitation_id
+    assert response.json()[0]["full_name"] == "Иван Иванов"
+    assert "bot_token" not in response.text
+    assert "env" not in response.text
