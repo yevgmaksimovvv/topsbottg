@@ -31,10 +31,10 @@ def _filename(value: str | None, kind: str) -> str:
 async def _download(bot, attachment: ChatAttachment) -> tuple[BinaryIO, int]:
     try:
         info = await bot.get_file(attachment.telegram_file_id)
-    except TelegramBadRequest as exc:
-        raise HTTPException(status_code=404, detail="attachment unavailable") from exc
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail="attachment unavailable") from exc
+    except TelegramBadRequest:
+        raise HTTPException(status_code=404, detail="attachment unavailable") from None
+    except Exception:
+        raise HTTPException(status_code=502, detail="attachment unavailable") from None
 
     path = info.file_path
     if not isinstance(path, str) or not path or path.startswith("/") or "://" in path or ".." in path.split("/"):
@@ -58,9 +58,9 @@ async def _download(bot, attachment: ChatAttachment) -> tuple[BinaryIO, int]:
     except HTTPException:
         buffer.close()
         raise
-    except Exception as exc:
+    except Exception:
         buffer.close()
-        raise HTTPException(status_code=502, detail="attachment unavailable") from exc
+        raise HTTPException(status_code=502, detail="attachment unavailable") from None
 
 
 def register_attachment_routes(
