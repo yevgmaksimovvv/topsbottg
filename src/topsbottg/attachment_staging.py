@@ -23,7 +23,7 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 STAGING_QUOTA_BYTES = 256 * 1024 * 1024
 STAGING_MAX_FILES = 1024
 ORPHAN_TTL = timedelta(hours=24)
-_KEY = re.compile(r"[0-9a-f]{48}\\Z")
+_KEY = re.compile(r"[0-9a-f]{48}\Z")
 _staging_lock = asyncio.Lock()
 
 MIME_EXTENSIONS = {
@@ -96,15 +96,15 @@ def _validate_payload(path: Path, *, kind: str, mime: str, filename: str) -> Non
         if not header:
             raise UploadRejected("empty_file", 415)
         if mime == "image/jpeg":
-            valid = header.startswith(b"\\xff\\xd8\\xff")
+            valid = header.startswith(b"\xff\xd8\xff")
         elif mime == "image/png":
-            valid = header.startswith(b"\\x89PNG\\r\\n\\x1a\\n")
+            valid = header.startswith(b"\x89PNG\r\n\x1a\n")
         elif mime == "application/pdf":
             valid = header.startswith(b"%PDF-")
         elif mime == "audio/ogg":
             valid = header.startswith(b"OggS") and b"OpusHead" in header[:128]
         elif mime == "text/plain":
-            valid = b"\\x00" not in header
+            valid = b"\x00" not in header
             if valid:
                 try:
                     path.read_text(encoding="utf-8")
