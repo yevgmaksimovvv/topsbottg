@@ -645,7 +645,11 @@ async def list_users(
     )
     stmt = select(User.id).order_by(func.lower(User.full_name), User.id)
     if registered_only:
-        stmt = stmt.where(User.registration_completed_at.is_not(None))
+        stmt = stmt.where(
+            User.registration_completed_at.is_not(None),
+            func.length(func.trim(User.full_name)) > 0,
+            func.trim(User.full_name) != "Без ФИО",
+        )
     if study_group_id is not None:
         stmt = stmt.where(User.study_group_id == study_group_id)
     if search:
