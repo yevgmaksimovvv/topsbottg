@@ -78,31 +78,33 @@ _ADMIN_EVENT_QUEUE_KEY = "_topsbottg_admin_events"
 class AdminEventsToken:
     token: str
     expires_at: datetime
+    telegram_id: int
 
 
 class AdminEventsTokenStore:
     def __init__(self, ttl_seconds: int = ADMIN_EVENTS_TOKEN_TTL_SECONDS) -> None:
         self._ttl_seconds = ttl_seconds
-        self._tokens: dict[str, datetime] = {}
+        self._tokens: dict[str, AdminEventsToken] = {}
 
-    def issue(self) -> AdminEventsToken:
+    def issue(self, telegram_id: int) -> AdminEventsToken:
         self._purge_expired()
         token = secrets.token_urlsafe(32)
-        expires_at = utcnow() + timedelta(seconds=self._ttl_seconds)
-        self._tokens[token] = expires_at
-        return AdminEventsToken(token=token, expires_at=expires_at)
+        issued = AdminEventsToken(
+            token=token,
+            expires_at=utcnow() + timedelta(seconds=self._ttl_seconds),
+            telegram_id=telegram_id,
+        )
+        self._tokens[token] = issued
+        return issued
 
     def consume(self, token: str) -> AdminEventsToken | None:
         self._purge_expired()
-        expires_at = self._tokens.pop(token, None)
-        if expires_at is None:
-            return None
-        return AdminEventsToken(token=token, expires_at=expires_at)
+        return self._tokens.pop(token, None)
 
     def _purge_expired(self) -> None:
         now = utcnow()
-        for token, expires_at in list(self._tokens.items()):
-            if expires_at <= now:
+        for token, issued in list(self._tokens.items()):
+            if issued.expires_at <= now:
                 self._tokens.pop(token, None)
 
 
@@ -163,8 +165,8 @@ def get_admin_events_token_store() -> AdminEventsTokenStore:
     return _admin_events_token_store
 
 
-def issue_admin_events_token() -> AdminEventsToken:
-    return _admin_events_token_store.issue()
+def issue_admin_events_token(telegram_id: int) -> AdminEventsToken:
+    return _admin_events_token_store.issue(telegram_id)
 
 
 def consume_admin_events_token(token: str) -> AdminEventsToken | None:

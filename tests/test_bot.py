@@ -1011,3 +1011,32 @@ async def test_duplicate_full_names_remain_separate_in_admin_api(client, session
 def test_bot_source_has_no_legacy_payment_parser():
     source = (Path(__file__).resolve().parents[1] / "src/topsbottg/bot.py").read_text(encoding="utf-8")
     assert "parse_payment_reply" not in source
+
+@pytest.mark.asyncio
+async def test_database_admin_can_open_bot_admin_until_revoked(session_factory, settings):
+    from topsbottg.access import grant_admin, revoke_admin
+
+    async with session_factory() as session:
+        await grant_admin(
+            session, actor_telegram_id=123, target_telegram_id=555,
+            owner_ids=settings.admin_ids_set,
+        )
+        await session.commit()
+
+    instance, recording_session = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+    await dispatcher.feed_update(instance, _make_update(instance, 555, "/admin", 1))
+    assert _last_message_method(recording_session).text == "Откройте админку."
+
+    async with session_factory() as session:
+        await revoke_admin(
+            session, actor_telegram_id=123, target_telegram_id=555,
+            owner_ids=settings.admin_ids_set,
+        )
+        await session.commit()
+    await dispatcher.feed_update(instance, _make_update(instance, 555, "/admin", 2))
+    assert _last_message_method(recording_session).text == "Команда доступна только админам."
+
+    # A configured owner can use /admin even without a row in users.
+    await dispatcher.feed_update(instance, _make_update(instance, 123, "/admin", 3))
+    assert _last_message_method(recording_session).text == "Откройте админку."

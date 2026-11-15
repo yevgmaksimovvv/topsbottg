@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import selectinload
 
+from topsbottg.access import get_principal
 from topsbottg.models import Payout, PayoutReadyNotification, PayoutRecipient, PayoutStatus, RecipientStatus
 from topsbottg.services import (
     ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
@@ -110,17 +111,17 @@ async def process_recipient(
             )
 
 
-async def deliver_ready_notifications(bot: MessageSender, session_factory: async_sessionmaker) -> None:
+async def deliver_ready_notifications(bot: MessageSender, session_factory: async_sessionmaker, settings) -> None:
     async with session_factory() as session:
         rows = await claim_ready_notifications(session)
         notifications = [(row.id, row.telegram_id, row.message) for row in rows]
         await session.commit()
     for message_id, chat_id, message in notifications:
-        await deliver_ready_notification(bot, session_factory, message_id, chat_id, message)
+        await deliver_ready_notification(bot, session_factory, message_id, chat_id, message, settings)
 
 
 async def deliver_ready_notification(
-    bot: MessageSender, session_factory: async_sessionmaker, message_id: int, chat_id: int, message: str
+    bot: MessageSender, session_factory: async_sessionmaker, message_id: int, chat_id: int, message: str, settings
 ) -> None:
     async with session_factory() as session:
         notification = await session.get(PayoutReadyNotification, message_id)
@@ -168,6 +169,11 @@ async def deliver_ready_notification(
             if not ready:
                 await settle_ready_notification(session, message_id, discard=True)
                 return
+            # An admin may have lost access since the outbox entry was queued.
+            # Do not deliver payment-ready notifications to revoked identities.
+            if not await get_principal(session, notification.telegram_id, settings.admin_ids_set):
+                await settle_ready_notification(session, message_id, discard=True)
+                return
             error: Exception | None = None
             try:
                 await bot.send_message(chat_id, message)
@@ -188,7 +194,7 @@ async def run_worker(bot: Bot, session_factory: async_sessionmaker, settings, st
                 await session.commit()
             next_recovery = loop.time() + 60
         if now >= next_notification:
-            await deliver_ready_notifications(bot, session_factory)
+            await deliver_ready_notifications(bot, session_factory, settings)
             next_notification = loop.time() + 5
         async with session_factory() as session:
             rows = await claim_pending_recipients(session, limit=max(1, int(settings.broadcast_rate_per_second)))

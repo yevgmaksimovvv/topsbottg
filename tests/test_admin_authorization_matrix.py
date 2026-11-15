@@ -11,6 +11,8 @@ from fastapi.routing import APIRoute
 ADMIN_ROUTES = [
     ("GET", "/api/admin/me", None),
     ("POST", "/api/admin/events-token", None),
+    ("GET", "/api/admin/admin-grants", None),
+    ("DELETE", "/api/admin/admin-grants/10", None),
     ("GET", "/api/admin/study-groups", None),
     ("GET", "/api/admin/users", None),
     ("GET", "/api/admin/users/10", None),
@@ -56,6 +58,7 @@ def test_admin_route_inventory_is_complete(app):
 def _route_template(path: str) -> str:
     parts = path.split("/")
     return "/".join("{user_id}" if value == "10" and parts[index - 1] == "users"
+                    else "{telegram_id}" if value == "10" and parts[index - 1] == "admin-grants"
                     else "{payout_id}" if value == "10" and parts[index - 1] == "payouts"
                     else "{recipient_id}" if value == "20" and parts[index - 1] == "recipients"
                     else value for index, value in enumerate(parts))
@@ -77,3 +80,56 @@ async def test_admin_route_rejects_unauthorized_user(
         f"{method} {path}: expected {expected_status}, got "
         f"{response.status_code}: {response.text}"
     )
+
+
+OWNER_ONLY_ROUTES = {
+    ("GET", "/api/admin/admin-grants"),
+    ("DELETE", "/api/admin/admin-grants/10"),
+}
+
+
+@pytest.mark.parametrize("method,path,body", ADMIN_ROUTES)
+async def test_active_database_admin_can_use_non_owner_routes(
+    client, session_factory, settings, method, path, body
+):
+    from conftest import make_init_data
+    from topsbottg.access import grant_admin
+
+    async with session_factory() as session:
+        await grant_admin(
+            session, actor_telegram_id=123, target_telegram_id=555,
+            owner_ids=settings.admin_ids_set
+        )
+        await session.commit()
+    init_data = make_init_data(settings.bot_token, 555)
+    response = await client.request(
+        method, path, headers={"X-Telegram-Init-Data": init_data}, json=body
+    )
+    if (method, path) in OWNER_ONLY_ROUTES:
+        assert response.status_code == 403, (method, path, response.text)
+    else:
+        assert response.status_code not in (401, 403), (method, path, response.text)
+
+
+@pytest.mark.parametrize("method,path,body", ADMIN_ROUTES)
+async def test_revoked_database_admin_has_no_admin_api_access(
+    client, session_factory, settings, method, path, body
+):
+    from conftest import make_init_data
+    from topsbottg.access import grant_admin, revoke_admin
+
+    async with session_factory() as session:
+        await grant_admin(
+            session, actor_telegram_id=123, target_telegram_id=555,
+            owner_ids=settings.admin_ids_set
+        )
+        await revoke_admin(
+            session, actor_telegram_id=123, target_telegram_id=555,
+            owner_ids=settings.admin_ids_set
+        )
+        await session.commit()
+    init_data = make_init_data(settings.bot_token, 555)
+    response = await client.request(
+        method, path, headers={"X-Telegram-Init-Data": init_data}, json=body
+    )
+    assert response.status_code == 403, (method, path, response.text)

@@ -9,13 +9,15 @@ import urllib.request
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import inspect, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from topsbottg.access import AccessDenied, require_admin, require_owner, revoke_admin
 from topsbottg.config import Settings
 from topsbottg.db import get_session
 from topsbottg.logging_utils import log_event
-from topsbottg.models import PaymentProfile, PaymentReply, Payout, PayoutRecipient, PayoutStatus, StudyGroup, User
+from topsbottg.models import AdminGrant, PaymentProfile, PaymentReply, Payout, PayoutRecipient, PayoutStatus, StudyGroup, User
 from topsbottg.schemas import (
     AddRecipientsIn,
     AdminEventsTokenOut,
@@ -69,7 +71,7 @@ from topsbottg.services import (
 logger = logging.getLogger(__name__)
 
 
-def _require_admin(init_data: str | None, settings: Settings) -> int:
+async def _require_admin(init_data: str | None, settings: Settings, session: AsyncSession) -> int:
     if not init_data:
         log_event(
             logger,
@@ -96,7 +98,9 @@ def _require_admin(init_data: str | None, settings: Settings) -> int:
             status_code=401,
         )
         raise HTTPException(status_code=401, detail=str(exc)) from exc
-    if data.user_id not in settings.admin_ids_set:
+    try:
+        await require_admin(session, data.user_id, settings.admin_ids_set)
+    except AccessDenied as exc:
         log_event(
             logger,
             "WARNING",
@@ -106,7 +110,18 @@ def _require_admin(init_data: str | None, settings: Settings) -> int:
             status_code=403,
             actor_telegram_id=data.user_id,
         )
-        raise HTTPException(status_code=403, detail="admin only")
+        raise HTTPException(status_code=403, detail="admin only") from exc
+    except SQLAlchemyError as exc:
+        log_event(
+            logger,
+            "ERROR",
+            "admin_api_access_denied",
+            "Не удалось проверить роль администратора",
+            reason="database_unavailable",
+            status_code=503,
+            actor_telegram_id=data.user_id,
+        )
+        raise HTTPException(status_code=503, detail="authorization unavailable") from exc
     log_event(
         logger,
         "INFO",
@@ -227,17 +242,35 @@ def _sse_frame(event_type: str, payload: dict[str, object]) -> str:
     return f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
 
-async def _admin_events_stream(*, token_hash: str | None = None):
+async def _sse_permission_valid(telegram_id: int, settings: Settings, session_factory) -> bool:
+    try:
+        async with session_factory() as session:
+            await require_admin(session, telegram_id, settings.admin_ids_set)
+        return True
+    except (AccessDenied, SQLAlchemyError):
+        return False
+
+
+async def _admin_events_stream(
+    *, telegram_id: int, settings: Settings, session_factory, token_hash: str | None = None
+):
     broadcaster = get_admin_events_broadcaster()
     queue = broadcaster.subscribe()
     try:
+        if not await _sse_permission_valid(telegram_id, settings, session_factory):
+            return
         yield _sse_frame(ADMIN_EVENT_PING, {})
         while True:
             try:
-                message = await asyncio.wait_for(queue.get(), timeout=ADMIN_EVENTS_KEEPALIVE_SECONDS)
-                yield _sse_frame(message["event"], message["payload"])
+                message = await asyncio.wait_for(queue.get(), timeout=min(5.0, ADMIN_EVENTS_KEEPALIVE_SECONDS))
+                frame = _sse_frame(message["event"], message["payload"])
             except TimeoutError:
-                yield _sse_frame(ADMIN_EVENT_PING, {})
+                frame = _sse_frame(ADMIN_EVENT_PING, {})
+            # Re-check the actual database role before every frame. This closes
+            # an existing stream after revocation, even without an SSE reconnect.
+            if not await _sse_permission_valid(telegram_id, settings, session_factory):
+                return
+            yield frame
     finally:
         broadcaster.unsubscribe(queue)
 
@@ -319,17 +352,24 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
 
     @app.get("/api/admin/me")
     async def admin_me(
+        session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> dict[str, object]:
-        telegram_id = _require_admin(x_telegram_init_data, settings)
-        return {"telegram_user_id": telegram_id, "telegram_id": telegram_id, "is_admin": True}
+        telegram_id = await _require_admin(x_telegram_init_data, settings, session)
+        return {
+            "telegram_user_id": telegram_id,
+            "telegram_id": telegram_id,
+            "is_admin": True,
+            "role": "owner" if telegram_id in settings.admin_ids_set else "admin",
+        }
 
     @app.post("/api/admin/events-token", response_model=AdminEventsTokenOut)
     async def admin_events_token(
+        session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> AdminEventsTokenOut:
-        _require_admin(x_telegram_init_data, settings)
-        token = issue_admin_events_token()
+        telegram_id = await _require_admin(x_telegram_init_data, settings, session)
+        token = issue_admin_events_token(telegram_id)
         return AdminEventsTokenOut(token=token.token, expires_in=ADMIN_EVENTS_TOKEN_TTL_SECONDS)
 
     @app.get("/api/admin/events")
@@ -339,19 +379,74 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         consumed = consume_admin_events_token(token)
         if consumed is None:
             raise HTTPException(status_code=403, detail="invalid token")
+        # A token proves the identity at issue time, not perpetual authorization.
+        async with session_factory() as session:
+            try:
+                await require_admin(session, consumed.telegram_id, settings.admin_ids_set)
+            except AccessDenied as exc:
+                raise HTTPException(status_code=403, detail="admin only") from exc
+            except SQLAlchemyError as exc:
+                raise HTTPException(status_code=503, detail="authorization unavailable") from exc
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
-        response = StreamingResponse(_admin_events_stream(token_hash=token_hash), media_type="text/event-stream")
+        response = StreamingResponse(
+            _admin_events_stream(
+                telegram_id=consumed.telegram_id,
+                settings=settings,
+                session_factory=session_factory,
+                token_hash=token_hash,
+            ),
+            media_type="text/event-stream",
+        )
         response.headers["Cache-Control"] = "no-cache"
         response.headers["X-Accel-Buffering"] = "no"
         response.headers["Connection"] = "keep-alive"
         return response
+
+    @app.get("/api/admin/admin-grants")
+    async def admin_grants(
+        session: AsyncSession = Depends(get_session),
+        x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
+    ) -> list[dict[str, object]]:
+        actor_id = await _require_admin(x_telegram_init_data, settings, session)
+        try:
+            require_owner(actor_id, settings.admin_ids_set)
+        except AccessDenied as exc:
+            raise HTTPException(status_code=403, detail="owner only") from exc
+        grants = await session.scalars(
+            select(AdminGrant).where(AdminGrant.revoked_at.is_(None)).order_by(AdminGrant.telegram_id)
+        )
+        return [
+            {"telegram_id": grant.telegram_id, "granted_at": grant.granted_at}
+            for grant in grants
+            if grant.telegram_id not in settings.admin_ids_set
+        ]
+
+    @app.delete("/api/admin/admin-grants/{telegram_id}", status_code=204)
+    async def admin_revoke_grant(
+        telegram_id: int,
+        session: AsyncSession = Depends(get_session),
+        x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
+    ) -> None:
+        actor_id = await _require_admin(x_telegram_init_data, settings, session)
+        try:
+            await revoke_admin(
+                session,
+                actor_telegram_id=actor_id,
+                target_telegram_id=telegram_id,
+                owner_ids=settings.admin_ids_set,
+            )
+        except AccessDenied as exc:
+            raise HTTPException(status_code=403, detail="owner only") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.commit()
 
     @app.get("/api/admin/study-groups", response_model=list[StudyGroupOut])
     async def admin_study_groups(
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> list[StudyGroupOut]:
-        _require_admin(x_telegram_init_data, settings)
+        await _require_admin(x_telegram_init_data, settings, session)
         groups = await session.scalars(
             select(StudyGroup)
             .where(
@@ -371,7 +466,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> UserPageOut:
-        actor_telegram_id = _require_admin(x_telegram_init_data, settings)
+        actor_telegram_id = await _require_admin(x_telegram_init_data, settings, session)
         log_event(
             logger,
             "INFO",
@@ -425,7 +520,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> dict[str, object]:
-        actor_telegram_id = _require_admin(x_telegram_init_data, settings)
+        actor_telegram_id = await _require_admin(x_telegram_init_data, settings, session)
         log_event(
             logger,
             "INFO",
@@ -465,7 +560,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> PaymentProfileRevealOut:
-        telegram_id = _require_admin(x_telegram_init_data, settings)
+        telegram_id = await _require_admin(x_telegram_init_data, settings, session)
         log_event(
             logger,
             "INFO",
@@ -530,7 +625,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         offset: int = Query(default=0, ge=0),
         before_id: int | None = Query(default=None, ge=1),
     ) -> list[PayoutOut]:
-        actor_telegram_id = _require_admin(x_telegram_init_data, settings)
+        actor_telegram_id = await _require_admin(x_telegram_init_data, settings, session)
         log_event(
             logger,
             "INFO",
@@ -559,7 +654,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> PayoutOut:
-        telegram_id = _require_admin(x_telegram_init_data, settings)
+        telegram_id = await _require_admin(x_telegram_init_data, settings, session)
         log_event(
             logger,
             "INFO",
@@ -609,7 +704,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> dict[str, object]:
-        _require_admin(x_telegram_init_data, settings)
+        await _require_admin(x_telegram_init_data, settings, session)
         payout = await get_payout(session, payout_id)
         if payout is None:
             raise HTTPException(status_code=404, detail="payout not found")
@@ -628,7 +723,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> None:
-        actor_id = _require_admin(x_telegram_init_data, settings)
+        actor_id = await _require_admin(x_telegram_init_data, settings, session)
         async with payout_send_lock(payout_id, session):
             payout = await get_payout(session, payout_id)
             if payout is None:
@@ -647,7 +742,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> PayoutOut:
-        telegram_id = _require_admin(x_telegram_init_data, settings)
+        telegram_id = await _require_admin(x_telegram_init_data, settings, session)
         log_event(
             logger,
             "INFO",
@@ -699,7 +794,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> dict[str, int]:
-        actor_telegram_id = _require_admin(x_telegram_init_data, settings)
+        actor_telegram_id = await _require_admin(x_telegram_init_data, settings, session)
         log_event(
             logger,
             "INFO",
@@ -742,7 +837,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> dict[str, str]:
-        telegram_id = _require_admin(x_telegram_init_data, settings)
+        telegram_id = await _require_admin(x_telegram_init_data, settings, session)
         log_event(
             logger,
             "INFO",
@@ -784,7 +879,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> PayoutOut:
-        telegram_id = _require_admin(x_telegram_init_data, settings)
+        telegram_id = await _require_admin(x_telegram_init_data, settings, session)
         log_event(
             logger,
             "INFO",
@@ -821,7 +916,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> dict[str, object]:
-        telegram_id = _require_admin(x_telegram_init_data, settings)
+        telegram_id = await _require_admin(x_telegram_init_data, settings, session)
         log_event(
             logger,
             "INFO",
@@ -866,7 +961,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> PayoutOut:
-        telegram_id = _require_admin(x_telegram_init_data, settings)
+        telegram_id = await _require_admin(x_telegram_init_data, settings, session)
         log_event(
             logger,
             "INFO",
@@ -901,7 +996,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> PayoutOut:
-        telegram_id = _require_admin(x_telegram_init_data, settings)
+        telegram_id = await _require_admin(x_telegram_init_data, settings, session)
         log_event(
             logger,
             "INFO",
@@ -937,7 +1032,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> RecipientOut:
-        telegram_id = _require_admin(x_telegram_init_data, settings)
+        telegram_id = await _require_admin(x_telegram_init_data, settings, session)
         log_event(
             logger,
             "INFO",
@@ -978,7 +1073,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> list[RecipientOut]:
-        actor_telegram_id = _require_admin(x_telegram_init_data, settings)
+        actor_telegram_id = await _require_admin(x_telegram_init_data, settings, session)
         log_event(
             logger,
             "INFO",
@@ -1011,7 +1106,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> RecipientOut:
-        telegram_id = _require_admin(x_telegram_init_data, settings)
+        telegram_id = await _require_admin(x_telegram_init_data, settings, session)
         log_event(
             logger,
             "INFO",
