@@ -7,6 +7,7 @@ import logging
 import urllib.request
 from datetime import UTC, datetime, timedelta
 
+from aiogram import Bot
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import inspect, select, text
@@ -613,6 +614,17 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> dict[str, object]:
         actor_id = await _require_admin(x_telegram_init_data, settings, session)
+        if payload.expected_username is not None:
+            require_owner(actor_id, settings.admin_ids_set)
+            async with Bot(token=settings.bot_token) as bot:
+                try:
+                    chat = await bot.get_chat(payload.target_telegram_id)
+                except Exception as exc:
+                    logger.warning("Telegram identity verification failed: %s", type(exc).__name__)
+                    raise HTTPException(status_code=503, detail="Не удалось проверить Telegram ID.") from exc
+            current_username = (chat.username or "").lower()
+            if current_username != payload.expected_username.strip().removeprefix("@").lower():
+                raise HTTPException(status_code=409, detail="Telegram username изменился. Повторите поиск.")
         try:
             invitation = await create_invitation(
                 session,
