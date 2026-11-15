@@ -1338,6 +1338,8 @@ textarea::placeholder {
   scroll-padding-block: 12px;
 }
 .inbox-older-button {
+  position: relative;
+  z-index: 1;
   display: block;
   min-height: 36px;
   padding: 6px 16px;
