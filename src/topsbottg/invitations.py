@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from topsbottg.access import AccessDenied, get_principal, grant_admin_from_invitation, require_owner
@@ -17,33 +18,36 @@ class InvitationConflict(ValueError):
     pass
 
 
-def normalize_username(value: str) -> str:
-    name = value.strip().removeprefix("@").lower()
-    if not _USERNAME.fullmatch(name):
-        raise ValueError("Укажите Telegram username из 5–32 латинских букв, цифр или _.")
-    return name
-
-
-def _utc(value: datetime) -> datetime:
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-
-
-def _audit(session: AsyncSession, actor_id: int, action: str, invitation_id: int) -> None:
-    session.add(
-        AuditLog(
-            actor_telegram_id=actor_id,
-            action=action,
-            entity_type="admin_invitation",
-            entity_id=str(invitation_id),
-        )
-    )
-
-
 async def find_candidate(session: AsyncSession, *, telegram_id: int) -> User | None:
     """An invitation target must already exist in the registration database."""
     if telegram_id <= 0:
         raise ValueError("Telegram ID must be positive.")
     return await session.scalar(select(User).where(User.telegram_id == telegram_id))
+
+
+async def search_candidates(
+    session: AsyncSession, *, name: str, study_group_id: int | None = None,
+    limit: int = 30, offset: int = 0,
+) -> tuple[list[User], bool]:
+    """Find registered users by any fragments of their name, independently of group membership."""
+    words = name.lower().split()
+    if not words:
+        return [], False
+    query = (
+        select(User)
+        .options(selectinload(User.study_group))
+        .where(User.full_name != "Без ФИО")
+    )
+    for word in words:
+        # LIKE wildcards in names are literal, not a way to enumerate all users.
+        literal = word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        query = query.where(func.lower(User.full_name).like(f"%{literal}%", escape="\\"))
+    if study_group_id is not None:
+        query = query.where(User.study_group_id == study_group_id)
+    rows = list((await session.scalars(
+        query.order_by(func.lower(User.full_name), User.id).offset(offset).limit(limit + 1)
+    )).all())
+    return rows[:limit], len(rows) > limit
 
 
 async def create_invitation(
