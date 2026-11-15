@@ -6,8 +6,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision = "0017_persistent_bot_fsm"
-down_revision = "0016_conversation_storage"
+revision = "0018_persistent_bot_fsm"
+down_revision = "0017_conversation_list_snapshots"
 branch_labels = None
 depends_on = None
 

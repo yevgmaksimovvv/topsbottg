@@ -34,7 +34,6 @@ from topsbottg.services import (
     get_payment_profile,
     get_user_by_telegram_id,
     get_user_study_group,
-    queue_admin_event,
     save_profile_and_snapshot,
     set_user_study_group,
     start_user,
@@ -839,7 +838,7 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
                 if consumed is not None:
                     return
                 conversation = await get_or_create_conversation(session, user_id=user.id)
-                _, created = await record_incoming_message(
+                await record_incoming_message(
                     session,
                     conversation_id=conversation.id,
                     telegram_chat_id=message.chat.id,
@@ -850,8 +849,6 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
                     ),
                     source="telegram_reply" if message.reply_to_message is not None else "telegram",
                 )
-                if created:
-                    queue_admin_event(session, "chat.changed", {"conversation_id": conversation.id})
                 await session.commit()
 
     return router
