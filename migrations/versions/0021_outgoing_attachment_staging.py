@@ -12,11 +12,13 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.alter_column("chat_attachments", "telegram_file_id", existing_type=sa.Text(), nullable=True)
-    op.add_column("chat_attachments", sa.Column("staging_key", sa.String(64), nullable=True))
+    with op.batch_alter_table("chat_attachments") as batch:
+        batch.alter_column("telegram_file_id", existing_type=sa.Text(), nullable=True)
+        batch.add_column(sa.Column("staging_key", sa.String(64), nullable=True))
 
 
 def downgrade() -> None:
     op.execute("DELETE FROM chat_attachments WHERE telegram_file_id IS NULL")
-    op.drop_column("chat_attachments", "staging_key")
-    op.alter_column("chat_attachments", "telegram_file_id", existing_type=sa.Text(), nullable=False)
+    with op.batch_alter_table("chat_attachments") as batch:
+        batch.drop_column("staging_key")
+        batch.alter_column("telegram_file_id", existing_type=sa.Text(), nullable=False)
