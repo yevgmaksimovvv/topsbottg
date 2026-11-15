@@ -25,7 +25,7 @@ from topsbottg.access import AccessDenied, get_principal
 from topsbottg.conversations import get_or_create_conversation, record_incoming_message
 from topsbottg.invitations import decide_invitation
 from topsbottg.logging_utils import log_event
-from topsbottg.models import PayoutRecipient, RecipientStatus
+from topsbottg.models import BotSensitiveMessage, PayoutRecipient, RecipientStatus
 from topsbottg.services import (
     confirm_saved_profile,
     get_latest_active_recipient,
@@ -282,6 +282,18 @@ async def _start_payment_details_flow(
     await _safe_message_answer(message, actor_telegram_id, text, reply_markup=ReplyKeyboardRemove())
 
 
+def _insert_sensitive_message(session):
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        return pg_insert(BotSensitiveMessage)
+    if dialect == "sqlite":
+        return sqlite_insert(BotSensitiveMessage)
+    raise NotImplementedError(f"Unsupported dialect for sensitive messages: {dialect}")
+
+
 async def _save_payment_details(
     message: Message,
     state: FSMContext,
@@ -314,6 +326,18 @@ async def _save_payment_details(
             user=user,
             payload=raw_text,
             active_recipient=active_recipient,
+        )
+        # Keep only Telegram identifiers to reject replays after FSM has been cleared.
+        statement = _insert_sensitive_message(session).values(
+            telegram_chat_id=message.chat.id, telegram_message_id=message.message_id
+        )
+        await session.execute(
+            statement.on_conflict_do_nothing(
+                index_elements=[
+                    BotSensitiveMessage.telegram_chat_id,
+                    BotSensitiveMessage.telegram_message_id,
+                ]
+            )
         )
         await session.commit()
     await state.clear()
@@ -794,6 +818,12 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
         async with session_factory() as session:
             user = await get_user_by_telegram_id(session, message.from_user.id)
             if user is None or user.registration_completed_at is None:
+                return
+            consumed = await session.get(
+                BotSensitiveMessage,
+                (message.chat.id, message.message_id),
+            )
+            if consumed is not None:
                 return
             conversation = await get_or_create_conversation(session, user_id=user.id)
             _, created = await record_incoming_message(

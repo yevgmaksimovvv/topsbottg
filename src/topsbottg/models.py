@@ -158,6 +158,21 @@ class ConversationRead(Base):
     conversation: Mapped[Conversation] = relationship(back_populates="reads")
 
 
+class BotFSMState(Base):
+    __tablename__ = "bot_fsm_states"
+
+    storage_key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    state: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    data: Mapped[dict] = mapped_column(json_type, nullable=False, default=dict)
+
+
+class BotSensitiveMessage(Base):
+    __tablename__ = "bot_sensitive_messages"
+
+    telegram_chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    telegram_message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+
 class PaymentProfile(Base, TimestampMixin):
     __tablename__ = "payment_profiles"
 
