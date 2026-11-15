@@ -83,8 +83,8 @@ async function withPage(run) {
     await page.waitForFunction(async () => (await import("/miniapp/js/store.js")).state.adminRole === "owner");
     await run({ page, requests });
     assert.deepEqual(errors, []);
-    assert.equal(requests.some((request) => /\/conversations|\/chat-messages/.test(request)), false,
-      "Inbox fixture must not call absent backend API");
+    assert.equal(requests.some((request) => /\/conversations\/\d+\/messages/.test(request)), false,
+      "Fixture must not send real conversation messages");
   } finally {
     await browser.close();
     if (server.listening) await new Promise((done) => server.close(done));
@@ -193,9 +193,9 @@ async function installFixture(page, unread = 3) {
   await page.locator("#inbox-open").waitFor({ state: "visible" });
 }
 
-test("Inbox stays hidden in production and preserves four payout tabs", async () => {
+test("Inbox appears after admin authorization and preserves four payout tabs", async () => {
   await withPage(async ({ page, requests }) => {
-    assert.equal(await page.locator("#inbox-open").isVisible(), false);
+    await page.locator("#inbox-open").waitFor({ state: "visible" });
     assert.equal(await page.locator("#inbox-dialog").isVisible(), false);
     assert.deepEqual((await page.locator("[data-mobile-view]").allTextContents()).map((name) => name.trim()),
       ["Создать", "Выбор", "Получатели", "История"]);
@@ -203,8 +203,9 @@ test("Inbox stays hidden in production and preserves four payout tabs", async ()
       await page.locator('[data-mobile-view="' + tab + '"]').click();
       assert.equal(await page.locator('[data-screen="' + tab + '"]').isVisible(), true);
     }
-    assert.equal(requests.some((req) => req.includes("/conversations")), false);
-    assert.equal(await page.locator("[data-inbox-write]").count(), 0);
+    assert.equal(requests.some((req) => req.includes("/conversations/summary")), true);
+    await page.locator('[data-inbox-write="1"]').waitFor();
+    assert.equal(await page.locator("[data-inbox-write]").count(), 3);
   });
 });
 
@@ -331,8 +332,8 @@ test("Inbox: history, read marker, older messages, incoming refresh, send/retry 
     assert.equal(sent.accepted.length, 1, "Backend accepted only one message");
     assert.equal(await page.locator("#inbox-history .inbox-message").filter({ hasText: "Первый ответ" }).count(), 1);
     assert.equal(await page.locator("#inbox-history .inbox-message").filter({ hasText: "Первый ответ" }).locator("[data-inbox-retry]").count(), 0);
-    assert.equal(await page.locator("#inbox-history [data-inbox-retry='54']").count(), 0,
-      "Failed server messages without an original key must not be blindly re-sent");
+    assert.equal(await page.locator("#inbox-history [data-inbox-retry='54']").innerText(),
+      "Отправить заново", "A server-side failure needs an explicit new send");
 
     await page.evaluate(() => {
       const fixture = window.__inboxFixture;
