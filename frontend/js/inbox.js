@@ -18,6 +18,7 @@ const inbox = {
   historyCursor: null,
   historyRequest: 0,
   historyLoading: false,
+  historyError: "",
   readThrough: null,
   replyTo: null,
   unread: 0,
@@ -219,7 +220,7 @@ function renderHistory({ preserveScroll = false } = {}) {
   el("inbox-older")?.classList.toggle("hidden", !inbox.historyCursor);
   if (el("inbox-older")) el("inbox-older").disabled = inbox.historyLoading;
   status("inbox-history-status", inbox.historyLoading
-    ? "Загружаем сообщения…" : inbox.messages.length ? "" : "Сообщений пока нет.");
+    ? "Загружаем сообщения…" : inbox.historyError || (inbox.messages.length ? "" : "Сообщений пока нет."));
   renderReply();
   if (preserveScroll) list.scrollTop = oldTop + list.scrollHeight - oldHeight;
   else if (atBottom || !oldHeight) list.scrollTop = list.scrollHeight;
@@ -233,6 +234,7 @@ async function loadMessages({ older = false, refresh = false } = {}) {
   const before = older ? inbox.historyCursor : null;
   if (older && !before) return;
   inbox.historyLoading = true;
+  inbox.historyError = "";
   renderHistory();
   const list = el("inbox-history");
   const oldScrollHeight = list.scrollHeight;
@@ -251,10 +253,11 @@ async function loadMessages({ older = false, refresh = false } = {}) {
     if (wasAtBottom || !older) void markRead();
   } catch (error) {
     if (generation === inbox.historyRequest && client === inbox.client)
-      status("inbox-history-status", error?.message || "Не удалось загрузить сообщения.");
+      inbox.historyError = error?.message || "Не удалось загрузить сообщения.";
   } finally {
     if (generation === inbox.historyRequest) {
       inbox.historyLoading = false;
+      status("inbox-history-status", inbox.historyError || (inbox.messages.length ? "" : "Сообщений пока нет."));
       el("inbox-older").disabled = false;
       el("inbox-older")?.classList.toggle("hidden", !inbox.historyCursor);
     }
@@ -288,6 +291,7 @@ async function openConversation(conversation) {
   inbox.historyCursor = null;
   inbox.readThrough = null;
   inbox.readingId = null;
+  inbox.historyError = "";
   inbox.replyTo = null;
   ++inbox.historyRequest;
   el("inbox-list-screen").hidden = true;
@@ -367,7 +371,7 @@ function openInbox() {
   inbox.opener = document.activeElement;
   dialog().showModal();
   const back = telegramWebApp()?.BackButton;
-  inbox.backHandler = () => { if (isOpen()) dialog().close(); };
+  inbox.backHandler = closeInbox;
   back?.onClick?.(inbox.backHandler);
   back?.show?.();
   renderGroups();
@@ -375,7 +379,10 @@ function openInbox() {
 }
 
 function closeInbox() {
-  if (isOpen()) dialog().close();
+  if (isOpen()) {
+    dialog().close();
+    cleanup();
+  }
 }
 
 function cleanup() {
