@@ -9,13 +9,12 @@ import os
 import re
 import secrets
 import zipfile
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi import UploadFile
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from topsbottg.models import ChatAttachment, ChatMessageOutbox
@@ -63,9 +62,12 @@ def staging_path(root: str | Path, key: str) -> Path:
     return Path(root) / key
 
 
-def remove_staged_file(root: str | Path, key: str) -> None:
-    with suppress(OSError):
+def remove_staged_file(root: str | Path, key: str) -> bool:
+    try:
         staging_path(root, key).unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
 
 
 def _canonical_name(filename: str | None, kind: str) -> str:
@@ -210,37 +212,75 @@ async def stage_upload(file: UploadFile, *, kind: str, root: str | Path) -> Stag
             _unlock_directory(fd)
 
 
+async def release_staging_reference(
+    session_factory: async_sessionmaker, *, message_id: int, key: str,
+) -> None:
+    async with session_factory() as session:
+        await session.execute(
+            update(ChatAttachment)
+            .where(
+                ChatAttachment.chat_message_id == message_id,
+                ChatAttachment.staging_key == key,
+            )
+            .values(staging_key=None)
+        )
+        await session.commit()
+
+
 async def cleanup_staging(root: str | Path, session_factory: async_sessionmaker) -> int:
-    """Never remove a file referenced by a queued or leased delivery."""
+    """Inspect only files present in staging, never the entire attachment history."""
     root = Path(root)
     if not root.exists():
         return 0
-    async with session_factory() as session:
-        rows = (await session.execute(
-            select(ChatAttachment.staging_key, ChatMessageOutbox.status)
-            .join(ChatMessageOutbox, ChatMessageOutbox.message_id == ChatAttachment.chat_message_id)
-            .where(ChatAttachment.staging_key.is_not(None))
-        )).all()
-    active = {key for key, status in rows if status in ("queued", "sending")}
-    terminal = {key for key, status in rows if status in ("sent", "failed")}
     cutoff = datetime.now(UTC) - ORPHAN_TTL
     deleted = 0
+    cleared: list[str] = []
     async with _staging_lock:
         fd = await _lock_directory(root)
         try:
-            for item in root.iterdir():
-                if _KEY.fullmatch(item.name) is None or item.is_symlink() or not item.is_file():
-                    continue
-                if item.name in active:
+            files = [
+                item for item in root.iterdir()
+                if _KEY.fullmatch(item.name) is not None
+                and not item.is_symlink() and item.is_file()
+            ]
+            if not files:
+                return 0
+            # At most STAGING_MAX_FILES entries under the enforced disk quota.
+            keys = [item.name for item in files]
+            async with session_factory() as session:
+                rows = (await session.execute(
+                    select(ChatAttachment.staging_key, ChatMessageOutbox.status)
+                    .join(
+                        ChatMessageOutbox,
+                        ChatMessageOutbox.message_id == ChatAttachment.chat_message_id,
+                    )
+                    .where(ChatAttachment.staging_key.in_(keys))
+                )).all()
+            statuses = dict(rows)
+            for item in files:
+                status = statuses.get(item.name)
+                if status in ("queued", "sending"):
                     continue
                 try:
-                    if item.name not in terminal and datetime.fromtimestamp(item.stat().st_mtime, tz=UTC) > cutoff:
-                        # Uncommitted uploads might have no database row yet.
+                    if status not in ("sent", "failed") and (
+                        datetime.fromtimestamp(item.stat().st_mtime, tz=UTC) > cutoff
+                    ):
+                        # An uncommitted upload has no matching row yet.
                         continue
                     item.unlink()
                     deleted += 1
+                    if status in ("sent", "failed"):
+                        cleared.append(item.name)
                 except OSError:
                     continue
+            if cleared:
+                async with session_factory() as session:
+                    await session.execute(
+                        update(ChatAttachment)
+                        .where(ChatAttachment.staging_key.in_(cleared))
+                        .values(staging_key=None)
+                    )
+                    await session.commit()
         finally:
             _unlock_directory(fd)
     return deleted

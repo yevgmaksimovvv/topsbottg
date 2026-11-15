@@ -216,6 +216,7 @@ class ChatMessageOutbox(Base, TimestampMixin):
 
 class ChatAttachment(Base):
     __tablename__ = "chat_attachments"
+    __table_args__ = (Index("ix_chat_attachments_staging_key", "staging_key"),)
 
     chat_message_id: Mapped[int] = mapped_column(
         ForeignKey("chat_messages.id", ondelete="CASCADE"), primary_key=True

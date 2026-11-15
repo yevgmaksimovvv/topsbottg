@@ -21,8 +21,17 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from topsbottg.access import get_principal
-from topsbottg.attachment_staging import cleanup_staging, remove_staged_file, staging_path
-from topsbottg.chat_outbox import claim_chat_outbox, settle_chat_outbox
+from topsbottg.attachment_staging import (
+    cleanup_staging,
+    release_staging_reference,
+    remove_staged_file,
+    staging_path,
+)
+from topsbottg.chat_outbox import (
+    CHAT_MEDIA_SEND_TIMEOUT_SECONDS,
+    claim_chat_outbox,
+    settle_chat_outbox,
+)
 from topsbottg.models import (
     AdminInvitation,
     Payout,
@@ -336,6 +345,7 @@ async def deliver_chat_outbox(
                 if not path.is_file() or path.is_symlink():
                     raise FileNotFoundError("staged media missing")
                 media = FSInputFile(path, filename=claim.filename)
+                kwargs["request_timeout"] = CHAT_MEDIA_SEND_TIMEOUT_SECONDS
                 if claim.kind == "photo":
                     operation = bot.send_photo(claim.chat_id, media, caption=claim.caption, **kwargs)
                 elif claim.kind == "document":
@@ -344,7 +354,13 @@ async def deliver_chat_outbox(
                     operation = bot.send_voice(claim.chat_id, media, caption=claim.caption, **kwargs)
                 else:
                     raise ValueError("unsupported outbox media kind")
-            response = await asyncio.wait_for(operation, timeout=CHAT_SEND_TIMEOUT_SECONDS)
+            response = await asyncio.wait_for(
+                operation,
+                timeout=(
+                    CHAT_SEND_TIMEOUT_SECONDS
+                    if claim.kind == "text" else CHAT_MEDIA_SEND_TIMEOUT_SECONDS
+                ),
+            )
             telegram_message_id = getattr(response, "message_id", None)
             if type(telegram_message_id) is not int or telegram_message_id <= 0:
                 telegram_message_id = None
@@ -382,8 +398,10 @@ async def deliver_chat_outbox(
                 row = await session.get(ChatMessageOutbox, claim.id)
                 terminal = row is not None and row.status in ("sent", "failed")
             await session.commit()
-        if terminal and claim.staging_key:
-            remove_staged_file(staging_dir, claim.staging_key)
+        if terminal and claim.staging_key and remove_staged_file(staging_dir, claim.staging_key):
+            await release_staging_reference(
+                session_factory, message_id=claim.message_id, key=claim.staging_key,
+            )
 
 
 async def run_worker(

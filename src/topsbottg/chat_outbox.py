@@ -18,6 +18,8 @@ from topsbottg.services import queue_admin_event
 
 MAX_CHAT_ATTEMPTS = 5
 CHAT_CLAIM_LEASE = timedelta(minutes=2)
+CHAT_MEDIA_SEND_TIMEOUT_SECONDS = 300
+CHAT_MEDIA_CLAIM_LEASE = timedelta(minutes=6)
 CHAT_RETRY_BASE_SECONDS = 3
 CHAT_RETRY_MAX_SECONDS = 300
 
@@ -300,7 +302,9 @@ async def claim_chat_outbox(
         row.status = "sending"
         row.attempts += 1
         row.claim_token = token
-        row.claimed_until = now + CHAT_CLAIM_LEASE
+        row.claimed_until = now + (
+            CHAT_MEDIA_CLAIM_LEASE if message.kind != "text" else CHAT_CLAIM_LEASE
+        )
         row.retry_at = None
         queue_admin_event(session, "chat.changed", {"conversation_id": row.conversation_id})
         claims.append(ChatOutboxClaim(

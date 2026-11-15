@@ -114,7 +114,9 @@ async def test_document_upload_reply_and_worker_cleanup(client, settings, sessio
     bot = FakeMediaBot()
     await deliver_chat_outbox(bot, session_factory, settings.chat_staging_dir)
     assert bot.calls == [("document", telegram_id, "report.pdf", {
-        "caption": "Подпись", "reply_parameters": bot.calls[0][3]["reply_parameters"],
+        "caption": "Подпись",
+        "reply_parameters": bot.calls[0][3]["reply_parameters"],
+        "request_timeout": 300,
     })]
     assert bot.calls[0][3]["reply_parameters"].message_id == 53
     assert not stage.exists()

@@ -485,8 +485,10 @@ def register_conversation_routes(
                 raise HTTPException(status_code=409, detail="idempotency key reused with different payload") from exc
             except ValueError as exc:
                 raise HTTPException(status_code=404, detail="reply message not found in conversation") from exc
-            await session.commit()
+            # COMMIT can succeed before its await is cancelled or raises. Once a
+            # new outbox row exists, deletion is unsafe; orphan cleanup owns the file.
             keep_file = created
+            await session.commit()
             return ChatMessageAcceptedOut(message=_message_out(message))
         finally:
             await form.close()
