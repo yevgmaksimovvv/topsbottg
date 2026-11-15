@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -17,7 +16,7 @@ from sqlalchemy import select
 
 from topsbottg.bot import CHANGE_PAYMENT_DETAILS_BUTTON_TEXT
 from topsbottg.main import create_bot_dispatcher
-from topsbottg.models import AdminGrant, ChatAttachment, ChatMessage, Conversation, User
+from topsbottg.models import AdminGrant, ChatAttachment, ChatMessage, Conversation
 from topsbottg.services import get_admin_events_broadcaster, get_or_create_user
 
 
