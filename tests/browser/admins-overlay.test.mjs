@@ -202,6 +202,9 @@ test("owner can invite, cancel, revoke; modal retains payout state and supports 
     await page.waitForFunction(() => document.querySelector("#admins-search-error")?.textContent.includes("Backend"));
     await page.locator("#admins-search-form button").click();
     await page.locator("#admins-candidate").getByText("Анна Петрова").waitFor();
+    const candidateBox = await page.locator(".admins-candidate-card").boundingBox();
+    assert.ok(candidateBox && candidateBox.height < 160,
+      `Candidate card is unexpectedly tall: ${candidateBox?.height}`);
     await page.locator("#admins-candidate [data-admin-action='invite']").click();
     assert.equal(state.invitations.length, 0);
     await page.locator("#admins-candidate [data-admin-action='confirm-invite']").click();
