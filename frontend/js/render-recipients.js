@@ -122,8 +122,9 @@ export function renderRecipientsInto() {
   $("recipient-filters")?.classList.toggle("hidden", noPayout);
   root.classList.toggle("hidden", noPayout);
   if (stateLabel) {
+    stateLabel.classList.toggle("is-empty", noPayout);
     if (noPayout) {
-      stateLabel.innerHTML = "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0432\u044b\u043f\u043b\u0430\u0442\u0443 \u0432 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 <button type=\"button\" class=\"button button-quiet\" data-action=\"open-history\">\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u0438\u0441\u0442\u043e\u0440\u0438\u044e</button>";
+      stateLabel.innerHTML = '<button type="button" class="button button-quiet" data-action="open-history">Открыть историю</button>';
     } else {
       stateLabel.textContent = state.loading.recipients && !state.recipients.length
         ? "\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430 \u043f\u043e\u043b\u0443\u0447\u0430\u0442\u0435\u043b\u0435\u0439\u2026"
