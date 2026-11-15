@@ -143,3 +143,70 @@ class PayoutOut(BaseModel):
     created_by_telegram_id: int
     created_at: datetime
     updated_at: datetime
+
+
+class ConversationCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int = Field(gt=0, strict=True)
+
+
+class ConversationOpenOut(BaseModel):
+    conversation_id: int
+
+
+class ConversationUserOut(BaseModel):
+    id: int
+    telegram_id: int
+    full_name: str
+    study_group_id: int | None
+    study_group_name: str | None
+
+
+class ChatMessageOut(BaseModel):
+    id: int
+    conversation_id: int
+    direction: Literal["incoming", "outgoing"]
+    kind: str
+    text: str | None
+    caption: str | None = None
+    created_at: datetime
+    author_admin_telegram_id: int | None = None
+    telegram_message_id: int | None = None
+    reply_to_telegram_message_id: int | None = None
+    delivery_status: Literal["queued", "sending", "sent", "failed"] | None = None
+    delivery_error_code: str | None = None
+    attachment: dict | None = None
+
+
+class ConversationItemOut(BaseModel):
+    id: int
+    user: ConversationUserOut
+    last_message: ChatMessageOut | None
+    unread_count: int
+    last_message_at: datetime | None
+
+
+class ConversationPageOut(BaseModel):
+    items: list[ConversationItemOut]
+    next_cursor: str | None
+
+
+class ChatMessagePageOut(BaseModel):
+    items: list[ChatMessageOut]
+    next_cursor: str | None
+
+
+class ConversationSummaryOut(BaseModel):
+    unread_count: int
+
+
+class ConversationReadIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    last_read_message_id: int = Field(gt=0, strict=True)
+
+
+class ConversationReadOut(BaseModel):
+    last_read_message_id: int
+    unread_count: int
