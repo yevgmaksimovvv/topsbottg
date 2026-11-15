@@ -8,13 +8,23 @@
     />
     <meta name="color-scheme" content="light dark" />
     <title>topsbottg</title>
-    <link rel="stylesheet" href="/miniapp/styles.css?v=20261108-redesign-1" />
+    <link rel="stylesheet" href="/miniapp/styles.css?v=20261115-admins-1" />
   </head>
   <body>
     <main class="app-shell">
       <header class="app-header">
         <h1 id="screen-title">Новая выплата</h1>
-        <div id="auth-state" class="hidden"></div>
+        <div class="header-actions">
+          <button type="button" id="admins-open" class="header-icon-button hidden"
+            aria-label="Управление администраторами" title="Администраторы">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06-2.12 2.12-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21h-3v-.08a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06-2.12-2.12.06-.06A1.65 1.65 0 0 0 7.2 15a1.65 1.65 0 0 0-1.51-1H5v-3h.69a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06L8.93 6l.06.06a1.65 1.65 0 0 0 1.82.33 1.65 1.65 0 0 0 1-1.51V4h3v.88a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06 2.12 2.12-.06.06A1.65 1.65 0 0 0 19.4 10a1.65 1.65 0 0 0 1.51 1H21v3h-.09A1.65 1.65 0 0 0 19.4 15Z"></path>
+            </svg>
+          </button>
+          <div id="auth-state" class="hidden"></div>
+        </div>
       </header>
       <nav class="bottom-nav" aria-label="Разделы">
         <button
@@ -310,6 +320,41 @@
       </aside>
     </main>
 
+    <dialog id="admins-dialog" class="admins-dialog" aria-labelledby="admins-title">
+      <div class="admins-panel">
+        <header class="admins-panel-header">
+          <h2 id="admins-title">Администраторы</h2>
+          <button type="button" id="admins-close" class="header-icon-button"
+            aria-label="Закрыть окно администраторов">×</button>
+        </header>
+        <div class="admins-panel-content">
+          <section aria-labelledby="admins-members-title" class="admins-section">
+            <div class="admins-section-heading">
+              <h3 id="admins-members-title">Команда</h3>
+              <button type="button" id="admins-refresh" class="admins-text-button">Обновить</button>
+            </div>
+            <p id="admins-status" class="admins-feedback" role="status"></p>
+            <div id="admins-members" class="admins-members"></div>
+          </section>
+          <section aria-labelledby="admins-invite-title" class="admins-section">
+            <h3 id="admins-invite-title">Пригласить</h3>
+            <form id="admins-search-form" class="admins-search-form">
+              <label for="admins-search-input" class="sr-only">Username или Telegram ID</label>
+              <input id="admins-search-input" name="search" type="text" maxlength="33"
+                autocomplete="off" placeholder="@username или Telegram ID" required />
+              <button type="submit" class="button button-primary">Найти</button>
+            </form>
+            <p id="admins-search-error" class="admins-feedback" role="status"></p>
+            <div id="admins-candidate" aria-live="polite"></div>
+          </section>
+          <section aria-labelledby="admins-pending-title" class="admins-section">
+            <h3 id="admins-pending-title">Приглашения</h3>
+            <div id="admins-pending" class="admins-members"></div>
+          </section>
+        </div>
+      </div>
+    </dialog>
+
     <dialog
       id="confirm-dialog"
       class="confirm-dialog"
@@ -346,6 +391,6 @@
       <pre id="preview" class="preview-root"></pre>
     </dialog>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script type="module" src="/miniapp/app.js?v=20261108-redesign-1"></script>
+    <script type="module" src="/miniapp/app.js?v=20261115-admins-1"></script>
   </body>
 </html>

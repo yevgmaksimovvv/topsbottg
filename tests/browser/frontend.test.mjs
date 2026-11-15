@@ -187,6 +187,7 @@ test("responsive Mini App and payout workflows", async (t) => {
         (method === "GET" && path === "/api/admin/events") ||
         (method === "GET" && path === "/api/admin/users") ||
         (method === "GET" && path === "/api/admin/study-groups") ||
+        (method === "GET" && path === "/api/admin/me") ||
         ((method === "GET" || method === "POST") && path === "/api/admin/payouts") ||
         (method === "GET" && new RegExp("^/api/admin/payouts/[0-9]+$").test(path)) ||
         (method === "GET" && new RegExp("^/api/admin/payouts/[0-9]+/recipients$").test(path)) ||
@@ -241,6 +242,8 @@ test("responsive Mini App and payout workflows", async (t) => {
       }
       let data = {};
       if (path.endsWith("/events-token")) data = { token: "browser-test" };
+      else if (path.endsWith("/admin/me"))
+        data = { telegram_user_id: 123, is_admin: true, role: "owner" };
       else if (path.endsWith("/events"))
         return route.fulfill({
           status: 200,

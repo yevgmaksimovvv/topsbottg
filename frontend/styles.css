@@ -128,6 +128,40 @@ textarea:focus-visible {
   font-weight: 650;
   margin: 0;
 }
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.app-header h1 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.header-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 9px;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-size: 26px;
+  line-height: 1;
+}
+.header-icon-button svg {
+  display: block;
+  width: 22px;
+  height: 22px;
+}
 .workspace {
   max-width: 1120px;
   margin: 0 auto;
@@ -705,6 +739,168 @@ textarea::placeholder {
 .toast-success {
   border-color: var(--success);
 }
+.admins-dialog {
+  width: min(calc(100% - 24px), 520px);
+  max-width: 520px;
+  max-height: min(92dvh, 740px);
+  padding: 0;
+  overflow: hidden;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
+.admins-dialog::backdrop {
+  background: rgba(0, 0, 0, .6);
+}
+.admins-panel {
+  display: flex;
+  flex-direction: column;
+  max-height: min(92dvh, 740px);
+  min-height: 0;
+}
+.admins-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.admins-panel-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+}
+.admins-panel-content {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  min-height: 0;
+  padding: 0 16px max(16px, env(safe-area-inset-bottom));
+}
+.admins-section {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border);
+}
+.admins-section:last-child {
+  border-bottom: 0;
+}
+.admins-section h3 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.admins-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.admins-section-heading h3 {
+  margin-bottom: 0;
+}
+.admins-members {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+.admins-member,
+.admins-candidate-card {
+  min-width: 0;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.admins-member {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.admins-member-identity {
+  display: flex;
+  flex: 1 1 160px;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.admins-member-identity strong {
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.admins-member-identity span {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.admins-member-actions,
+.admins-candidate-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.admins-text-button {
+  padding: 8px 6px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 500;
+  border: 0;
+  background: transparent;
+}
+.admins-danger {
+  color: var(--danger);
+}
+.admins-revoke-warning {
+  display: block;
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--muted);
+}
+.admins-search-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+.admins-search-form input {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--field);
+}
+.admins-search-form button {
+  min-height: 44px;
+}
+.admins-candidate-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 10px;
+}
+.admins-feedback {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--danger);
+}
+.admins-feedback:empty {
+  display: none;
+}
+.admins-empty {
+  margin: 0;
+  padding: 8px 2px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .confirm-dialog {
   width: min(calc(100% - 24px), 440px);
   border: 1px solid var(--border);
@@ -867,6 +1063,22 @@ textarea::placeholder {
   }
 }
 @media (max-width: 759px) {
+  .admins-dialog {
+    width: 100%;
+    max-width: none;
+    height: var(--app-viewport-height, 100dvh);
+    max-height: var(--app-viewport-height, 100dvh);
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+  }
+  .admins-panel {
+    max-height: var(--app-viewport-height, 100dvh);
+    height: 100%;
+  }
+  .admins-panel-header {
+    padding-top: max(12px, env(safe-area-inset-top));
+  }
   .message-editor textarea {
     max-height: 120px;
   }

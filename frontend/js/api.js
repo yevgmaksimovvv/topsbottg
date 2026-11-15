@@ -78,6 +78,8 @@ async function readErrorMessage(response) {
         if (detail === "payout_closed") return "Выплата закрыта. Отметка оплаты недоступна.";
         if (detail === "payout_cancelled") return "Выплата отменена. Отметка оплаты недоступна.";
         if (detail === "payout_sending") return "Нельзя удалить выплату до завершения рассылки.";
+        if (detail && detail !== "payment_details_changed")
+          return safeDetailMessage(detail);
       } catch {
         // Fall back to the snapshot conflict message.
       }
