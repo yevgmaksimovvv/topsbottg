@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from topsbottg.access import AccessDenied, require_admin, require_owner, revoke_admin
+from topsbottg.attachment_api import register_attachment_routes
 from topsbottg.chat_api import register_conversation_routes
 from topsbottg.config import Settings
 from topsbottg.db import get_session
@@ -1372,4 +1373,5 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         return serialize_recipient(recipient)
 
     register_conversation_routes(app, settings, _require_admin)
+    register_attachment_routes(app, settings, _require_admin)
     return app
