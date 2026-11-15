@@ -491,3 +491,77 @@ test("Failed retry remains one bubble after a second timeout and keeps its origi
     assert.equal(await bubble.locator("[data-inbox-retry]").count(), 0);
   });
 });
+
+
+test("Telegram-style bubbles and composer remain readable across mobile and desktop", async () => {
+  await withPage(async ({ page }) => {
+    await installFixture(page);
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.locator("#inbox-history [data-inbox-message='54']").waitFor();
+
+    assert.equal(await page.locator("#inbox-refresh").count(), 0);
+    assert.equal(await page.locator(".inbox-history-tools, .inbox-read-marker").count(), 0);
+    assert.equal(await page.locator(".inbox-message-reply").count(), 1);
+    assert.equal(await page.locator(".inbox-message-author").count(), 2);
+    assert.equal(await page.locator('[data-inbox-reply="51"]').getAttribute("aria-label"), "Ответить на сообщение");
+    assert.equal(await page.locator('[data-inbox-retry="54"]').innerText(), "Отправить заново");
+
+    await mkdir(evidence, { recursive: true });
+    for (const theme of ["light", "dark"]) {
+      await page.evaluate((scheme) => {
+        window.Telegram.WebApp.colorScheme = scheme;
+        for (const listener of window.Telegram.WebApp.__callbacks.themeChanged || []) listener();
+      }, theme);
+      for (const width of [320, 390, 768, 1280]) {
+        await page.setViewportSize({ width, height: 844 });
+        await page.evaluate(() => {
+          window.Telegram.WebApp.viewportHeight = 844;
+          for (const listener of window.Telegram.WebApp.__callbacks.viewportChanged || []) listener();
+        });
+        const layout = await page.evaluate(() => {
+          const incoming = document.querySelector(".inbox-message.is-incoming").getBoundingClientRect();
+          const outgoing = document.querySelector(".inbox-message.is-outgoing").getBoundingClientRect();
+          const field = document.getElementById("inbox-text").getBoundingClientRect();
+          const send = document.getElementById("inbox-send").getBoundingClientRect();
+          return {
+            incomingX: incoming.x, outgoingX: outgoing.x,
+            incomingWidth: incoming.width, outgoingWidth: outgoing.width,
+            fieldHeight: field.height, sendHeight: send.height,
+            fieldBottom: field.bottom, sendBottom: send.bottom,
+            scrollWidth: document.documentElement.scrollWidth,
+          };
+        });
+        assert.ok(layout.incomingX < layout.outgoingX,
+          "Incoming bubbles left, outgoing right: " + JSON.stringify(layout));
+        assert.ok(layout.fieldHeight >= 44 && layout.sendHeight >= 44);
+        assert.ok(Math.abs(layout.fieldBottom - layout.sendBottom) <= 2,
+          "Composer controls align at baseline");
+        assert.ok(layout.scrollWidth <= width + 1, "Chat must not overflow horizontally");
+        await page.screenshot({ path: resolve(evidence, "inbox-chat-" + theme + "-" + width + ".png") });
+      }
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.locator("#inbox-text").fill("Строка\n".repeat(8));
+    const composer = await page.evaluate(() => {
+      const field = document.getElementById("inbox-text").getBoundingClientRect();
+      const button = document.getElementById("inbox-send").getBoundingClientRect();
+      return { fieldHeight: field.height, sendHeight: button.height,
+        aligned: Math.abs(field.bottom - button.bottom) <= 2 };
+    });
+    assert.ok(composer.fieldHeight > 44 && composer.fieldHeight <= 140);
+    assert.equal(composer.sendHeight, 44);
+    assert.equal(composer.aligned, true);
+    await page.locator("#inbox-history [data-inbox-reply='51']").click();
+    assert.match(await page.locator("#inbox-reply").innerText(), /Длинное сообщение/);
+    await page.screenshot({ path: resolve(evidence, "inbox-chat-reply-390.png") });
+
+    await page.locator("#inbox-back").click();
+    await page.locator("#inbox-new").click();
+    await page.locator("#inbox-new-users [data-inbox-new-user='3']").waitFor();
+    await page.screenshot({ path: resolve(evidence, "inbox-new-dialog-390.png") });
+    await page.locator("#inbox-new-users [data-inbox-new-user='3']").click();
+    await page.locator("#inbox-history-status").getByText("Сообщений пока нет.").waitFor();
+    await page.screenshot({ path: resolve(evidence, "inbox-empty-dialog-390.png") });
+  });
+});
