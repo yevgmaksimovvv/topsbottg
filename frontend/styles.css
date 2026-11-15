@@ -1109,7 +1109,7 @@ textarea::placeholder {
 }
 @media (max-width: 759px) {
   .admins-dialog {
-    width: 100%;
+    width: 100vw;
     max-width: none;
     height: var(--app-viewport-height, 100dvh);
     max-height: var(--app-viewport-height, 100dvh);
