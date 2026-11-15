@@ -120,7 +120,7 @@ async function browserFixture(role, run) {
         else {
           state.invitations = [{
             id: 42, target_telegram_id: 777, status: "pending",
-            delivered_at: null, delivery_attempts: 0,
+            delivered_at: null, delivery_attempts: 0, delivery_state: "queued",
             username: "valid_name", display_name: "Анна Петрова",
           }];
           data = { id: 42, target_telegram_id: 777, status: "pending" };
@@ -205,12 +205,14 @@ test("owner can invite, cancel, revoke; modal retains payout state and supports 
     await page.locator("#admins-candidate [data-admin-action='invite']").click();
     assert.equal(state.invitations.length, 0);
     await page.locator("#admins-candidate [data-admin-action='confirm-invite']").click();
-    await page.locator("#admins-pending").getByText("Отправляем приглашение").waitFor();
+    await page.locator("#admins-pending").getByText("В очереди на отправку").waitFor();
     assert.equal(state.invitations.length, 1);
     state.invitations[0].delivery_attempts = 1;
+    state.invitations[0].delivery_state = "unknown";
     await page.locator("#admins-refresh").click();
-    await page.locator("#admins-pending").getByText("Повторяем отправку").waitFor();
+    await page.locator("#admins-pending").getByText("Результат отправки неизвестен").waitFor();
     state.invitations[0].delivered_at = new Date().toISOString();
+    state.invitations[0].delivery_state = "delivered";
     await page.locator("#admins-refresh").click();
     await page.locator("#admins-pending").getByText("Ожидает ответа").waitFor();
     await page.locator("#admins-pending [data-admin-action='cancel-invite']").click();
