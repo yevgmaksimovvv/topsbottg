@@ -33,9 +33,9 @@ async function browserFixture(role, run) {
     page.setDefaultTimeout(9000);
     const state = {
       members: [
-        { telegram_id: 123, role: "owner", username: "owner_name", display_name: "Евгений", full_name: "Евгений Дмитриевич" },
-        { telegram_id: 456, role: "owner", username: null, display_name: "Второй владелец" },
-        { telegram_id: 555, role: "admin", username: "admin_name", display_name: "Администратор" },
+        { telegram_id: 123, role: "owner", full_name: "Евгений Дмитриевич" },
+        { telegram_id: 456, role: "owner", full_name: "Второй владелец" },
+        { telegram_id: 555, role: "admin", full_name: "Администратор" },
       ],
       invitations: [],
       requests: [],
@@ -107,10 +107,10 @@ async function browserFixture(role, run) {
           code = 503;
         } else data = search.get("username") === "@valid_name"
           ? [{ telegram_id: 777, username: "valid_name", full_name: "Анна Петрова",
-              display_name: "Анна", study_group: "М3О-207СВ-25", role: null }]
+              study_group: "М3О-207СВ-25", role: null }]
           : search.get("username") === "@owner_name"
             ? [{ telegram_id: 123, username: "owner_name", full_name: "Евгений",
-                display_name: "Евгений", role: "owner" }]
+                role: "owner" }]
             : [];
       } else if (path === "/api/admin/admin-invitations" && method === "POST") {
         const payload = req.postDataJSON();
@@ -120,8 +120,7 @@ async function browserFixture(role, run) {
         else {
           state.invitations = [{
             id: 42, target_telegram_id: 777, status: "pending",
-            delivered_at: null, delivery_attempts: 0, delivery_state: "queued",
-            username: "valid_name", display_name: "Анна Петрова",
+            delivered_at: null, delivery_state: "queued", full_name: "Анна Петрова",
           }];
           data = { id: 42, target_telegram_id: 777, status: "pending" };
           code = 201;
@@ -210,7 +209,6 @@ test("owner can invite, cancel, revoke; modal retains payout state and supports 
     await page.locator("#admins-candidate [data-admin-action='confirm-invite']").click();
     await page.locator("#admins-pending").getByText("В очереди на отправку").waitFor();
     assert.equal(state.invitations.length, 1);
-    state.invitations[0].delivery_attempts = 1;
     state.invitations[0].delivery_state = "unknown";
     await page.locator("#admins-refresh").click();
     await page.locator("#admins-pending").getByText("Результат отправки неизвестен").waitFor();
@@ -240,7 +238,7 @@ test("owner can invite, cancel, revoke; modal retains payout state and supports 
     assert.equal(await page.locator("#admins-members [data-admin-action='revoke']").count(), 0);
 
     state.members.push({
-      telegram_id: 777, role: "admin", username: "valid_name", display_name: "Анна", full_name: "Анна Петрова",
+      telegram_id: 777, role: "admin", full_name: "Анна Петрова",
     });
     await page.locator("#admins-refresh").click();
     await page.locator("#admins-members").getByText("Анна Петрова").waitFor();
