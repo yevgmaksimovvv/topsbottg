@@ -7,11 +7,11 @@ import os
 from uuid import uuid4
 
 import pytest
+from conftest import make_init_data
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from conftest import make_init_data
 from topsbottg.api import create_app
 from topsbottg.invitations import observe_telegram_profile
 from topsbottg.models import AdminInvitation, Base
