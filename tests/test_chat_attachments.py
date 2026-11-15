@@ -323,3 +323,59 @@ async def test_download_failure_size_and_unsupported_format_do_not_break_history
     assert history.json()["items"][0]["attachment"]["available"] is False
     assert all("telegram_file_id" not in json.dumps(x) for x in history.json()["items"])
 
+@pytest.mark.asyncio
+async def test_truncated_download_rejected_before_success_response(
+    session_factory, app, client: AsyncClient, admin_init_data,
+):
+    user_id = await _registered_user(session_factory)
+    async with session_factory() as session:
+        conversation = Conversation(user_id=user_id)
+        session.add(conversation)
+        await session.flush()
+        message = ChatMessage(conversation_id=conversation.id, direction="incoming", kind="document")
+        session.add(message)
+        await session.flush()
+        session.add(ChatAttachment(
+            chat_message_id=message.id, kind="document",
+            telegram_file_id="private-file-id", telegram_file_unique_id="unique",
+            filename="report.pdf", mime_type="application/pdf", size=24, available=True,
+        ))
+        await session.commit()
+        message_id = message.id
+        conversation_id = conversation.id
+
+    fake = MockBot()
+    fake.session.downloads = [b"short"]
+    app.state.bot = fake
+    headers = {"X-Telegram-Init-Data": admin_init_data}
+    url = f"/api/admin/chat-messages/{message_id}/attachment"
+
+    # The stream ends normally, but getFile advertises more bytes.
+    response = await client.get(url, headers=headers)
+    assert response.status_code == 502
+    assert response.json() == {"detail": "attachment download incomplete"}
+    assert response.headers["cache-control"] == "no-store"
+    assert "private-token" not in response.text
+    assert "api.telegram.org" not in response.text
+
+    # If getFile omits its size, the persisted Telegram metadata is authoritative.
+    fake.file_size = None
+    response = await client.get(url, headers=headers)
+    assert response.status_code == 502
+    assert response.json() == {"detail": "attachment download incomplete"}
+
+    async with session_factory() as session:
+        attachment = await session.get(ChatAttachment, message_id)
+        assert attachment.available is True  # A transient transport truncation is retryable.
+        messages = (await session.scalars(select(ChatMessage))).all()
+        assert len(messages) == 1
+    history = await client.get(f"/api/admin/conversations/{conversation_id}/messages", headers=headers)
+    assert history.status_code == 200
+    assert history.json()["items"][0]["attachment"]["available"] is True
+
+    # A subsequent complete response must be downloadable without changing metadata.
+    fake.session.downloads = [b"%PDF-1.7\nprivate content"]
+    success = await client.get(url, headers=headers)
+    assert success.status_code == 200
+    assert success.content == b"%PDF-1.7\nprivate content"
+    assert success.headers["content-length"] == "24"
