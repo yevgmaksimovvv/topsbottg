@@ -7,6 +7,7 @@ import os
 from uuid import uuid4
 
 import pytest
+from aiogram.fsm.storage.base import StorageKey
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -19,6 +20,7 @@ from topsbottg.conversations import (
     lock_conversation_for_message,
     record_incoming_message,
 )
+from topsbottg.fsm_storage import DatabaseFSMStorage
 from topsbottg.models import Base, ChatMessage, Conversation, ConversationRead, User
 
 
@@ -251,3 +253,23 @@ async def test_concurrent_writers_lock_before_allocating_message_ids(postgres_co
         assert await get_unread_count(session, conversation_id=conv_id, admin_telegram_id=123) == 2
         messages, _ = await list_conversation_messages(session, conversation_id=conv_id)
         assert [message.id for message in messages] == [previous_id, first_id, second_id]
+
+
+@pytest.mark.postgres
+async def test_postgres_fsm_state_and_data_survive_new_storage(postgres_conversations):
+    factory = postgres_conversations
+    key = StorageKey(bot_id=123, chat_id=20210, user_id=20210)
+    first = DatabaseFSMStorage(factory)
+    await first.set_state(key, "RegistrationFSM:payment_details")
+    await first.set_data(key, {"active_recipient_id":14, "confirm_active_recipient": False})
+
+    restarted = DatabaseFSMStorage(factory)
+    assert await restarted.get_state(key) == "RegistrationFSM:payment_details"
+    assert await restarted.get_data(key) == {
+        "active_recipient_id": 14,
+        "confirm_active_recipient": False,
+    }
+    await restarted.set_state(key, None)
+    await restarted.set_data(key, {})
+    assert await first.get_state(key) is None
+    assert await first.get_data(key) == {}
