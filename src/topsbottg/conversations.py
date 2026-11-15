@@ -32,6 +32,21 @@ async def get_or_create_conversation(session: AsyncSession, *, user_id: int) -> 
     return conversation
 
 
+async def lock_conversation_for_message(session: AsyncSession, *, conversation_id: int) -> None:
+    """Acquire the per-conversation transaction lock before allocating any message ID.
+
+    Incoming and outgoing writers must use this lock before inserting a ChatMessage.
+    The PostgreSQL row lock is held until the enclosing transaction commits or rolls back.
+    """
+    if conversation_id <= 0:
+        raise ValueError("conversation_id must be positive")
+    locked_id = await session.scalar(
+        select(Conversation.id).where(Conversation.id == conversation_id).with_for_update()
+    )
+    if locked_id is None:
+        raise ValueError("Conversation does not exist")
+
+
 async def record_incoming_message(
     session: AsyncSession,
     *,
@@ -46,6 +61,8 @@ async def record_incoming_message(
     """Return (message, created); retries never change an existing message."""
     if conversation_id <= 0 or telegram_chat_id == 0 or telegram_message_id <= 0:
         raise ValueError("Invalid conversation or Telegram message identity")
+
+    await lock_conversation_for_message(session, conversation_id=conversation_id)
 
     statement = _insert(session, ChatMessage).values(
         conversation_id=conversation_id,
