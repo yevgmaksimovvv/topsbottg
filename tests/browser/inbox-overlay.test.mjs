@@ -117,9 +117,9 @@ async function installFixture(page, unread = 3) {
     ];
     const conversations = [
       { id: 11, user: { id: 1, full_name: "Анна Петрова", study_group_id: 9, study_group_name: "Г-9" },
-        last_message: messages[3], last_message_at: date, unread_count: unreadCount },
+        last_message: messages[3], last_message_at: date, unread_count: Math.min(unreadCount, 1) },
       { id: 12, user: { id: 2, full_name: "Иван Иванов", study_group_id: null, study_group_name: null },
-        last_message: { text: "Привет" }, last_message_at: date, unread_count: 1 },
+        last_message: { text: "Привет" }, last_message_at: date, unread_count: Math.max(0, unreadCount - 1) },
     ];
     const state = { unread: unreadCount, conversations, messages, log: [],
       sendFailures: 1, accepted: new Map(), opened: [], read: [], newId: 60, delayed: "Анна" };
@@ -396,6 +396,8 @@ test("Unread stays unread when history is scrolled up during refresh", async () 
     await page.locator("#inbox-history [data-inbox-message='54']").waitFor();
     await page.locator("#inbox-older").click();
     await page.locator("#inbox-history [data-inbox-message='2']").waitFor();
+    await page.locator("#inbox-history [data-inbox-message='51']").scrollIntoViewIfNeeded();
+    await page.evaluate(() => document.getElementById("inbox-history").dispatchEvent(new Event("scroll")));
     await page.waitForFunction(() => window.__inboxFixture.read.length > 0);
     const scrollHeight = await page.evaluate(() => {
       const list = document.getElementById("inbox-history");
