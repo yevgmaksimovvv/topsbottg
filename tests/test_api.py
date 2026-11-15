@@ -9,6 +9,7 @@ from typing import Literal
 from urllib.parse import quote, urlencode
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 import topsbottg.api as api_module
@@ -290,6 +291,26 @@ async def test_valid_events_token_opens_sse_response(client, app, admin_init_dat
     assert response.headers["content-type"].startswith("text/event-stream")
     assert response.headers["cache-control"] == "no-cache"
     assert response.headers["x-accel-buffering"] == "no"
+
+
+@pytest.mark.asyncio
+async def test_sse_uses_secure_cookie_without_url_token(app, admin_init_data, monkeypatch):
+    async def one_ping(**kwargs):
+        yield "event: ping\\ndata: {}\\n\\n"
+
+    monkeypatch.setattr(api_module, "_admin_events_stream", one_ping)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as secure_client:
+        issued = await secure_client.post(
+            "/api/admin/events-token",
+            headers={"X-Telegram-Init-Data": admin_init_data},
+        )
+        assert issued.status_code == 200
+        cookie = issued.headers["set-cookie"].lower()
+        assert "secure" in cookie and "httponly" in cookie and "samesite=strict" in cookie
+        response = await secure_client.get("/api/admin/events")
+        assert response.status_code == 200
+        assert "event: ping" in response.text
+        assert (await secure_client.get("/api/admin/events")).status_code == 403
 
 
 @pytest.mark.asyncio
