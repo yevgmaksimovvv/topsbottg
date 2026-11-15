@@ -12,7 +12,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from topsbottg.access import get_principal
-from topsbottg.models import AdminInvitation, Payout, PayoutReadyNotification, PayoutRecipient, PayoutStatus, RecipientStatus
+from topsbottg.models import (
+    AdminInvitation,
+    Payout,
+    PayoutReadyNotification,
+    PayoutRecipient,
+    PayoutStatus,
+    RecipientStatus,
+)
 from topsbottg.services import (
     ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
     claim_pending_recipients,

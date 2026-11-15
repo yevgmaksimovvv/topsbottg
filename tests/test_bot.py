@@ -1045,10 +1045,22 @@ async def test_database_admin_can_open_bot_admin_until_revoked(session_factory, 
 async def test_start_saves_current_telegram_username_for_owner_lookup(session_factory, settings):
     bot, recording = _make_bot()
     dispatcher = _make_dispatcher(session_factory, settings)
-    update = _make_update(bot, 555, "/start", 1)
-    update.message.from_user.username = "first_handle"
-    update.message.from_user.first_name = "Настоящее"
-    update.message.from_user.last_name = "Имя"
+    update = Update.model_validate(
+        {
+            "update_id": 1,
+            "message": {
+                "message_id": 11,
+                "date": int(datetime.now(UTC).timestamp()),
+                "chat": {"id": 555, "type": "private"},
+                "from": {
+                    "id": 555, "is_bot": False, "first_name": "Настоящее",
+                    "last_name": "Имя", "username": "first_handle",
+                },
+                "text": "/start",
+            },
+        },
+        context={"bot": bot},
+    )
     await dispatcher.feed_update(bot, update)
     async with session_factory() as session:
         user = await session.scalar(select(User).where(User.telegram_id == 555))
@@ -1065,7 +1077,7 @@ async def test_invite_callback_requires_matching_telegram_user_then_grants_acces
     from topsbottg.models import AdminInvitation
 
     async with session_factory() as session:
-        user = await get_or_create_user(session, 555, "Иван Иванов")
+        await get_or_create_user(session, 555, "Иван Иванов")
         await observe_telegram_profile(session, 555, "valid_name", "Иван", "Иванов")
         invitation = await create_invitation(
             session, actor_id=123, target_id=555, owner_ids=settings.admin_ids_set

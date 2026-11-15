@@ -531,7 +531,9 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             raise HTTPException(status_code=403, detail="owner only") from exc
         except (InvitationConflict, IntegrityError) as exc:
             await session.rollback()
-            raise HTTPException(status_code=409, detail="Приглашение уже существует или пользователь недоступен.") from exc
+            raise HTTPException(
+                status_code=409, detail="Приглашение уже существует или пользователь недоступен."
+            ) from exc
         except ValueError as exc:
             await session.rollback()
             raise HTTPException(status_code=422, detail=str(exc)) from exc

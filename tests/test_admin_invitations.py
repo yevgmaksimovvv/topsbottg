@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
-from topsbottg.access import get_principal, grant_admin, revoke_admin
+from topsbottg.access import get_principal, revoke_admin
 from topsbottg.invitations import (
     InvitationConflict,
     create_invitation,
