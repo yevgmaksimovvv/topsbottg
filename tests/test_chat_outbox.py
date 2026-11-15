@@ -12,9 +12,7 @@ from sqlalchemy import func, select
 
 from topsbottg.chat_outbox import (
     MAX_CHAT_ATTEMPTS,
-    claim_chat_outbox,
     create_outgoing_message,
-    settle_chat_outbox,
 )
 from topsbottg.conversations import record_incoming_message
 from topsbottg.models import (
