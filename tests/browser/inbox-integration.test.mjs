@@ -496,3 +496,33 @@ test("New dialog search is paginated and isolated from payout selection", async 
     assert.deepEqual(errors, []);
   });
 });
+
+
+test("Upward scrolling loads older messages without jumping to the newest", async () => {
+  await withBackend(async ({ db, createPage }) => {
+    db.messages = Array.from({ length: 130 }, (_, index) => incoming(index + 1));
+    const { page, errors } = await createPage(123, 390);
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.locator("#inbox-history [data-inbox-message='130']").waitFor();
+    assert.equal(await page.locator("#inbox-history .is-incoming").count(), 50);
+    await page.evaluate(() => {
+      const list = document.getElementById("inbox-history");
+      list.scrollTop = 0;
+      list.dispatchEvent(new Event("scroll"));
+    });
+    await page.locator("#inbox-history [data-inbox-message='31']").waitFor();
+    assert.equal(await page.locator("#inbox-history .is-incoming").count(), 100);
+    const restored = await page.locator("#inbox-history").evaluate((list) => list.scrollTop);
+    assert.ok(restored > 0, "Earlier page should not reset scroll position to the start");
+    await page.evaluate(() => {
+      const list = document.getElementById("inbox-history");
+      list.scrollTop = 0;
+      list.dispatchEvent(new Event("scroll"));
+    });
+    await page.locator("#inbox-history [data-inbox-message='1']").waitFor();
+    assert.equal(await page.locator("#inbox-history .is-incoming").count(), 130);
+    assert.equal(await page.locator("#inbox-older").isVisible(), false);
+    assert.deepEqual(errors, []);
+  });
+});
