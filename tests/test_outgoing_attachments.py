@@ -238,3 +238,62 @@ async def test_cleanup_protects_queued_and_cleans_expired_orphans(
     assert await cleanup_staging(settings.chat_staging_dir, session_factory) == 1
     assert not orphan.exists()
     assert path.exists()
+
+
+@pytest.mark.asyncio
+async def test_media_failure_removes_staging_and_keeps_failed_status(
+    client, session_factory, settings, admin_init_data
+):
+    from aiogram.exceptions import TelegramForbiddenError
+    from aiogram.methods import SendDocument
+
+    cid, _ = await _conversation(session_factory)
+    result = await client.post(
+        f"/api/admin/conversations/{cid}/attachments",
+        headers={"X-Telegram-Init-Data": admin_init_data, "Idempotency-Key": "blocked-media"},
+        data={"kind": "document"},
+        files={"file": ("report.pdf", PDF, "application/pdf")},
+    )
+    assert result.status_code == 202
+    message_id = result.json()["message"]["id"]
+    async with session_factory() as session:
+        att = await session.get(ChatAttachment, message_id)
+        path = staging_path(settings.chat_staging_dir, att.staging_key)
+        assert path.exists()
+
+    class BlockedBot:
+        async def send_document(self, chat_id, document, **kwargs):
+            raise TelegramForbiddenError(
+                method=SendDocument(chat_id=chat_id, document="ignored"),
+                message="Forbidden: bot was blocked by the user",
+            )
+
+    await deliver_chat_outbox(BlockedBot(), session_factory, settings.chat_staging_dir)
+    assert not path.exists()
+    async with session_factory() as session:
+        att = await session.get(ChatAttachment, message_id)
+        row = await session.scalar(select(ChatMessageOutbox))
+        assert not att.available and att.telegram_file_id is None
+        assert row.status == "failed" and row.error_code == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_staging_quota_rejects_upload_without_database_or_file_leak(
+    client, session_factory, settings, admin_init_data, monkeypatch
+):
+    import topsbottg.attachment_staging as staging
+
+    cid, _ = await _conversation(session_factory)
+    monkeypatch.setattr(staging, "STAGING_QUOTA_BYTES", 1)
+    result = await client.post(
+        f"/api/admin/conversations/{cid}/attachments",
+        headers={"X-Telegram-Init-Data": admin_init_data, "Idempotency-Key": "quota"},
+        data={"kind": "document"}, files={"file": ("report.pdf", PDF, "application/pdf")},
+    )
+    assert result.status_code == 507
+    assert result.json()["detail"] == "staging_quota_exceeded"
+    async with session_factory() as session:
+        assert await session.scalar(select(func.count(ChatMessageOutbox.id))) == 0
+        assert await session.scalar(select(func.count(ChatMessage.id))) == 0
+    root = Path(settings.chat_staging_dir)
+    assert all(len(p.name) != 48 for p in root.iterdir())
