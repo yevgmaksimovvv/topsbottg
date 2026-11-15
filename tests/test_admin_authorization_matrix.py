@@ -20,6 +20,11 @@ ADMIN_ROUTES = [
     ("GET", "/api/admin/admin-invitations", None),
     ("POST", "/api/admin/admin-invitations", {"target_telegram_id": 10}),
     ("POST", "/api/admin/admin-invitations/10/cancel", None),
+    ("POST", "/api/admin/conversations", {"user_id": 10}),
+    ("GET", "/api/admin/conversations", None),
+    ("GET", "/api/admin/conversations/summary", None),
+    ("GET", "/api/admin/conversations/10/messages", None),
+    ("POST", "/api/admin/conversations/10/read", {"last_read_message_id": 1}),
     ("GET", "/api/admin/study-groups", None),
     ("GET", "/api/admin/users", None),
     ("GET", "/api/admin/users/10", None),
@@ -67,6 +72,7 @@ def _route_template(path: str) -> str:
     return "/".join("{user_id}" if value == "10" and parts[index - 1] == "users"
                     else "{telegram_id}" if value == "10" and parts[index - 1] == "admin-grants"
                     else "{invitation_id}" if value == "10" and parts[index - 1] == "admin-invitations"
+                    else "{conversation_id}" if value == "10" and parts[index - 1] == "conversations"
                     else "{payout_id}" if value == "10" and parts[index - 1] == "payouts"
                     else "{recipient_id}" if value == "20" and parts[index - 1] == "recipients"
                     else value for index, value in enumerate(parts))
