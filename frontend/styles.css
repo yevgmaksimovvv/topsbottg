@@ -1205,7 +1205,7 @@ textarea::placeholder {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.inbox-panel-header [hidden] { display: none; }
+.inbox-panel-header .header-icon-button[hidden] { display: none; }
 .inbox-panel-header .header-icon-button {
   flex: none;
   display: inline-flex;
