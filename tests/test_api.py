@@ -231,8 +231,8 @@ async def test_admin_can_get_events_token(client, admin_init_data):
     response = await client.post("/api/admin/events-token", headers={"X-Telegram-Init-Data": admin_init_data})
     assert response.status_code == 200
     payload = response.json()
-    assert isinstance(payload["token"], str)
-    assert payload["token"]
+    assert "token" not in payload
+    assert "topsbottg_events=" in response.headers["set-cookie"]
     assert payload["expires_in"] == 300
 
 
@@ -266,7 +266,7 @@ async def test_invalid_or_missing_events_token_rejected(client, admin_init_data)
     assert missing.status_code == 401
 
     token_response = await client.post("/api/admin/events-token", headers={"X-Telegram-Init-Data": admin_init_data})
-    token = token_response.json()["token"]
+    token = token_response.cookies["topsbottg_events"]
 
     assert "httponly" in token_response.headers["set-cookie"].lower()
     assert "secure" in token_response.headers["set-cookie"].lower()
@@ -281,7 +281,7 @@ async def test_invalid_or_missing_events_token_rejected(client, admin_init_data)
 @pytest.mark.asyncio
 async def test_valid_events_token_opens_sse_response(client, app, admin_init_data):
     token_response = await client.post("/api/admin/events-token", headers={"X-Telegram-Init-Data": admin_init_data})
-    token = token_response.json()["token"]
+    token = token_response.cookies["topsbottg_events"]
 
     route = next(route for route in app.router.routes if getattr(route, "path", None) == "/api/admin/events")
     response = await route.endpoint(token=token)
