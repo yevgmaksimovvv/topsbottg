@@ -68,7 +68,7 @@ def _message_out(message: ChatMessage) -> ChatMessageOut:
         reply_to_telegram_message_id=message.reply_to_telegram_message_id,
         delivery_status=outbox.status if outbox else None,
         delivery_error_code=outbox.error_code if outbox else None,
-        attachment=attachment_public_data(message.attachment),
+        attachment=attachment_public_data(message.attachment) if message.kind != "text" else None,
     )
 
 
