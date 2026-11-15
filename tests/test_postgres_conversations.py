@@ -16,6 +16,7 @@ from topsbottg.conversations import (
     get_or_create_conversation,
     get_unread_count,
     list_conversation_messages,
+    lock_conversation_for_message,
     record_incoming_message,
 )
 from topsbottg.models import Base, ChatMessage, Conversation, ConversationRead, User
@@ -170,6 +171,7 @@ async def test_postgres_foreign_keys_unique_and_direction_constraint(postgres_co
             await session.commit()
         await session.rollback()
 
+        await lock_conversation_for_message(session, conversation_id=conv_id)
         session.add_all([
             ChatMessage(conversation_id=conv_id, direction="outgoing", source="admin", text="Первый"),
             ChatMessage(conversation_id=conv_id, direction="outgoing", source="admin", text="Второй"),
@@ -177,3 +179,73 @@ async def test_postgres_foreign_keys_unique_and_direction_constraint(postgres_co
         await session.commit()
         assert await session.scalar(select(func.count(ChatMessage.id))) == 3
         assert await get_unread_count(session, conversation_id=conv_id, admin_telegram_id=123) == 1
+
+
+@pytest.mark.postgres
+async def test_concurrent_writers_lock_before_allocating_message_ids(postgres_conversations):
+    factory = postgres_conversations
+    async with factory() as session:
+        user = User(telegram_id=20204, full_name="Четвёртый")
+        session.add(user)
+        await session.flush()
+        conv = await get_or_create_conversation(session, user_id=user.id)
+        previous, _ = await record_incoming_message(
+            session, conversation_id=conv.id, telegram_chat_id=20204,
+            telegram_message_id=1, text="До одновременной записи",
+        )
+        conv_id, previous_id = conv.id, previous.id
+        await session.commit()
+
+    first_locked = asyncio.Event()
+    release_first = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def first_writer():
+        async with factory() as session:
+            await lock_conversation_for_message(session, conversation_id=conv_id)
+            first_locked.set()
+            await release_first.wait()
+            message, inserted = await record_incoming_message(
+                session, conversation_id=conv_id, telegram_chat_id=20204,
+                telegram_message_id=2, text="Первое конкурентное",
+            )
+            assert inserted
+            await session.commit()
+            return message.id
+
+    async def second_writer():
+        async with factory() as session:
+            second_started.set()
+            message, inserted = await record_incoming_message(
+                session, conversation_id=conv_id, telegram_chat_id=20204,
+                telegram_message_id=3, text="Второе конкурентное",
+            )
+            assert inserted
+            await session.commit()
+            return message.id
+
+    first_task = asyncio.create_task(first_writer())
+    await asyncio.wait_for(first_locked.wait(), timeout=5)
+    second_task = asyncio.create_task(second_writer())
+    try:
+        await asyncio.wait_for(second_started.wait(), timeout=5)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(second_task), timeout=0.15)
+
+        async with factory() as session:
+            assert await get_unread_count(session, conversation_id=conv_id, admin_telegram_id=123) == 1
+            assert await advance_read_marker(
+                session, conversation_id=conv_id, admin_telegram_id=123, message_id=previous_id
+            ) == previous_id
+            await session.commit()
+    finally:
+        release_first.set()
+
+    first_id, second_id = await asyncio.wait_for(
+        asyncio.gather(first_task, second_task), timeout=10
+    )
+    assert previous_id < first_id < second_id
+    async with factory() as session:
+        assert await get_unread_count(session, conversation_id=conv_id, admin_telegram_id=123) == 2
+        messages, _ = await list_conversation_messages(session, conversation_id=conv_id)
+        assert [message.id for message in messages] == [previous_id, first_id, second_id]

@@ -10,6 +10,7 @@ from topsbottg.conversations import (
     get_or_create_conversation,
     get_unread_count,
     list_conversation_messages,
+    lock_conversation_for_message,
     record_incoming_message,
 )
 from topsbottg.models import ChatMessage, Conversation, ConversationRead, User
@@ -108,6 +109,7 @@ async def test_unread_is_incoming_only_and_independent_for_admins(session_factor
                 telegram_message_id=num, text=f"Текст {num}",
             )
             incoming.append(message.id)
+        await lock_conversation_for_message(session, conversation_id=conv.id)
         session.add(ChatMessage(conversation_id=conv.id, direction="outgoing", text="Ответ", source="admin"))
         await session.flush()
         outgoing_id = (await session.scalar(
