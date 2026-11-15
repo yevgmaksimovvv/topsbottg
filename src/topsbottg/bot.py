@@ -255,10 +255,9 @@ async def _start_payment_details_flow(
                 user_id=user.id,
                 active_recipient_id=active_recipient_id,
             )
-    payment_state_data = {
-        "active_recipient_id": active_recipient_id,
-        "confirm_active_recipient": confirm_active_recipient,
-    }
+    payment_state_data = {"active_recipient_id": active_recipient_id}
+    if not confirm_active_recipient:
+        payment_state_data["confirm_active_recipient"] = False
     if isinstance(state.storage, DatabaseFSMStorage):
         await state.storage.set_state_and_data(
             state.key, RegistrationFSM.payment_details, payment_state_data
@@ -319,7 +318,7 @@ async def _save_payment_details(
         return
     data = await state.get_data()
     active_recipient_id = data.get("active_recipient_id")
-    confirm_active_recipient = data.get("confirm_active_recipient", False)
+    confirm_active_recipient = data.get("confirm_active_recipient", True)
     async with session_factory() as session:
         user = await get_or_create_user(session, message.from_user.id)
         active_recipient = None
