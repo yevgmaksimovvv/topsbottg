@@ -221,7 +221,7 @@ async function withBackend(run) {
           const rawType = req.headers()["content-type"] || "";
           if (!/^multipart\/form-data;\s*boundary=/.test(rawType))
             return json(route, { detail: "multipart/form-data required" }, 415);
-          const raw = req.postDataBuffer().toString("latin1");
+          const raw = req.postDataBuffer().toString("utf8");
           const field = (name) => {
             const found = new RegExp('name="' + name + '"\\r\\n\\r\\n([^\\r]*)\\r\\n').exec(raw);
             return found?.[1] ?? null;
