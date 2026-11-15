@@ -591,6 +591,7 @@ test("Telegram-style bubbles and composer remain readable across mobile and desk
     await page.screenshot({ path: resolve(evidence, "inbox-empty-dialog-390.png") });
 
     await page.locator("#inbox-back").click();
+    await page.locator("#inbox-search").fill("Анна");
     await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
     await page.locator("#inbox-history [data-inbox-message='54']").waitFor();
     assert.equal(await page.locator("#inbox-text").evaluate((node) =>
