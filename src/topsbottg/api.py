@@ -5,9 +5,7 @@ import hashlib
 import json
 import logging
 import urllib.request
-from datetime import UTC, datetime, timedelta
 
-from aiogram import Bot
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import inspect, select, text
@@ -27,7 +25,6 @@ from topsbottg.invitations import (
     normalize_username,
 )
 from topsbottg.logging_utils import log_event
-from topsbottg.username_resolver import MTProtoUsernameResolver, UsernameLookupUnavailable
 from topsbottg.models import (
     AdminGrant,
     PaymentProfile,
@@ -88,6 +85,7 @@ from topsbottg.services import (
     set_payout_sending,
     update_payout,
 )
+from topsbottg.username_resolver import MTProtoUsernameResolver, UsernameLookupUnavailable
 
 logger = logging.getLogger(__name__)
 

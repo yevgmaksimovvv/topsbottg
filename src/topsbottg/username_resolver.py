@@ -46,7 +46,7 @@ class MTProtoUsernameResolver:
                 )
             except (UsernameNotOccupiedError, UsernameInvalidError):
                 return None
-            except (RPCError, OSError, asyncio.TimeoutError) as exc:
+            except (TimeoutError, RPCError, OSError) as exc:
                 logger.warning("MTProto username lookup failed: %s", type(exc).__name__)
                 raise UsernameLookupUnavailable from exc
 

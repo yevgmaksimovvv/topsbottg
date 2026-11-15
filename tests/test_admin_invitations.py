@@ -14,7 +14,7 @@ from topsbottg.invitations import (
     decide_invitation,
     find_candidate,
 )
-from topsbottg.models import AdminInvitation, AuditLog, User
+from topsbottg.models import AdminInvitation, AuditLog
 from topsbottg.services import get_or_create_user
 from topsbottg.worker import deliver_admin_invitations
 
