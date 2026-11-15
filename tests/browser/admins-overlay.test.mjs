@@ -41,6 +41,8 @@ async function browserFixture(role, run) {
       requests: [],
       directoryFailures: 0,
       searchFailures: 0,
+      candidateRequests: [],
+      delayedCandidateName: null,
     };
     const pageErrors = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -101,13 +103,16 @@ async function browserFixture(role, run) {
       } else if (path === "/api/admin/admin-invitations" && method === "GET")
         role === "owner" ? data = state.invitations : code = 403;
       else if (path === "/api/admin/admin-candidates" && method === "GET") {
+        state.candidateRequests.push(req.url());
+        if (state.delayedCandidateName === search.get("search"))
+          await new Promise((done) => setTimeout(done, 750));
         if (role !== "owner") code = 403;
         else if (state.searchFailures > 0) {
           state.searchFailures--;
           code = 503;
         } else {
           const name = search.get("search");
-          if (name === "Анна") {
+          if (name === "Анна" || (name === null && search.get("study_group_id") === "9")) {
             const entries = [
               { telegram_id: 777, full_name: "Анна Петрова", study_group: null, role: null },
               { telegram_id: 778, full_name: "Анна Смирнова", study_group: "М3О-207СВ-25", role: null },
@@ -206,11 +211,13 @@ test("owner can invite, cancel, revoke; modal retains payout state and supports 
     assert.equal(await page.locator("#admins-members [data-admin-action='revoke']").count(), 1);
     assert.doesNotMatch(await page.locator("#admins-members").innerText(), /ADMIN_TELEGRAM_IDS|\.env|555/);
 
+    assert.equal(await page.locator("#admins-search-form").count(), 0);
+    assert.equal(await page.getByRole("button", { name: "Найти", exact: true }).count(), 0);
     state.searchFailures = 1;
     await page.locator("#admins-search-input").fill("Анна");
-    await page.locator("#admins-search-form button").click();
     await page.waitForFunction(() => document.querySelector("#admins-search-error")?.textContent.includes("Backend"));
-    await page.locator("#admins-search-form button").click();
+    await page.locator("#admins-search-input").fill("Анн");
+    await page.locator("#admins-search-input").fill("Анна");
     await page.locator("#admins-candidate").getByText("Анна Петрова").waitFor();
     assert.match(await page.locator("#admins-candidate").innerText(), /Группа не указана/);
     await page.locator("#admins-candidate [data-admin-action='more-candidates']").click();
@@ -236,13 +243,15 @@ test("owner can invite, cancel, revoke; modal retains payout state and supports 
     await page.locator("#admins-pending").getByText("Нет ожидающих приглашений.").waitFor();
     assert.equal(state.invitations.length, 0);
     await page.locator("#admins-search-group").selectOption("9");
-    await page.locator("#admins-search-input").fill("Анна");
-    await page.locator("#admins-search-form button").click();
     await page.locator("#admins-candidate").getByText("Анна Смирнова").waitFor();
     assert.equal(await page.locator("#admins-candidate .admins-candidate-card").count(), 1);
+    const beforeGroupOnly = state.candidateRequests.length;
+    await page.locator("#admins-search-input").fill("");
+    await page.waitForFunction(() =>
+      document.querySelector("#admins-candidate")?.textContent.includes("Анна Смирнова"));
+    assert.equal(state.candidateRequests.length > beforeGroupOnly, true);
     await page.locator("#admins-search-group").selectOption("");
     await page.locator("#admins-search-input").fill("Евгений");
-    await page.locator("#admins-search-form button").click();
     await page.locator("#admins-candidate").getByText("Уже владелец").waitFor();
     assert.equal(await page.locator("#admins-candidate [data-admin-action='invite']").count(), 0);
 
@@ -306,6 +315,29 @@ test("owner can invite, cancel, revoke; modal retains payout state and supports 
     await modal.waitFor({ state: "hidden" });
     assert.equal(await page.evaluate(() => window.Telegram.WebApp.BackButton.listeners), 0);
     assert.equal(await page.locator('[data-mobile-view]').count(), 4);
+  });
+});
+
+test("live search discards stale responses and clears results", async () => {
+  await browserFixture("owner", async ({ page, state }) => {
+    await page.locator("#admins-open").click();
+    state.delayedCandidateName = "Анна";
+    const input = page.locator("#admins-search-input");
+    await input.fill("Анна");
+    await page.waitForFunction(() =>
+      document.querySelector("#admins-search-error")?.textContent.includes("Ищем"));
+    await input.fill("Евгений");
+    await page.locator("#admins-candidate").getByText("Уже владелец").waitFor();
+    await page.waitForTimeout(850);
+    assert.equal(await page.locator("#admins-candidate").getByText("Анна Петрова").count(), 0);
+    assert.equal(await page.locator("#admins-candidate .admins-candidate-card").count(), 1);
+
+    await input.fill("");
+    assert.equal(await page.locator("#admins-candidate .admins-candidate-card").count(), 0);
+    const count = state.candidateRequests.length;
+    await input.fill("А");
+    await page.waitForTimeout(400);
+    assert.equal(state.candidateRequests.length, count, "One-letter names must not start requests");
   });
 });
 
