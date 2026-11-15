@@ -101,6 +101,61 @@ class User(Base, TimestampMixin):
     study_group: Mapped[StudyGroup | None] = relationship(back_populates="users")
     payment_profile: Mapped[PaymentProfile | None] = relationship(back_populates="user")
     payout_recipients: Mapped[list[PayoutRecipient]] = relationship(back_populates="user")
+    conversation: Mapped[Conversation | None] = relationship(back_populates="user")
+
+
+
+class Conversation(Base, TimestampMixin):
+    __tablename__ = "conversations"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped[User] = relationship(back_populates="conversation")
+    messages: Mapped[list[ChatMessage]] = relationship(back_populates="conversation")
+    reads: Mapped[list[ConversationRead]] = relationship(back_populates="conversation")
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+    __table_args__ = (
+        CheckConstraint("direction IN ('incoming', 'outgoing')", name="ck_chat_messages_direction"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    direction: Mapped[str] = mapped_column(String(8), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="text", server_default="text")
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reply_to_telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    author_admin_telegram_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="telegram", server_default="telegram")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    conversation: Mapped[Conversation] = relationship(back_populates="messages")
+
+
+class ConversationRead(Base):
+    __tablename__ = "conversation_reads"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "admin_telegram_id", name="uq_conversation_reads_admin"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    admin_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_read_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True
+    )
+
+    conversation: Mapped[Conversation] = relationship(back_populates="reads")
 
 
 class PaymentProfile(Base, TimestampMixin):
@@ -216,3 +271,19 @@ Index("ix_payouts_deleted_id", Payout.deleted_at, Payout.id)
 Index("ix_payout_ready_pending", PayoutReadyNotification.delivered_at, PayoutReadyNotification.next_attempt_at)
 Index("ix_payment_replies_recipient", PaymentReply.payout_recipient_id, PaymentReply.id)
 Index("ix_audit_log_created_at", AuditLog.created_at)
+
+Index("ix_conversations_last_message_at_id", Conversation.last_message_at.desc(), Conversation.id.desc())
+Index("ix_chat_messages_conversation_id_id", ChatMessage.conversation_id, ChatMessage.id)
+Index(
+    "uq_chat_messages_telegram_direction",
+    ChatMessage.direction,
+    ChatMessage.telegram_chat_id,
+    ChatMessage.telegram_message_id,
+    unique=True,
+    postgresql_where=(
+        ChatMessage.telegram_chat_id.is_not(None) & ChatMessage.telegram_message_id.is_not(None)
+    ),
+    sqlite_where=(
+        ChatMessage.telegram_chat_id.is_not(None) & ChatMessage.telegram_message_id.is_not(None)
+    ),
+)
