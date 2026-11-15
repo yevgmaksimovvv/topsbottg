@@ -8,6 +8,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from topsbottg.models import ChatMessage, Conversation, ConversationRead
+from topsbottg.services import queue_admin_event
 
 
 def _insert(session: AsyncSession, table):
@@ -19,16 +20,29 @@ def _insert(session: AsyncSession, table):
     raise NotImplementedError(f"Conversation storage requires PostgreSQL or SQLite, got {dialect}")
 
 
-async def get_or_create_conversation(session: AsyncSession, *, user_id: int) -> Conversation:
-    """Return the user's sole conversation without committing the caller's transaction."""
+async def get_or_create_conversation_with_status(
+    session: AsyncSession, *, user_id: int
+) -> tuple[Conversation, bool]:
+    """Atomically create a conversation and report whether this transaction inserted it."""
     if user_id <= 0:
         raise ValueError("user_id must be positive")
 
-    statement = _insert(session, Conversation).values(user_id=user_id)
-    await session.execute(statement.on_conflict_do_nothing(index_elements=[Conversation.user_id]))
+    statement = (
+        _insert(session, Conversation)
+        .values(user_id=user_id)
+        .on_conflict_do_nothing(index_elements=[Conversation.user_id])
+        .returning(Conversation.id)
+    )
+    inserted_id = (await session.execute(statement)).scalar_one_or_none()
     conversation = await session.scalar(select(Conversation).where(Conversation.user_id == user_id))
     if conversation is None:
         raise RuntimeError("Conversation insert did not produce a row")
+    return conversation, inserted_id is not None
+
+
+async def get_or_create_conversation(session: AsyncSession, *, user_id: int) -> Conversation:
+    """Return the user's sole conversation without committing the caller's transaction."""
+    conversation, _ = await get_or_create_conversation_with_status(session, user_id=user_id)
     return conversation
 
 
@@ -103,6 +117,7 @@ async def record_incoming_message(
             )
         )
         message = await session.get(ChatMessage, inserted_id)
+        queue_admin_event(session, "chat.changed", {"conversation_id": conversation_id})
     else:
         message = await session.scalar(
             select(ChatMessage).where(
