@@ -44,7 +44,7 @@ async def _download(bot, attachment: ChatAttachment) -> tuple[BinaryIO, int]:
 
     # Download into a bounded spool before sending headers, so truncated files and
     # oversized streams return an error rather than an apparently successful 200.
-    buffer = SpooledTemporaryFile(max_size=1024 * 1024, mode="w+b")
+    buffer = SpooledTemporaryFile(max_size=1024 * 1024, mode="w+b")  # noqa: SIM115
     total = 0
     try:
         url = bot.session.api.file_url(bot.token, path)
