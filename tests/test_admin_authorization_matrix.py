@@ -28,6 +28,11 @@ ADMIN_ROUTES = [
     ("POST", "/api/admin/conversations/10/messages", {"text": "Привет"}),
     ("POST", "/api/admin/conversations/10/attachments", None),
     ("POST", "/api/admin/conversations/10/read", {"last_read_message_id": 1}),
+    ("POST", "/api/admin/message-campaigns/preview", {"user_ids": [], "study_group_ids": []}),
+    ("POST", "/api/admin/message-campaigns", {"user_ids": [], "study_group_ids": [], "text": "Привет"}),
+    ("GET", "/api/admin/message-campaigns", None),
+    ("GET", "/api/admin/message-campaigns/10", None),
+    ("POST", "/api/admin/message-campaigns/10/retry-failed", None),
     ("GET", "/api/admin/study-groups", None),
     ("GET", "/api/admin/users", None),
     ("GET", "/api/admin/users/10", None),
@@ -77,6 +82,7 @@ def _route_template(path: str) -> str:
                     else "{invitation_id}" if value == "10" and parts[index - 1] == "admin-invitations"
                     else "{conversation_id}" if value == "10" and parts[index - 1] == "conversations"
                     else "{message_id}" if value == "10" and parts[index - 1] == "chat-messages"
+                    else "{campaign_id}" if value == "10" and parts[index - 1] == "message-campaigns"
                     else "{payout_id}" if value == "10" and parts[index - 1] == "payouts"
                     else "{recipient_id}" if value == "20" and parts[index - 1] == "recipients"
                     else value for index, value in enumerate(parts))

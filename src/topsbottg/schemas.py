@@ -145,6 +145,74 @@ class PayoutOut(BaseModel):
     updated_at: datetime
 
 
+class CampaignRecipientsIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_ids: list[int] = Field(default_factory=list, max_length=5000)
+    study_group_ids: list[int] = Field(default_factory=list, max_length=5000)
+
+    @field_validator("user_ids", "study_group_ids")
+    @classmethod
+    def _ids_must_be_positive(cls, values: list[int]) -> list[int]:
+        if any(type(item) is not int or item <= 0 for item in values):
+            raise ValueError("IDs must be positive integers")
+        return values
+
+
+class CampaignCreateIn(CampaignRecipientsIn):
+    text: str = Field(min_length=1, max_length=4096)
+
+    @field_validator("text")
+    @classmethod
+    def _campaign_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("campaign text must not be blank")
+        return value
+
+
+class CampaignPreviewRecipientOut(BaseModel):
+    user_id: int
+    full_name: str
+    study_group_name: str | None
+
+
+class CampaignPreviewOut(BaseModel):
+    recipient_count: int
+    recipients: list[CampaignPreviewRecipientOut]
+
+
+class CampaignOut(BaseModel):
+    id: int
+    recipient_count: int
+    status: str
+    created_at: datetime
+    admin_telegram_id: int
+    queued_count: int
+    sending_count: int
+    sent_count: int
+    failed_count: int
+
+
+class CampaignRecipientOut(BaseModel):
+    user_id: int
+    full_name: str
+    study_group_name: str | None
+    conversation_id: int
+    message_id: int
+    status: str
+    error_code: str | None
+    retry_count: int
+
+
+class CampaignDetailOut(CampaignOut):
+    recipients: list[CampaignRecipientOut]
+
+
+class CampaignPageOut(BaseModel):
+    items: list[CampaignOut]
+    next_cursor: str | None
+
+
 class ConversationCreateIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
