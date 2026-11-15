@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import signal
 
 import uvicorn
 from aiogram import Bot, Dispatcher
@@ -24,7 +26,10 @@ class HealthzAccessLogFilter(logging.Filter):
         if not isinstance(args, (tuple, list)) or len(args) < 5:
             return True
         _client_addr, method, path, _http_version, status_code = args[:5]
-        return not (method == "GET" and path == "/healthz" and status_code == 200)
+        return not (
+            (method == "GET" and path == "/healthz" and status_code == 200)
+            or (method == "GET" and path.split("?", 1)[0] == "/api/admin/events")
+        )
 
 
 def install_access_log_filters() -> None:
@@ -84,6 +89,19 @@ def create_runtime(settings: Settings) -> FastAPI:
         app.state.dispatcher = dp
         app.state.bot_task = asyncio.create_task(dp.start_polling(bot))
         app.state.worker_task = asyncio.create_task(run_worker(bot, session_factory, settings, app.state.stop_event))
+
+        def restart_if_background_task_stops(task: asyncio.Task) -> None:
+            if app.state.stop_event.is_set() or task.cancelled():
+                return
+            error = task.exception()
+            logger.error(
+                "Background task %s stopped unexpectedly: %s",
+                task.get_name(), type(error).__name__ if error else "normal exit",
+            )
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        app.state.bot_task.add_done_callback(restart_if_background_task_stops)
+        app.state.worker_task.add_done_callback(restart_if_background_task_stops)
 
     @app.on_event("shutdown")
     async def shutdown() -> None:

@@ -267,8 +267,14 @@ async def test_invalid_or_missing_events_token_rejected(client, admin_init_data)
     token_response = await client.post("/api/admin/events-token", headers={"X-Telegram-Init-Data": admin_init_data})
     token = token_response.json()["token"]
 
-    invalid = await client.get("/api/admin/events", params={"token": f"{token}x"})
+    assert "httponly" in token_response.headers["set-cookie"].lower()
+    assert "secure" in token_response.headers["set-cookie"].lower()
+    invalid = await client.get(
+        "/api/admin/events", headers={"Cookie": f"topsbottg_events={token}x"}
+    )
     assert invalid.status_code == 403
+    query_only = await client.get("/api/admin/events", params={"token": token})
+    assert query_only.status_code == 401
 
 
 @pytest.mark.asyncio

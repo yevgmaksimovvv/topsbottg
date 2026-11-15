@@ -670,7 +670,7 @@ async def test_send_failure_sets_failed(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_stale_sending_returns_pending(session_factory):
+async def test_stale_sending_requires_manual_retry_after_interrupted_send(session_factory):
     payout, recipient, _ = await _create_payout_with_recipient(session_factory)
     async with session_factory() as session:
         db_payout = await session.get(Payout, payout.id)
@@ -685,7 +685,11 @@ async def test_stale_sending_returns_pending(session_factory):
         assert restored == 1
     async with session_factory() as session:
         refreshed = await session.get(PayoutRecipient, recipient.id)
-        assert refreshed.status == RecipientStatus.pending.value
+        assert refreshed.status == RecipientStatus.failed.value
+        assert "Проверьте Telegram" in refreshed.failure_reason
+        assert refreshed.failed_at is not None
+        payout = await session.get(Payout, recipient.payout_id)
+        assert payout.status == PayoutStatus.partially_failed.value
 
 
 @pytest.mark.asyncio

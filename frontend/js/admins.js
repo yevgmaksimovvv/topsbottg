@@ -72,7 +72,9 @@ function renderInvitations() {
     ? pending.map((item) => `<article class="admins-member">
         <div class="admins-member-identity">
           <strong>${escapeHtml(nameFor(item))}</strong>
-          <span>Ожидает ответа</span>
+          <span>${item.delivered_at
+            ? "Ожидает ответа"
+            : item.delivery_attempts > 0 ? "Повторяем отправку" : "Отправляем приглашение"}</span>
         </div>
         <button type="button" class="admins-text-button"
           data-admin-action="cancel-invite" data-invite-id="${Number(item.id)}"
@@ -99,7 +101,10 @@ function renderCandidate() {
       <strong>${escapeHtml(nameFor(candidate))}</strong>
       <span>${escapeHtml(display + group)}</span>
     </div>
-    ${pendingInvite
+    ${candidate.role
+      ? `<p class="admins-empty">${candidate.role === "owner"
+          ? "Уже владелец" : "Уже администратор"}</p>`
+      : pendingInvite
       ? `<p class="admins-revoke-warning">Отправить приглашение этому пользователю?</p>
          <div class="admins-candidate-actions">
            <button type="button" class="button button-primary"

@@ -1601,22 +1601,33 @@ async def recover_stale_sending(session: AsyncSession, *, stale_after_minutes: i
             .distinct()
         )
     )
-    result = await session.execute(
-        update(PayoutRecipient)
-        .where(
-            PayoutRecipient.status == RecipientStatus.sending.value,
-            PayoutRecipient.updated_at < threshold,
-            PayoutRecipient.payout_id.in_(impacted_payout_ids),
-        )
-        .values(status=RecipientStatus.pending.value, failure_reason=None)
-    )
+    recovered = 0
     for payout_id in impacted_payout_ids:
-        queue_admin_event(
-            session,
-            ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
-            {"payout_id": payout_id, "reason": "recover_stale_sending"},
-        )
-    return int(getattr(result, "rowcount", 0) or 0)
+        async with payout_send_lock(payout_id, session):
+            result = await session.execute(
+                update(PayoutRecipient)
+                .where(
+                    PayoutRecipient.status == RecipientStatus.sending.value,
+                    PayoutRecipient.updated_at < threshold,
+                    PayoutRecipient.payout_id == payout_id,
+                )
+                .values(
+                    status=RecipientStatus.failed.value,
+                    failed_at=utcnow(),
+                    failure_reason="Исход отправки неизвестен после сбоя. Проверьте Telegram перед повтором.",
+                )
+            )
+            count = int(getattr(result, "rowcount", 0) or 0)
+            recovered += count
+            if count:
+                payout = await session.get(Payout, payout_id)
+                if payout is not None:
+                    await finalize_payout_after_worker(session, payout)
+                queue_admin_event(
+                    session, ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
+                    {"payout_id": payout_id, "reason": "recover_stale_sending"},
+                )
+    return recovered
 
 
 def _session_dialect_name(session: AsyncSession) -> str:

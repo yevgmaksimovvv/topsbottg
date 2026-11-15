@@ -105,10 +105,13 @@ async function browserFixture(role, run) {
         else if (state.searchFailures > 0) {
           state.searchFailures--;
           code = 503;
-        } else data = (search.get("username") === "@valid_name")
+        } else data = search.get("username") === "@valid_name"
           ? [{ telegram_id: 777, username: "valid_name", full_name: "Анна Петрова",
-              display_name: "Анна", study_group: "М3О-207СВ-25" }]
-          : [];
+              display_name: "Анна", study_group: "М3О-207СВ-25", role: null }]
+          : search.get("username") === "@owner_name"
+            ? [{ telegram_id: 123, username: "owner_name", full_name: "Евгений",
+                display_name: "Евгений", role: "owner" }]
+            : [];
       } else if (path === "/api/admin/admin-invitations" && method === "POST") {
         const payload = req.postDataJSON();
         if (role !== "owner") code = 403;
@@ -117,6 +120,7 @@ async function browserFixture(role, run) {
         else {
           state.invitations = [{
             id: 42, target_telegram_id: 777, status: "pending",
+            delivered_at: null, delivery_attempts: 0,
             username: "valid_name", display_name: "Анна Петрова",
           }];
           data = { id: 42, target_telegram_id: 777, status: "pending" };
@@ -201,11 +205,21 @@ test("owner can invite, cancel, revoke; modal retains payout state and supports 
     await page.locator("#admins-candidate [data-admin-action='invite']").click();
     assert.equal(state.invitations.length, 0);
     await page.locator("#admins-candidate [data-admin-action='confirm-invite']").click();
-    await page.locator("#admins-pending").getByText("Ожидает ответа").waitFor();
+    await page.locator("#admins-pending").getByText("Отправляем приглашение").waitFor();
     assert.equal(state.invitations.length, 1);
+    state.invitations[0].delivery_attempts = 1;
+    await page.locator("#admins-refresh").click();
+    await page.locator("#admins-pending").getByText("Повторяем отправку").waitFor();
+    state.invitations[0].delivered_at = new Date().toISOString();
+    await page.locator("#admins-refresh").click();
+    await page.locator("#admins-pending").getByText("Ожидает ответа").waitFor();
     await page.locator("#admins-pending [data-admin-action='cancel-invite']").click();
     await page.locator("#admins-pending").getByText("Нет ожидающих приглашений.").waitFor();
     assert.equal(state.invitations.length, 0);
+    await page.locator("#admins-search-input").fill("@owner_name");
+    await page.locator("#admins-search-form button").click();
+    await page.locator("#admins-candidate").getByText("Уже владелец").waitFor();
+    assert.equal(await page.locator("#admins-candidate [data-admin-action='invite']").count(), 0);
 
     state.directoryFailures = 1;
     await page.locator("#admins-refresh").click();

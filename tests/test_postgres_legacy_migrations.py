@@ -16,7 +16,9 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+from topsbottg.invitations import create_invitation, find_candidate
 
 
 @pytest.mark.postgres
@@ -129,6 +131,15 @@ async def test_postgres_legacy_payout_survives_upgrade_to_head():
             ))).scalar_one()
             migration_head = ScriptDirectory.from_config(Config(str(repository / "alembic.ini"))).get_current_head()
             assert revision == migration_head
+
+        async with AsyncSession(db_engine) as session:
+            legacy = await find_candidate(session, telegram_id=987654321)
+            assert legacy is not None and legacy.telegram_username is None
+            invitation = await create_invitation(
+                session, actor_id=123, target_id=987654321, owner_ids={123},
+            )
+            assert invitation.target_telegram_id == 987654321
+            await session.commit()
     finally:
         if db_engine is not None:
             await db_engine.dispose()

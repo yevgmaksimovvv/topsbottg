@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
+
+from httpx import ASGITransport, AsyncClient
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -58,6 +61,12 @@ def test_healthz_access_log_filter_suppresses_only_successful_healthz() -> None:
     assert flt.filter(_make_log_record(("127.0.0.1:40944", "GET", "/api/admin/me", "1.1", 200))) is True
     assert flt.filter(_make_log_record(("127.0.0.1:40944", "POST", "/healthz", "1.1", 200))) is True
     assert flt.filter(_make_log_record(("bad",))) is True
+    assert flt.filter(_make_log_record(
+        ("127.0.0.1:40944", "GET", "/api/admin/events?token=secret", "1.1", 200)
+    )) is False
+    assert flt.filter(_make_log_record(
+        ("127.0.0.1:40944", "GET", "/api/admin/events", "1.1", 401)
+    )) is False
 
 
 def test_install_access_log_filters_is_idempotent() -> None:
@@ -73,6 +82,27 @@ def test_install_access_log_filters_is_idempotent() -> None:
         assert len(filters) == 1
     finally:
         access_logger.filters[:] = original_filters
+
+
+@pytest.mark.asyncio
+async def test_health_reports_stopped_worker_as_unhealthy(settings, session_factory, monkeypatch):
+    app = api_module.create_app(settings, session_factory)
+    app.state.bot_task = asyncio.get_running_loop().create_future()
+    app.state.worker_task = asyncio.get_running_loop().create_future()
+
+    async def healthy(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(api_module, "check_database_ready", healthy)
+    monkeypatch.setattr(api_module, "check_telegram_ready", healthy)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/healthz")
+        assert response.status_code == 200
+        assert response.json()["checks"]["worker"] == "ok"
+        app.state.worker_task.set_result(None)
+        response = await client.get("/healthz")
+        assert response.status_code == 503
+        assert response.json()["checks"]["worker"] == "failed"
 
 
 @pytest.mark.asyncio

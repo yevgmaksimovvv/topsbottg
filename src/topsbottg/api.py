@@ -7,14 +7,14 @@ import logging
 import urllib.request
 from datetime import UTC, datetime, timedelta
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from topsbottg.access import AccessDenied, require_admin, require_owner, revoke_admin
+from topsbottg.access import AccessDenied, get_principal, require_admin, require_owner, revoke_admin
 from topsbottg.config import Settings
 from topsbottg.db import get_session
 from topsbottg.invitations import (
@@ -23,6 +23,7 @@ from topsbottg.invitations import (
     create_invitation,
     find_candidate,
     list_invitations,
+    observe_telegram_profile,
 )
 from topsbottg.logging_utils import log_event
 from topsbottg.models import (
@@ -359,9 +360,11 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
                     app.state.telegram_health_ok = await check_telegram_ready(settings.bot_token)
                     app.state.telegram_health_checked_until = now + 60
                 telegram_ready = app.state.telegram_health_ok and not bot_task.done()
+            worker_task = getattr(app.state, "worker_task", None)
             checks = {
                 "database": "ok" if await check_database_ready(session_factory) else "failed",
                 "telegram": "ok" if telegram_ready else "failed",
+                "worker": "ok" if worker_task is not None and not worker_task.done() else "failed",
             }
         status = "ok" if all(value == "ok" for value in checks.values()) else "error"
         return JSONResponse({"status": status, "checks": checks}, status_code=200 if status == "ok" else 503)
@@ -372,6 +375,17 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> dict[str, object]:
         telegram_id = await _require_admin(x_telegram_init_data, settings, session)
+        data = validate_telegram_init_data(
+            x_telegram_init_data, settings.bot_token,
+            max_age_seconds=settings.mini_app_init_data_max_age_seconds,
+        )
+        profile = data.raw_user
+        updated = await observe_telegram_profile(
+            session, telegram_id, profile.get("username"),
+            profile.get("first_name"), profile.get("last_name"),
+        )
+        if updated:
+            await session.commit()
         return {
             "telegram_user_id": telegram_id,
             "telegram_id": telegram_id,
@@ -381,15 +395,22 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
 
     @app.post("/api/admin/events-token", response_model=AdminEventsTokenOut)
     async def admin_events_token(
+        response: Response,
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> AdminEventsTokenOut:
         telegram_id = await _require_admin(x_telegram_init_data, settings, session)
         token = issue_admin_events_token(telegram_id)
+        response.set_cookie(
+            "topsbottg_events", token.token, max_age=ADMIN_EVENTS_TOKEN_TTL_SECONDS,
+            path="/api/admin/events", httponly=True, secure=True, samesite="strict",
+        )
         return AdminEventsTokenOut(token=token.token, expires_in=ADMIN_EVENTS_TOKEN_TTL_SECONDS)
 
     @app.get("/api/admin/events")
-    async def admin_events(token: str | None = Query(default=None)) -> StreamingResponse:
+    async def admin_events(
+        token: str | None = Cookie(default=None, alias="topsbottg_events"),
+    ) -> StreamingResponse:
         if not token:
             raise HTTPException(status_code=401, detail="token required")
         consumed = consume_admin_events_token(token)
@@ -525,11 +546,17 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if user is None:
             return []
+        role = await get_principal(session, user.telegram_id, settings.admin_ids_set)
+        fresh = user.telegram_profile_seen_at is not None and (
+            user.telegram_profile_seen_at.replace(tzinfo=UTC)
+            if user.telegram_profile_seen_at.tzinfo is None else user.telegram_profile_seen_at
+        ) >= datetime.now(UTC) - timedelta(days=14)
         group = await session.get(StudyGroup, user.study_group_id) if user.study_group_id else None
         return [{
             "telegram_id": user.telegram_id,
-            "username": user.telegram_username,
-            "display_name": user.telegram_display_name,
+            "username": user.telegram_username if fresh else None,
+            "display_name": user.telegram_display_name if fresh else None,
+            "role": role.role if role else None,
             "full_name": user.full_name,
             "study_group": group.display_code if group else None,
             "profile_seen_at": user.telegram_profile_seen_at,
@@ -557,6 +584,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
                 "status": item.status,
                 "expires_at": item.expires_at,
                 "delivered_at": item.delivered_at,
+                "delivery_attempts": item.delivery_attempts,
                 "created_at": item.created_at,
                 "username": (
                     known[item.target_telegram_id].telegram_username

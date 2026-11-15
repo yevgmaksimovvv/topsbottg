@@ -8,8 +8,35 @@ import pytest
 from conftest import make_init_data
 
 from topsbottg.access import grant_admin
+from topsbottg.invitations import find_candidate
 from topsbottg.invitations import create_invitation, observe_telegram_profile
 from topsbottg.services import get_or_create_user
+
+
+@pytest.mark.asyncio
+async def test_admin_me_observes_signed_telegram_profile(client, settings, session_factory):
+    from topsbottg.models import User
+    from sqlalchemy import select
+
+    async with session_factory() as session:
+        await get_or_create_user(session, 123, "Евгений")
+        await session.commit()
+    headers = {
+        "X-Telegram-Init-Data": make_init_data(
+            settings.bot_token, 123, username="owner_new",
+        ),
+    }
+    response = await client.get("/api/admin/me", headers=headers)
+    assert response.status_code == 200
+    async with session_factory() as session:
+        found = await find_candidate(session, username="owner_new")
+        assert found is not None and found.telegram_id == 123
+        assert (await session.scalar(select(User).where(User.telegram_id == 123))).telegram_display_name == "Test"
+    candidate = await client.get(
+        "/api/admin/admin-candidates", params={"username": "owner_new"}, headers=headers,
+    )
+    assert candidate.status_code == 200
+    assert candidate.json()[0]["role"] == "owner"
 
 
 @pytest.mark.asyncio

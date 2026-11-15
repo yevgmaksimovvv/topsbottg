@@ -527,16 +527,14 @@ export async function startAdminEvents(retryTokenRefresh = false) {
   if (adminEventsStartPromise) return adminEventsStartPromise;
   adminEventsStartPromise = (async () => {
     try {
-      const { token } = await createEventsToken();
+      await createEventsToken();
       if (
         adminEventsSource &&
         adminEventsSource.readyState !== EventSource.CLOSED
       ) {
         return adminEventsSource;
       }
-      const source = new EventSource(
-        `/api/admin/events?token=${encodeURIComponent(token)}`,
-      );
+      const source = new EventSource("/api/admin/events");
       adminEventsSource = source;
       adminEventsWarningShown = false;
       source.addEventListener("open", () => {

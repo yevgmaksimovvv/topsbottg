@@ -60,7 +60,45 @@ async def test_lookup_uses_recent_observed_identity_not_global_telegram_search(s
         user = await session.scalar(select(User).where(User.telegram_id == 555))
         user.telegram_profile_seen_at = datetime.now(UTC) - timedelta(days=15)
         await session.commit()
-        assert await find_candidate(session, telegram_id=555) is None
+        assert (await find_candidate(session, telegram_id=555)).telegram_id == 555
+
+
+@pytest.mark.asyncio
+async def test_legacy_user_can_be_invited_by_stable_telegram_id(session_factory, settings):
+    async with session_factory() as session:
+        await get_or_create_user(session, 777, "Старый пользователь")
+        await session.commit()
+    async with session_factory() as session:
+        found = await find_candidate(session, telegram_id=777)
+        assert found is not None and found.telegram_username is None
+        invite = await create_invitation(
+            session, actor_id=123, target_id=777, owner_ids=settings.admin_ids_set
+        )
+        assert invite.target_telegram_id == 777
+        await session.commit()
+        with pytest.raises(InvitationConflict):
+            await create_invitation(
+                session, actor_id=123, target_id=777, owner_ids=settings.admin_ids_set,
+                expected_username="unverified_name",
+            )
+
+
+@pytest.mark.asyncio
+async def test_invitation_is_cancelled_if_inviting_owner_loses_access(session_factory, settings):
+    await known(session_factory)
+    async with session_factory() as session:
+        invite = await create_invitation(
+            session, actor_id=123, target_id=555, owner_ids={123}
+        )
+        await session.commit()
+    async with session_factory() as session:
+        outcome = await decide_invitation(
+            session, invitation_id=invite.id, actor_id=555,
+            accept=True, owner_ids={456},
+        )
+        await session.commit()
+        assert outcome == "cancelled"
+        assert await get_principal(session, 555, {456}) is None
 
 
 @pytest.mark.asyncio
