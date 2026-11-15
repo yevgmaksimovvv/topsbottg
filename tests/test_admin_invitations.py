@@ -19,20 +19,6 @@ from topsbottg.services import get_or_create_user
 from topsbottg.worker import deliver_admin_invitations
 
 
-@pytest.fixture
-def username_identity(app):
-    class FakeResolver:
-        def __init__(self):
-            self.current = {"valid_name": 555}
-
-        async def resolve(self, username: str) -> int | None:
-            return self.current.get(username)
-
-    resolver = FakeResolver()
-    app.state.username_resolver = resolver
-    return resolver
-
-
 class InvitationBot:
     def __init__(self, *, fail_first: bool = False) -> None:
         self.sent: list[tuple[int, str, object]] = []
@@ -100,44 +86,40 @@ async def test_invitation_remains_valid_if_inviting_owner_loses_access(session_f
 
 
 @pytest.mark.asyncio
-async def test_username_reassignment_cannot_invite_previous_owner(
-    client, session_factory, admin_init_data, username_identity
-):
-    await known(session_factory)
+async def test_duplicate_names_do_not_change_selected_invitation_target(client, session_factory, admin_init_data):
+    await known(session_factory, 555, "Иван Иванов")
+    await known(session_factory, 666, "Иван Иванов")
     headers = {"X-Telegram-Init-Data": admin_init_data}
-    lookup = await client.get(
-        "/api/admin/admin-candidates", params={"username": "valid_name"}, headers=headers,
+    search = await client.get(
+        "/api/admin/admin-candidates", params={"search": "Иванов"}, headers=headers,
     )
-    assert lookup.status_code == 200
-    assert lookup.json()[0]["telegram_id"] == 555
-
-    username_identity.current["valid_name"] = 666
-    denied = await client.post(
-        "/api/admin/admin-invitations",
-        json={"target_telegram_id": 555, "expected_username": "valid_name"},
-        headers=headers,
+    assert search.status_code == 200
+    assert {row["telegram_id"] for row in search.json()["items"]} == {555, 666}
+    invited = await client.post(
+        "/api/admin/admin-invitations", json={"target_telegram_id": 666}, headers=headers,
     )
-    assert denied.status_code == 409
+    assert invited.status_code == 201
     async with session_factory() as session:
-        assert await session.scalar(select(AdminInvitation.id)) is None
+        invitation = await session.scalar(select(AdminInvitation))
+        assert invitation.target_telegram_id == 666
 
 
 @pytest.mark.asyncio
 async def test_owner_api_lookup_invites_and_grants_only_after_acceptance(
-    client, session_factory, settings, admin_init_data, username_identity
+    client, session_factory, settings, admin_init_data
 ):
     await known(session_factory)
     headers = {"X-Telegram-Init-Data": admin_init_data}
     lookup = await client.get(
-        "/api/admin/admin-candidates", params={"username": "@VALID_NAME"}, headers=headers
+        "/api/admin/admin-candidates", params={"search": "Иванов"}, headers=headers
     )
     assert lookup.status_code == 200
-    assert lookup.json()[0]["telegram_id"] == 555
-    assert lookup.json()[0]["full_name"] == "Иван Иванов"
+    assert lookup.json()["items"][0]["telegram_id"] == 555
+    assert lookup.json()["items"][0]["full_name"] == "Иван Иванов"
 
     created = await client.post(
         "/api/admin/admin-invitations",
-        json={"target_telegram_id": 555, "expected_username": "valid_name"},
+        json={"target_telegram_id": 555},
         headers=headers,
     )
     assert created.status_code == 201, created.text
@@ -190,28 +172,25 @@ async def test_owner_api_lookup_invites_and_grants_only_after_acceptance(
 
 
 @pytest.mark.asyncio
-async def test_username_change_blocks_stale_invitation_and_unknown_identity(
-    client, session_factory, admin_init_data, username_identity
+async def test_unknown_identity_and_obsolete_username_payload_rejected(
+    client, session_factory, admin_init_data,
 ):
     await known(session_factory)
     headers = {"X-Telegram-Init-Data": admin_init_data}
-    username_identity.current = {"changed_name": 555, "valid_name": 666}
-    bad = await client.post(
+    unknown = await client.post(
+        "/api/admin/admin-invitations", json={"target_telegram_id": 999}, headers=headers,
+    )
+    assert unknown.status_code == 409
+    obsolete = await client.post(
         "/api/admin/admin-invitations",
-        json={"target_telegram_id": 555, "expected_username": "valid_name"},
+        json={"target_telegram_id": 555, "expected_username": "old_name"},
         headers=headers,
     )
-    assert bad.status_code == 409
-    absent = await client.post(
-        "/api/admin/admin-invitations", json={"target_telegram_id": 999}, headers=headers
+    assert obsolete.status_code == 422
+    correct = await client.post(
+        "/api/admin/admin-invitations", json={"target_telegram_id": 555}, headers=headers,
     )
-    assert absent.status_code == 409
-    okay = await client.post(
-        "/api/admin/admin-invitations",
-        json={"target_telegram_id": 555, "expected_username": "@changed_name"},
-        headers=headers,
-    )
-    assert okay.status_code == 201
+    assert correct.status_code == 201
 
 
 @pytest.mark.asyncio
