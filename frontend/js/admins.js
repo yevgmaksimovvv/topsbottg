@@ -178,7 +178,7 @@ async function searchCandidate() {
     const results = await api(`/admin/admin-candidates?${params}`);
     if (searchRequestId !== id || !dialog()?.open) return;
     candidate = Array.isArray(results) ? results[0] || null : null;
-    if (!candidate) searchError = "Пользователь не найден. Сначала он должен открыть бота через /start.";
+    if (!candidate) searchError = "Не удалось найти Telegram username. Попробуйте поиск по Telegram ID.";
   } catch (error) {
     if (searchRequestId !== id || !dialog()?.open) return;
     searchError = error?.message || "Не удалось найти пользователя.";
