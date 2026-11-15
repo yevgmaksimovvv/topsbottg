@@ -83,9 +83,7 @@ class AdminInvitation(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    delivery_attempts: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
     delivery_state: Mapped[str] = mapped_column(String(16), nullable=False, default="queued", server_default="queued")
-    next_delivery_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_delivery_error: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
 
@@ -99,9 +97,6 @@ class User(Base, TimestampMixin):
         ForeignKey("study_groups.id", ondelete="SET NULL"), nullable=True
     )
     registration_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    telegram_username: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    telegram_display_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    telegram_profile_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     study_group: Mapped[StudyGroup | None] = relationship(back_populates="users")
     payment_profile: Mapped[PaymentProfile | None] = relationship(back_populates="user")
@@ -207,7 +202,6 @@ class AuditLog(Base, TimestampMixin):
 
 
 Index("ix_users_full_name_lower", func.lower(User.full_name))
-Index("ix_users_telegram_username_lower", func.lower(User.telegram_username))
 Index(
     "uq_admin_invitations_one_pending",
     AdminInvitation.target_telegram_id,
@@ -215,7 +209,6 @@ Index(
     postgresql_where=AdminInvitation.status == "pending",
     sqlite_where=AdminInvitation.status == "pending",
 )
-Index("ix_admin_invitations_delivery", AdminInvitation.status, AdminInvitation.next_delivery_at)
 Index("ix_users_study_group_id", User.study_group_id)
 Index("ix_payout_recipients_payout_status", PayoutRecipient.payout_id, PayoutRecipient.status)
 Index("ix_payout_recipients_user_status", PayoutRecipient.user_id, PayoutRecipient.status)

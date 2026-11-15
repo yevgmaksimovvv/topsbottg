@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from contextlib import suppress
 
-from aiogram import BaseMiddleware, F, Router
+from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -22,7 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from topsbottg.access import AccessDenied, get_principal
-from topsbottg.invitations import decide_invitation, observe_telegram_profile
+from topsbottg.invitations import decide_invitation
 from topsbottg.logging_utils import log_event
 from topsbottg.models import PayoutRecipient, RecipientStatus
 from topsbottg.services import (
@@ -323,40 +323,8 @@ async def _save_payment_details(
     )
 
 
-class TelegramProfileObserver(BaseMiddleware):
-    """Keep identity hints current after bot interactions, without creating registrations."""
-
-    def __init__(self, session_factory: async_sessionmaker) -> None:
-        self.session_factory = session_factory
-
-    async def __call__(self, handler, event, data):
-        result = await handler(event, data)
-        user = getattr(event, "from_user", None)
-        chat = getattr(event, "chat", None)
-        if chat is None and isinstance(event, CallbackQuery):
-            chat = getattr(event.message, "chat", None)
-        if user is None or chat is None or chat.type != "private":
-            return result
-        try:
-            async with self.session_factory() as session:
-                await observe_telegram_profile(
-                    session, user.id, user.username, user.first_name, user.last_name
-                )
-                await session.commit()
-        except SQLAlchemyError:
-            log_event(
-                logger, "ERROR", "telegram_profile_update_failed",
-                "Не удалось обновить данные Telegram",
-                telegram_user_id=user.id,
-            )
-        return result
-
-
 def build_router(session_factory: async_sessionmaker, _settings) -> Router:
     router = Router()
-    observer = TelegramProfileObserver(session_factory)
-    router.message.outer_middleware(observer)
-    router.callback_query.outer_middleware(observer)
 
     @router.message(CommandStart())
     async def start(message: Message, state: FSMContext):

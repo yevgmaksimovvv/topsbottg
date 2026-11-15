@@ -3,44 +3,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
 
-import topsbottg.api as api_module
 from topsbottg.access import get_principal, revoke_admin
 from topsbottg.invitations import (
     InvitationConflict,
     create_invitation,
     decide_invitation,
     find_candidate,
-    observe_telegram_profile,
 )
-from topsbottg.models import AdminInvitation, AuditLog, User
+from topsbottg.models import AdminInvitation, AuditLog
 from topsbottg.services import get_or_create_user
 from topsbottg.worker import deliver_admin_invitations
-
-
-@pytest.fixture(autouse=True)
-def telegram_identity(monkeypatch):
-    current = {"username": "valid_name"}
-
-    class FakeBot:
-        def __init__(self, token):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return None
-
-        async def get_chat(self, telegram_id):
-            return SimpleNamespace(username=current["username"])
-
-    monkeypatch.setattr(api_module, "Bot", FakeBot)
-    return current
 
 
 class InvitationBot:
@@ -55,42 +31,21 @@ class InvitationBot:
         self.sent.append((chat_id, text, reply_markup))
 
 
-async def known(session_factory, telegram_id=555, username="valid_name", full_name="Иван Иванов"):
+async def known(session_factory, telegram_id=555, full_name="Иван Иванов"):
     async with session_factory() as session:
         user = await get_or_create_user(session, telegram_id, full_name)
-        await observe_telegram_profile(session, telegram_id, username, "Иван", "Иванов")
         await session.commit()
         return user.id
 
 
 @pytest.mark.asyncio
-async def test_lookup_uses_recent_observed_identity_not_global_telegram_search(session_factory):
+async def test_candidate_lookup_only_depends_on_registered_telegram_id(session_factory):
     await known(session_factory)
     async with session_factory() as session:
-        first = await find_candidate(session, username="@VALID_name")
-        assert first is not None and first.telegram_id == 555
         assert (await find_candidate(session, telegram_id=555)).telegram_id == 555
-        assert await find_candidate(session, username="@missing_person") is None
         assert await find_candidate(session, telegram_id=999) is None
         with pytest.raises(ValueError):
-            await find_candidate(session)
-        with pytest.raises(ValueError):
-            await find_candidate(session, username="@a")
-        await observe_telegram_profile(session, 555, "new_handle", "Ivan", "New")
-        await session.commit()
-        assert await find_candidate(session, username="valid_name") is None
-        assert (await find_candidate(session, username="new_handle")).telegram_id == 555
-        user = await session.scalar(select(User).where(User.telegram_id == 555))
-        user.telegram_profile_seen_at = datetime.now(UTC) - timedelta(days=15)
-        await session.commit()
-        assert (await find_candidate(session, telegram_id=555)).telegram_id == 555
-        # A stale username can be found; the live Telegram identity is checked at invite time.
-        assert (await find_candidate(session, username="new_handle")).telegram_id == 555
-        invite = await create_invitation(
-            session, actor_id=123, target_id=555, owner_ids={123},
-            expected_username="new_handle",
-        )
-        assert invite.target_telegram_id == 555
+            await find_candidate(session, telegram_id=-1)
 
 
 @pytest.mark.asyncio
@@ -100,7 +55,7 @@ async def test_legacy_user_can_be_invited_by_stable_telegram_id(session_factory,
         await session.commit()
     async with session_factory() as session:
         found = await find_candidate(session, telegram_id=777)
-        assert found is not None and found.telegram_username is None
+        assert found is not None and found.telegram_id == 777
         invite = await create_invitation(
             session, actor_id=123, target_id=777, owner_ids=settings.admin_ids_set
         )
@@ -109,7 +64,6 @@ async def test_legacy_user_can_be_invited_by_stable_telegram_id(session_factory,
         with pytest.raises(InvitationConflict):
             await create_invitation(
                 session, actor_id=123, target_id=777, owner_ids=settings.admin_ids_set,
-                expected_username="unverified_name",
             )
 
 
@@ -132,12 +86,22 @@ async def test_invitation_remains_valid_if_inviting_owner_loses_access(session_f
 
 
 @pytest.mark.asyncio
-async def test_reused_username_is_rejected_instead_of_guessing_target(session_factory):
-    await known(session_factory, 555, "reused_name", "Первый")
-    await known(session_factory, 666, "reused_name", "Второй")
+async def test_duplicate_names_do_not_change_selected_invitation_target(client, session_factory, admin_init_data):
+    await known(session_factory, 555, "Иван Иванов")
+    await known(session_factory, 666, "Иван Иванов")
+    headers = {"X-Telegram-Init-Data": admin_init_data}
+    search = await client.get(
+        "/api/admin/admin-candidates", params={"search": "Иванов"}, headers=headers,
+    )
+    assert search.status_code == 200
+    assert {row["telegram_id"] for row in search.json()["items"]} == {555, 666}
+    invited = await client.post(
+        "/api/admin/admin-invitations", json={"target_telegram_id": 666}, headers=headers,
+    )
+    assert invited.status_code == 201
     async with session_factory() as session:
-        with pytest.raises(InvitationConflict):
-            await find_candidate(session, username="reused_name")
+        invitation = await session.scalar(select(AdminInvitation))
+        assert invitation.target_telegram_id == 666
 
 
 @pytest.mark.asyncio
@@ -147,16 +111,15 @@ async def test_owner_api_lookup_invites_and_grants_only_after_acceptance(
     await known(session_factory)
     headers = {"X-Telegram-Init-Data": admin_init_data}
     lookup = await client.get(
-        "/api/admin/admin-candidates", params={"username": "@VALID_NAME"}, headers=headers
+        "/api/admin/admin-candidates", params={"search": "Иванов"}, headers=headers
     )
     assert lookup.status_code == 200
-    assert lookup.json()[0]["telegram_id"] == 555
-    assert lookup.json()[0]["display_name"] == "Иван Иванов"
-    assert lookup.json()[0]["full_name"] == "Иван Иванов"
+    assert lookup.json()["items"][0]["telegram_id"] == 555
+    assert lookup.json()["items"][0]["full_name"] == "Иван Иванов"
 
     created = await client.post(
         "/api/admin/admin-invitations",
-        json={"target_telegram_id": 555, "expected_username": "valid_name"},
+        json={"target_telegram_id": 555},
         headers=headers,
     )
     assert created.status_code == 201, created.text
@@ -209,31 +172,25 @@ async def test_owner_api_lookup_invites_and_grants_only_after_acceptance(
 
 
 @pytest.mark.asyncio
-async def test_username_change_blocks_stale_invitation_and_unknown_identity(
-    client, session_factory, admin_init_data, telegram_identity
+async def test_unknown_identity_and_obsolete_username_payload_rejected(
+    client, session_factory, admin_init_data,
 ):
-    telegram_identity["username"] = "changed_name"
     await known(session_factory)
     headers = {"X-Telegram-Init-Data": admin_init_data}
-    async with session_factory() as session:
-        await observe_telegram_profile(session, 555, "changed_name", "Иван", "Иванов")
-        await session.commit()
-    bad = await client.post(
+    unknown = await client.post(
+        "/api/admin/admin-invitations", json={"target_telegram_id": 999}, headers=headers,
+    )
+    assert unknown.status_code == 409
+    obsolete = await client.post(
         "/api/admin/admin-invitations",
-        json={"target_telegram_id": 555, "expected_username": "valid_name"},
+        json={"target_telegram_id": 555, "expected_username": "old_name"},
         headers=headers,
     )
-    assert bad.status_code == 409
-    absent = await client.post(
-        "/api/admin/admin-invitations", json={"target_telegram_id": 999}, headers=headers
+    assert obsolete.status_code == 422
+    correct = await client.post(
+        "/api/admin/admin-invitations", json={"target_telegram_id": 555}, headers=headers,
     )
-    assert absent.status_code == 409
-    okay = await client.post(
-        "/api/admin/admin-invitations",
-        json={"target_telegram_id": 555, "expected_username": "@changed_name"},
-        headers=headers,
-    )
-    assert okay.status_code == 201
+    assert correct.status_code == 201
 
 
 @pytest.mark.asyncio
@@ -321,11 +278,9 @@ async def test_uncertain_invitation_delivery_is_not_retried(session_factory, set
     await deliver_admin_invitations(bot, session_factory)
     async with session_factory() as session:
         invitation = await session.get(AdminInvitation, id_)
-        assert invitation.delivery_attempts == 1
         assert invitation.last_delivery_error == "OSError"
         assert invitation.delivered_at is None
         assert invitation.delivery_state == "unknown"
-        invitation.next_delivery_at = datetime.now(UTC) - timedelta(seconds=1)
         await session.commit()
     await deliver_admin_invitations(bot, session_factory)
     assert len(bot.sent) == 0

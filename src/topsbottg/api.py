@@ -5,9 +5,7 @@ import hashlib
 import json
 import logging
 import urllib.request
-from datetime import UTC, datetime, timedelta
 
-from aiogram import Bot
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import inspect, select, text
@@ -15,7 +13,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from topsbottg.access import AccessDenied, get_principal, require_admin, require_owner, revoke_admin
+from topsbottg.access import AccessDenied, require_admin, require_owner, revoke_admin
 from topsbottg.config import Settings
 from topsbottg.db import get_session
 from topsbottg.invitations import (
@@ -24,7 +22,7 @@ from topsbottg.invitations import (
     create_invitation,
     find_candidate,
     list_invitations,
-    observe_telegram_profile,
+    search_candidates,
 )
 from topsbottg.logging_utils import log_event
 from topsbottg.models import (
@@ -381,17 +379,6 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> dict[str, object]:
         telegram_id = await _require_admin(x_telegram_init_data, settings, session)
-        data = validate_telegram_init_data(
-            x_telegram_init_data, settings.bot_token,
-            max_age_seconds=settings.mini_app_init_data_max_age_seconds,
-        )
-        profile = data.raw_user
-        updated = await observe_telegram_profile(
-            session, telegram_id, profile.get("username"),
-            profile.get("first_name"), profile.get("last_name"),
-        )
-        if updated:
-            await session.commit()
         return {
             "telegram_user_id": telegram_id,
             "telegram_id": telegram_id,
@@ -468,25 +455,12 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             await session.scalars(select(User).where(User.telegram_id.in_(all_ids)))
         ) if all_ids else []
         known = {user.telegram_id: user for user in users}
-        fresh_since = datetime.now(UTC) - timedelta(days=14)
-
         def card(telegram_id: int, role: str) -> dict[str, object]:
             user = known.get(telegram_id)
-            seen = user.telegram_profile_seen_at if user else None
-            is_fresh = seen is not None and (
-                seen if seen.tzinfo is not None else seen.replace(tzinfo=UTC)
-            ) >= fresh_since
-            username = user.telegram_username if is_fresh and user else None
-            display_name = (
-                (user.telegram_display_name if is_fresh else None)
-                or (user.full_name if user and user.full_name != "Без ФИО" else None)
-            )
             return {
                 "telegram_id": telegram_id,
                 "role": role,
-                "username": username,
-                "display_name": display_name,
-                "full_name": user.full_name if user else None,
+                "full_name": user.full_name if user and user.full_name != "Без ФИО" else None,
             }
 
         return [
@@ -535,59 +509,65 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
 
     @app.get("/api/admin/admin-candidates")
     async def admin_candidates(
-        username: str | None = Query(default=None, max_length=33),
+        search: str | None = Query(default=None, max_length=128),
         telegram_id: int | None = Query(default=None, gt=0),
+        study_group_id: int | None = Query(default=None, gt=0),
+        limit: int = Query(default=30, ge=1, le=50),
+        offset: int = Query(default=0, ge=0),
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
-    ) -> list[dict[str, object]]:
+    ) -> dict[str, object]:
         actor_id = await _require_admin(x_telegram_init_data, settings, session)
         try:
             require_owner(actor_id, settings.admin_ids_set)
         except AccessDenied as exc:
             raise HTTPException(status_code=403, detail="owner only") from exc
-        try:
-            user = await find_candidate(session, username=username, telegram_id=telegram_id)
-        except InvitationConflict as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        if user is None and username is not None:
-            # Owner IDs are known independently of the cached Telegram profile.
-            # Resolve only those IDs; the Bot API cannot search arbitrary private users.
-            wanted = username.strip().removeprefix("@").casefold()
-            async with Bot(token=settings.bot_token) as bot:
-                for owner_id in sorted(settings.admin_ids_set):
-                    try:
-                        chat = await bot.get_chat(owner_id)
-                    except Exception:
-                        continue
-                    if (chat.username or "").casefold() != wanted:
-                        continue
-                    user = await session.scalar(select(User).where(User.telegram_id == owner_id))
-                    if user is not None:
-                        await observe_telegram_profile(
-                            session, owner_id, chat.username,
-                            chat.first_name, chat.last_name,
-                        )
-                        await session.commit()
-                    break
-        if user is None:
-            return []
-        role = await get_principal(session, user.telegram_id, settings.admin_ids_set)
-        fresh = user.telegram_profile_seen_at is not None and (
-            user.telegram_profile_seen_at.replace(tzinfo=UTC)
-            if user.telegram_profile_seen_at.tzinfo is None else user.telegram_profile_seen_at
-        ) >= datetime.now(UTC) - timedelta(days=14)
-        group = await session.get(StudyGroup, user.study_group_id) if user.study_group_id else None
-        return [{
-            "telegram_id": user.telegram_id,
-            "username": user.telegram_username if fresh else None,
-            "display_name": user.telegram_display_name if fresh else None,
-            "role": role.role if role else None,
-            "full_name": user.full_name,
-            "study_group": group.display_code if group else None,
-            "profile_seen_at": user.telegram_profile_seen_at,
-        }]
+        if (search is None) == (telegram_id is None):
+            raise HTTPException(status_code=422, detail="Укажите ФИО или Telegram ID.")
+
+        if search is not None:
+            name = " ".join(search.split())
+            if not name:
+                raise HTTPException(status_code=422, detail="Введите ФИО или Telegram ID.")
+            if name.isascii() and name.isdecimal():
+                telegram_id = int(name)
+                if not 0 < telegram_id < 2**63:
+                    raise HTTPException(status_code=422, detail="Неверный Telegram ID.")
+            else:
+                if len(name) < 2:
+                    raise HTTPException(status_code=422, detail="Укажите хотя бы два символа ФИО.")
+                users, has_more = await search_candidates(
+                    session, name=name, study_group_id=study_group_id, limit=limit, offset=offset,
+                )
+        if telegram_id is not None:
+            # Exact ID search works even when a user's name or study group is not filled in.
+            user = await find_candidate(session, telegram_id=telegram_id)
+            users, has_more = ([user] if user else []), False
+
+        active_ids = set()
+        if users:
+            active_ids = set((await session.scalars(
+                select(AdminGrant.telegram_id).where(
+                    AdminGrant.telegram_id.in_(user.telegram_id for user in users),
+                    AdminGrant.revoked_at.is_(None),
+                )
+            )).all())
+
+        return {
+            "items": [
+                {
+                    "telegram_id": user.telegram_id,
+                    "full_name": user.full_name if user.full_name != "Без ФИО" else None,
+                    "study_group": user.study_group.display_code if user.study_group else None,
+                    "role": (
+                        "owner" if user.telegram_id in settings.admin_ids_set
+                        else "admin" if user.telegram_id in active_ids else None
+                    ),
+                }
+                for user in users
+            ],
+            "has_more": has_more,
+        }
 
     @app.get("/api/admin/admin-invitations")
     async def admin_list_invitations(
@@ -611,19 +591,12 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
                 "status": item.status,
                 "expires_at": item.expires_at,
                 "delivered_at": item.delivered_at,
-                "delivery_attempts": item.delivery_attempts,
                 "delivery_state": item.delivery_state,
                 "created_at": item.created_at,
-                "username": (
-                    known[item.target_telegram_id].telegram_username
-                    if item.target_telegram_id in known
-                    else None
-                ),
-                "display_name": (
-                    (known[item.target_telegram_id].telegram_display_name
-                     or known[item.target_telegram_id].full_name)
-                    if item.target_telegram_id in known
-                    else None
+                "full_name": (
+                    known[item.target_telegram_id].full_name
+                    if item.target_telegram_id in known and
+                    known[item.target_telegram_id].full_name != "Без ФИО" else None
                 ),
             }
             for item in invitations
@@ -636,39 +609,22 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> dict[str, object]:
         actor_id = await _require_admin(x_telegram_init_data, settings, session)
-        if payload.expected_username is not None:
-            try:
-                require_owner(actor_id, settings.admin_ids_set)
-            except AccessDenied as exc:
-                raise HTTPException(status_code=403, detail="owner only") from exc
-            async with Bot(token=settings.bot_token) as bot:
-                try:
-                    chat = await bot.get_chat(payload.target_telegram_id)
-                except Exception as exc:
-                    logger.warning("Telegram identity verification failed: %s", type(exc).__name__)
-                    raise HTTPException(status_code=503, detail="Не удалось проверить Telegram ID.") from exc
-            current_username = (chat.username or "").lower()
-            if current_username != payload.expected_username.strip().removeprefix("@").lower():
-                raise HTTPException(status_code=409, detail="Telegram username изменился. Повторите поиск.")
+        try:
+            require_owner(actor_id, settings.admin_ids_set)
+        except AccessDenied as exc:
+            raise HTTPException(status_code=403, detail="owner only") from exc
+
         try:
             invitation = await create_invitation(
-                session,
-                actor_id=actor_id,
-                target_id=payload.target_telegram_id,
-                owner_ids=settings.admin_ids_set,
-                expected_username=payload.expected_username,
+                session, actor_id=actor_id,
+                target_id=payload.target_telegram_id, owner_ids=settings.admin_ids_set,
             )
             await session.commit()
         except AccessDenied as exc:
             raise HTTPException(status_code=403, detail="owner only") from exc
         except (InvitationConflict, IntegrityError) as exc:
             await session.rollback()
-            raise HTTPException(
-                status_code=409, detail="Приглашение уже существует или пользователь недоступен."
-            ) from exc
-        except ValueError as exc:
-            await session.rollback()
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {
             "id": invitation.id,
             "target_telegram_id": invitation.target_telegram_id,

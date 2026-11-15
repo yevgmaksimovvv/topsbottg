@@ -134,7 +134,7 @@ async def test_postgres_legacy_payout_survives_upgrade_to_head():
 
         async with AsyncSession(db_engine) as session:
             legacy = await find_candidate(session, telegram_id=987654321)
-            assert legacy is not None and legacy.telegram_username is None
+            assert legacy is not None and legacy.telegram_id == 987654321
             invitation = await create_invitation(
                 session, actor_id=123, target_id=987654321, owner_ids={123},
             )

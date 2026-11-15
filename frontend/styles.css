@@ -867,7 +867,8 @@ textarea::placeholder {
   align-items: center;
   gap: 8px;
 }
-.admins-search-form input {
+.admins-search-form input,
+.admins-search-form select {
   width: 100%;
   min-width: 0;
   min-height: 44px;
@@ -875,6 +876,14 @@ textarea::placeholder {
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--field);
+  color: var(--text);
+}
+.admins-search-form select {
+  grid-column: 1 / -1;
+}
+.admins-load-more {
+  width: 100%;
+  margin-top: 12px;
 }
 .admins-search-form button {
   min-height: 44px;

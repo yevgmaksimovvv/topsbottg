@@ -1042,7 +1042,7 @@ async def test_database_admin_can_open_bot_admin_until_revoked(session_factory, 
     assert _last_message_method(recording_session).text == "Откройте админку."
 
 @pytest.mark.asyncio
-async def test_start_saves_current_telegram_username_for_owner_lookup(session_factory, settings):
+async def test_start_registers_telegram_id_without_profile_cache(session_factory, settings):
     bot, recording = _make_bot()
     dispatcher = _make_dispatcher(session_factory, settings)
     update = Update.model_validate(
@@ -1064,21 +1064,19 @@ async def test_start_saves_current_telegram_username_for_owner_lookup(session_fa
     await dispatcher.feed_update(bot, update)
     async with session_factory() as session:
         user = await session.scalar(select(User).where(User.telegram_id == 555))
-        assert user.telegram_username == "first_handle"
-        assert user.telegram_display_name == "Настоящее Имя"
-        assert user.telegram_profile_seen_at is not None
+        assert user.telegram_id == 555
+        assert user.full_name == "Без ФИО"
     assert "Здравствуйте" in _last_message_method(recording).text
 
 
 @pytest.mark.asyncio
 async def test_invite_callback_requires_matching_telegram_user_then_grants_access(session_factory, settings):
     from topsbottg.access import get_principal
-    from topsbottg.invitations import create_invitation, observe_telegram_profile
+    from topsbottg.invitations import create_invitation
     from topsbottg.models import AdminInvitation
 
     async with session_factory() as session:
         await get_or_create_user(session, 555, "Иван Иванов")
-        await observe_telegram_profile(session, 555, "valid_name", "Иван", "Иванов")
         invitation = await create_invitation(
             session, actor_id=123, target_id=555, owner_ids=settings.admin_ids_set
         )
@@ -1115,11 +1113,10 @@ async def test_invite_callback_requires_matching_telegram_user_then_grants_acces
 @pytest.mark.asyncio
 async def test_invite_decline_button_never_grants_admin(session_factory, settings):
     from topsbottg.access import get_principal
-    from topsbottg.invitations import create_invitation, observe_telegram_profile
+    from topsbottg.invitations import create_invitation
 
     async with session_factory() as session:
         await get_or_create_user(session, 555, "Иван Иванов")
-        await observe_telegram_profile(session, 555, "valid_name", "Иван", "Иванов")
         invitation = await create_invitation(
             session, actor_id=123, target_id=555, owner_ids=settings.admin_ids_set
         )
