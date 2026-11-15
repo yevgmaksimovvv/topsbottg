@@ -547,8 +547,8 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         if username is not None:
             # Release the read transaction before calling the external Telegram API.
             await session.rollback()
+            found_id = await resolve_username_or_http_error(username)
             resolved_username = normalize_username(username)
-            found_id = await resolve_username_or_http_error(resolved_username)
             if found_id is None:
                 return []
             telegram_id = found_id
