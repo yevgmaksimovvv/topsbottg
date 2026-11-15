@@ -320,7 +320,11 @@ test("Inbox: history, read marker, older messages, incoming refresh, send/retry 
     assert.equal(await page.locator(".inbox-read-marker").count(), 0);
     assert.equal(await page.locator("#inbox-refresh").count(), 0);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-    await page.locator("#inbox-older").click();
+    await page.evaluate(() => {
+      const list = document.getElementById("inbox-history");
+      list.scrollTop = 0;
+      list.dispatchEvent(new Event("scroll"));
+    });
     await page.locator("#inbox-history").getByText("Раннее сообщение").waitFor();
     assert.equal(await page.locator("#inbox-history [data-inbox-message]").count(), 5);
 
@@ -417,7 +421,11 @@ test("Unread stays unread when history is scrolled up during refresh", async () 
     await page.locator("#inbox-open").click();
     await page.locator("#inbox-conversations .inbox-conversation").first().click();
     await page.locator("#inbox-history [data-inbox-message='54']").waitFor();
-    await page.locator("#inbox-older").click();
+    await page.evaluate(() => {
+      const list = document.getElementById("inbox-history");
+      list.scrollTop = 0;
+      list.dispatchEvent(new Event("scroll"));
+    });
     await page.locator("#inbox-history [data-inbox-message='2']").waitFor();
     await page.locator("#inbox-history [data-inbox-message='51']").scrollIntoViewIfNeeded();
     await page.evaluate(() => document.getElementById("inbox-history").dispatchEvent(new Event("scroll")));
