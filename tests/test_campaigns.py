@@ -238,3 +238,30 @@ async def test_campaign_delivery_and_retry_failed_only(client, session_factory, 
         assert len(history.json()["items"]) == 1
         assert history.json()["items"][0]["id"] == item["message_id"]
         assert history.json()["items"][0]["delivery_status"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_campaign_create_rechecks_group_membership_after_preview(
+    client, session_factory, admin_init_data,
+):
+    ids, group_a, _ = await _users(session_factory)
+    headers = _headers(admin_init_data, "group-changed")
+    preview = await client.post(
+        "/api/admin/message-campaigns/preview",
+        headers=headers, json={"user_ids": [], "study_group_ids": [group_a]},
+    )
+    assert preview.status_code == 200
+    assert preview.json()["recipient_count"] == 3
+    async with session_factory() as session:
+        user = await session.get(User, ids[0])
+        user.study_group_id = None
+        await session.commit()
+    response = await client.post("/api/admin/message-campaigns", headers=headers, json={
+        "user_ids": [], "study_group_ids": [group_a], "text": "Новый состав группы",
+    })
+    assert response.status_code == 202
+    assert response.json()["recipient_count"] == 2
+    detail = (await client.get(
+        f"/api/admin/message-campaigns/{response.json()['id']}", headers=headers,
+    )).json()
+    assert {item["user_id"] for item in detail["recipients"]} == set(ids[1:3])

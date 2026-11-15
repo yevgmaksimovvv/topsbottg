@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -27,6 +28,7 @@ from topsbottg.models import (
     StudyGroup,
     User,
 )
+from topsbottg.worker import deliver_chat_outbox
 
 
 @pytest.fixture
@@ -251,3 +253,76 @@ async def test_pg_revoked_admin_between_preview_and_create(
     assert (await client.get("/api/admin/message-campaigns", headers=headers)).status_code == 403
     async with factory() as session:
         assert await session.scalar(select(func.count(MessageCampaign.id))) == 0
+
+
+@pytest.mark.postgres
+async def test_pg_20_recipients_deliver_to_20_permanent_conversations(
+    postgres_campaign, admin_init_data,
+):
+    client, factory, ids, a, b = postgres_campaign
+    headers = _headers(admin_init_data, "twenty-deliveries")
+    response = await client.post(
+        "/api/admin/message-campaigns",
+        headers=headers, json=_body(ids, a, b),
+    )
+    assert response.status_code == 202
+    campaign_id = response.json()["id"]
+
+    class Delivered:
+        def __init__(self):
+            self.destinations = []
+            self.counter = 4000
+
+        async def send_message(self, chat_id, text, **kwargs):
+            self.destinations.append((chat_id, text))
+            self.counter += 1
+            return SimpleNamespace(message_id=self.counter)
+
+    bot = Delivered()
+    for _ in range(20):
+        await deliver_chat_outbox(bot, factory)
+    assert len(bot.destinations) == 20
+    assert len({chat_id for chat_id, _ in bot.destinations}) == 20
+    assert set(bot.destinations) == {
+        (88000 + i, "Всем зарегистрированным") for i in range(1, 21)
+    }
+    detail = (await client.get(
+        f"/api/admin/message-campaigns/{campaign_id}", headers=headers,
+    )).json()
+    assert detail["status"] == "sent" and detail["sent_count"] == 20
+    assert detail["queued_count"] == detail["sending_count"] == detail["failed_count"] == 0
+    async with factory() as session:
+        assert await session.scalar(select(func.count(ChatMessage.id))) == 20
+        assert await session.scalar(select(func.count(ChatMessageOutbox.id))) == 20
+        assert await session.scalar(select(func.count(CampaignRecipient.id))) == 20
+        assert await session.scalar(select(func.count(Conversation.id))) == 20
+        assert await session.scalar(select(func.count(Payout.id))) == 0
+        assert await session.scalar(select(func.count(PayoutRecipient.id))) == 0
+
+
+@pytest.mark.postgres
+async def test_pg_same_key_is_scoped_to_admin_not_globally(
+    postgres_campaign, admin_init_data, dynamic_admin_init_data,
+):
+    client, factory, ids, a, b = postgres_campaign
+    body = {"user_ids": ids[:1], "study_group_ids": [], "text": "Администраторы"}
+    async with factory() as session:
+        session.add(AdminGrant(
+            telegram_id=555, granted_by_telegram_id=123, granted_at=datetime.now(UTC),
+        ))
+        await session.commit()
+    one = await client.post(
+        "/api/admin/message-campaigns",
+        headers=_headers(admin_init_data, "shared-key"), json=body,
+    )
+    two = await client.post(
+        "/api/admin/message-campaigns",
+        headers=_headers(dynamic_admin_init_data, "shared-key"), json=body,
+    )
+    assert one.status_code == two.status_code == 202
+    assert one.json()["id"] != two.json()["id"]
+    async with factory() as session:
+        assert await session.scalar(select(func.count(MessageCampaign.id))) == 2
+        assert await session.scalar(select(func.count(ChatMessageOutbox.id))) == 2
+        assert await session.scalar(select(func.count(CampaignRecipient.id))) == 2
+        assert await session.scalar(select(func.count(Conversation.id))) == 1

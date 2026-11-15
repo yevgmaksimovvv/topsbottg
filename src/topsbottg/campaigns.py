@@ -141,7 +141,7 @@ async def create_campaign(
             session,
             conversation_id=conversation.id,
             admin_telegram_id=actor_id,
-            idempotency_key=f"campaign:{campaign.id}:{recipient.user_id}",
+            idempotency_key=f"\x1fcampaign:{campaign.id}:{recipient.user_id}",
             text=payload.text,
         )
         if not created or message.outbox is None:
