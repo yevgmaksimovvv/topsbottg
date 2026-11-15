@@ -20,6 +20,16 @@ const inbox = {
   readingId: null,
   query: "",
   group: "",
+  newQuery: "",
+  newGroup: "",
+  newUsers: [],
+  newOffset: 0,
+  newHasMore: false,
+  newLoading: false,
+  newError: "",
+  newRequest: 0,
+  newController: null,
+  newSearchTimer: null,
   current: null,
   messages: [],
   historyCursor: null,
@@ -81,7 +91,7 @@ function handleRequestError(error) {
 }
 
 function cancelRequests() {
-  for (const prop of ["listController", "summaryController", "historyController", "openController", "readController"]) {
+  for (const prop of ["listController", "summaryController", "historyController", "openController", "readController", "newController"]) {
     inbox[prop]?.abort();
     inbox[prop] = null;
   }
@@ -122,16 +132,16 @@ async function loadSummary() {
 }
 
 function renderGroups() {
-  const control = el("inbox-group");
-  if (!control) return;
-  control.replaceChildren(new Option("Все группы", ""));
-  for (const group of state.studyGroups) {
-    control.add(new Option(group.code, String(group.id)));
-  }
-  control.value = inbox.group;
-  if (control.selectedIndex === -1) {
-    control.add(new Option("Выбранная группа", inbox.group));
-    control.value = inbox.group;
+  for (const [id, selected] of [["inbox-group", inbox.group], ["inbox-new-group", inbox.newGroup]]) {
+    const control = el(id);
+    if (!control) continue;
+    control.replaceChildren(new Option("Все группы", ""));
+    for (const group of state.studyGroups) control.add(new Option(group.code, String(group.id)));
+    control.value = selected;
+    if (control.selectedIndex === -1) {
+      control.add(new Option("Выбранная группа", selected));
+      control.value = selected;
+    }
   }
 }
 
@@ -204,8 +214,91 @@ async function loadConversations(reset = false) {
   }
 }
 
+function renderNewUsers() {
+  const list = el("inbox-new-users");
+  if (!list) return;
+  list.innerHTML = inbox.newUsers.map((user) =>
+    '<button type="button" class="inbox-new-user" data-inbox-new-user="' + Number(user.id) + '">' +
+    '<span class="inbox-row-heading"><strong>' + text(user.full_name) + '</strong></span>' +
+    '<span class="inbox-row-subtitle">' + text(user.study_group?.code || "Группа не указана") + '</span>' +
+    '</button>'
+  ).join("");
+  el("inbox-new-more")?.classList.toggle("hidden", !inbox.newHasMore);
+  if (el("inbox-new-more")) el("inbox-new-more").disabled = inbox.newLoading;
+  el("inbox-new-retry")?.classList.toggle("hidden", !inbox.newError);
+  status("inbox-new-status", inbox.newLoading
+    ? "Ищем пользователей…"
+    : inbox.newError || (inbox.newUsers.length ? "" : "Пользователи не найдены."));
+}
+
+async function loadNewUsers(reset = false) {
+  if (!inbox.client || (inbox.newLoading && !reset) || !isOpen()) return;
+  const generation = ++inbox.newRequest;
+  inbox.newController?.abort();
+  const controller = new AbortController();
+  inbox.newController = controller;
+  const client = inbox.client;
+  const query = inbox.newQuery;
+  const group = inbox.newGroup;
+  if (reset) {
+    inbox.newUsers = [];
+    inbox.newOffset = 0;
+    inbox.newHasMore = false;
+  }
+  inbox.newLoading = true;
+  inbox.newError = "";
+  renderNewUsers();
+  try {
+    const page = await client.users({
+      search: query, study_group_id: group, offset: inbox.newOffset, limit: 50,
+      signal: controller.signal,
+    });
+    if (generation !== inbox.newRequest || controller.signal.aborted ||
+        client !== inbox.client || el("inbox-new-screen")?.hidden || !isOpen()) return;
+    const seen = new Set(inbox.newUsers.map((user) => Number(user.id)));
+    for (const user of page.items || []) {
+      if (!seen.has(Number(user.id))) inbox.newUsers.push(user);
+    }
+    inbox.newOffset = Number(page.offset || 0) + (page.items || []).length;
+    inbox.newHasMore = Boolean(page.has_more);
+  } catch (error) {
+    if (generation === inbox.newRequest && !isAbort(error) && client === inbox.client) {
+      if (!handleRequestError(error)) inbox.newError = error?.message || "Не удалось найти пользователей.";
+    }
+  } finally {
+    if (inbox.newController === controller) inbox.newController = null;
+    if (generation === inbox.newRequest && client === inbox.client) {
+      inbox.newLoading = false;
+      renderNewUsers();
+    }
+  }
+}
+
+function showNewDialog() {
+  ++inbox.listRequest;
+  inbox.listController?.abort();
+  inbox.newQuery = "";
+  inbox.newGroup = "";
+  inbox.newUsers = [];
+  inbox.newOffset = 0;
+  inbox.newHasMore = false;
+  el("inbox-list-screen").hidden = true;
+  el("inbox-history-screen").hidden = true;
+  el("inbox-new-screen").hidden = false;
+  el("inbox-new").hidden = true;
+  el("inbox-back").hidden = false;
+  el("inbox-title").textContent = "Новый диалог";
+  el("inbox-new-search").value = "";
+  renderGroups();
+  void loadNewUsers(true);
+  el("inbox-new-search").focus();
+}
+
 function showList() {
   ++inbox.historyRequest;
+  ++inbox.newRequest;
+  inbox.newController?.abort();
+  clearTimeout(inbox.newSearchTimer);
   inbox.historyController?.abort();
   inbox.readController?.abort();
   inbox.current = null;
@@ -214,6 +307,8 @@ function showList() {
   inbox.replyTo = null;
   el("inbox-list-screen").hidden = false;
   el("inbox-history-screen").hidden = true;
+  el("inbox-new-screen").hidden = true;
+  el("inbox-new").hidden = false;
   el("inbox-back").hidden = true;
   el("inbox-title").textContent = "Сообщения";
   el("inbox-search")?.focus();
