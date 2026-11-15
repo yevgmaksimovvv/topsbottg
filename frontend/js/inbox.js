@@ -9,6 +9,8 @@ const inbox = {
   nextCursor: null,
   listRequest: 0,
   listLoading: false,
+  listError: "",
+  readingId: null,
   query: "",
   group: "",
   current: null,
@@ -114,7 +116,7 @@ function renderConversations() {
   if (more) more.disabled = inbox.listLoading;
   status("inbox-list-status", inbox.listLoading
     ? "Загружаем диалоги…"
-    : inbox.conversations.length ? "" : "Диалогов пока нет.");
+    : inbox.listError || (inbox.conversations.length ? "" : "Диалогов пока нет."));
 }
 
 async function loadConversations(reset = false) {
@@ -129,6 +131,7 @@ async function loadConversations(reset = false) {
     inbox.nextCursor = null;
   }
   inbox.listLoading = true;
+  inbox.listError = "";
   renderConversations();
   try {
     const response = await client.conversations({ query, study_group_id: group, cursor, limit: 50 });
@@ -139,7 +142,7 @@ async function loadConversations(reset = false) {
     inbox.nextCursor = response.next_cursor ?? null;
   } catch (error) {
     if (generation === inbox.listRequest && client === inbox.client)
-      status("inbox-list-status", error?.message || "Не удалось загрузить диалоги.");
+      inbox.listError = error?.message || "Не удалось загрузить диалоги.";
     return;
   } finally {
     if (generation === inbox.listRequest) {
@@ -261,9 +264,10 @@ async function loadMessages({ older = false, refresh = false } = {}) {
 async function markRead() {
   if (!inbox.client || !inbox.current) return;
   const last = [...inbox.messages].reverse().find((message) => message.direction === "incoming" && Number.isInteger(Number(message.id)));
-  if (!last || Number(last.id) <= Number(inbox.readThrough || 0)) return;
+  if (!last || Number(last.id) <= Number(inbox.readThrough || 0) || Number(last.id) <= Number(inbox.readingId || 0)) return;
   const client = inbox.client;
   const id = inbox.current.id;
+  inbox.readingId = last.id;
   try {
     const result = await client.read(id, last.id);
     if (client !== inbox.client || inbox.current?.id !== id) return;
@@ -273,6 +277,8 @@ async function markRead() {
     void loadSummary();
   } catch {
     // A read marker may be retried on the next refresh or scroll to bottom.
+  } finally {
+    if (inbox.readingId === last.id) inbox.readingId = null;
   }
 }
 
@@ -281,6 +287,7 @@ async function openConversation(conversation) {
   inbox.messages = [];
   inbox.historyCursor = null;
   inbox.readThrough = null;
+  inbox.readingId = null;
   inbox.replyTo = null;
   ++inbox.historyRequest;
   el("inbox-list-screen").hidden = true;
@@ -382,6 +389,7 @@ function cleanup() {
   if (inbox.opener?.isConnected && !inbox.opener.closest(".hidden, [hidden]"))
     inbox.opener.focus();
   inbox.opener = null;
+  inbox.readingId = null;
 }
 
 export function configureInboxClient(client) {
