@@ -84,7 +84,7 @@ async def test_legacy_user_can_be_invited_by_stable_telegram_id(session_factory,
 
 
 @pytest.mark.asyncio
-async def test_invitation_is_cancelled_if_inviting_owner_loses_access(session_factory, settings):
+async def test_invitation_remains_valid_if_inviting_owner_loses_access(session_factory, settings):
     await known(session_factory)
     async with session_factory() as session:
         invite = await create_invitation(
@@ -97,8 +97,8 @@ async def test_invitation_is_cancelled_if_inviting_owner_loses_access(session_fa
             accept=True, owner_ids={456},
         )
         await session.commit()
-        assert outcome == "cancelled"
-        assert await get_principal(session, 555, {456}) is None
+        assert outcome == "accepted"
+        assert (await get_principal(session, 555, {456})).role == "admin"
 
 
 @pytest.mark.asyncio
