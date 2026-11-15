@@ -62,11 +62,11 @@ async def test_owner_directory_includes_all_owners_and_active_grants(
         assert resp.headers["cache-control"] == "no-store"
         assert resp.json() == [
             {"telegram_id": 123, "role": "owner", "username": "owner_name",
-             "display_name": "Евгений Максимов"},
+             "display_name": "Евгений Максимов", "full_name": "Евгений Максимов"},
             {"telegram_id": 456, "role": "owner", "username": None,
-             "display_name": None},
+             "display_name": None, "full_name": None},
             {"telegram_id": 555, "role": "admin", "username": "admin_name",
-             "display_name": "Иван Иванов"},
+             "display_name": "Иван Иванов", "full_name": "Иван Иванов"},
         ]
         assert all("source" not in person for person in resp.json())
 
@@ -96,7 +96,7 @@ async def test_directory_excludes_revoked_and_stale_usernames(client, settings, 
     assert first.status_code == 200
     assert first.json()[1] == {
         "telegram_id": 555, "role": "admin",
-        "username": None, "display_name": "Старое имя",
+        "username": None, "display_name": "Старое имя", "full_name": "Старое имя",
     }
 
     async with session_factory() as session:
