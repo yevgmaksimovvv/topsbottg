@@ -13,7 +13,6 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from topsbottg.api import create_app
-from topsbottg.invitations import observe_telegram_profile
 from topsbottg.models import AdminInvitation, Base
 from topsbottg.services import get_or_create_user
 from topsbottg.worker import deliver_admin_invitations
@@ -53,7 +52,6 @@ async def test_two_owners_cannot_create_two_pending_invitations(postgres_invitat
     client, factory, settings = postgres_invitations
     async with factory() as session:
         await get_or_create_user(session, 555, "Иван Иванов")
-        await observe_telegram_profile(session, 555, "valid_name", "Иван", "Иванов")
         await session.commit()
 
     async def invite(owner_id):
@@ -79,7 +77,6 @@ async def test_two_workers_send_single_invitation_on_postgres(postgres_invitatio
     client, factory, settings = postgres_invitations
     async with factory() as session:
         await get_or_create_user(session, 555, "Иван Иванов")
-        await observe_telegram_profile(session, 555, "valid_name", "Иван", "Иванов")
         await session.commit()
     created = await client.post(
         "/api/admin/admin-invitations",
