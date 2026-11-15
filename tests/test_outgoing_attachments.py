@@ -540,10 +540,16 @@ async def test_slow_media_does_not_stall_healthcheck_or_payout(
         # The worker must refresh it and process the payout while media is pending.
         app.state.worker_heartbeat = loop.time() - 31
         await asyncio.wait_for(payout_sent.wait(), timeout=5)
-        async with session_factory() as session:
-            result = await session.get(PayoutRecipient, recipient_id)
-            assert result.status == RecipientStatus.payment_required.value
-            assert result.sent_at is not None
+        # send_message returns before SQLAlchemy commits the recipient status.
+        for _ in range(100):
+            async with session_factory() as session:
+                result = await session.get(PayoutRecipient, recipient_id)
+                if result.status == RecipientStatus.payment_required.value:
+                    assert result.sent_at is not None
+                    break
+            await asyncio.sleep(0.03)
+        else:
+            pytest.fail("payout recipient was not committed while media was pending")
         for _ in range(50):
             if app.state.worker_heartbeat > loop.time() - 30:
                 break
