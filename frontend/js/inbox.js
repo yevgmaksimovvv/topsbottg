@@ -213,7 +213,7 @@ function renderHistory({ preserveScroll = false } = {}) {
       (delivery ? '<span class="' + (delivery === "failed" ? "inbox-failed" : "") + '">' + text(statusText[delivery] || delivery) + '</span>' : "") +
       '</span>' +
       '<span class="inbox-message-actions"><button type="button" data-inbox-reply="' + text(message.id) + '">Ответить</button>' +
-      (delivery === "failed" ? '<button type="button" data-inbox-retry="' + text(message.id) + '">Повторить</button>' : "") +
+      (delivery === "failed" && message._sendRequest ? '<button type="button" data-inbox-retry="' + text(message.id) + '">Повторить</button>' : "") +
       '</span></article>' +
       (inbox.readThrough === message.id ? '<div class="inbox-read-marker">Прочитано до этого сообщения</div>' : "");
   }).join("");
@@ -250,7 +250,7 @@ async function loadMessages({ older = false, refresh = false } = {}) {
     renderHistory();
     if (older) list.scrollTop = oldTop + list.scrollHeight - oldScrollHeight;
     else if (wasAtBottom || !refresh) list.scrollTop = list.scrollHeight;
-    if (wasAtBottom || !older) void markRead();
+    if (historyAtBottom()) void markRead();
   } catch (error) {
     if (generation === inbox.historyRequest && client === inbox.client)
       inbox.historyError = error?.message || "Не удалось загрузить сообщения.";
@@ -264,8 +264,14 @@ async function loadMessages({ older = false, refresh = false } = {}) {
   }
 }
 
+function historyAtBottom() {
+  const history = el("inbox-history");
+  return Boolean(isOpen() && !el("inbox-history-screen")?.hidden && history &&
+    history.scrollHeight - history.scrollTop - history.clientHeight < 50);
+}
+
 async function markRead() {
-  if (!inbox.client || !inbox.current) return;
+  if (!inbox.client || !inbox.current || !historyAtBottom()) return;
   const last = [...inbox.messages].reverse().find((message) => message.direction === "incoming" && Number.isInteger(Number(message.id)));
   if (!last || Number(last.id) <= Number(inbox.readThrough || 0) || Number(last.id) <= Number(inbox.readingId || 0)) return;
   const client = inbox.client;
@@ -274,6 +280,7 @@ async function markRead() {
   try {
     const result = await client.read(id, last.id);
     if (client !== inbox.client || inbox.current?.id !== id) return;
+    if (Number(result.last_read_message_id) < Number(inbox.readThrough || 0)) return;
     inbox.readThrough = result.last_read_message_id;
     inbox.current.unread_count = result.unread_count;
     renderHistory();
@@ -323,47 +330,69 @@ async function openForUser(userId) {
   }
 }
 
-async function sendMessage(textValue, replyTo = null) {
-  if (!inbox.client || !inbox.current || inbox.sending || !textValue.trim()) return;
+async function deliverPending(pending) {
+  if (!inbox.client || !inbox.current || inbox.sending ||
+    !pending._sendRequest || pending.delivery_status === "sending" ||
+    Number(pending.conversation_id) !== Number(inbox.current.id)) return;
+
   const id = inbox.current.id;
   const client = inbox.client;
-  const input = el("inbox-text");
   const send = el("inbox-send");
-  const previous = input.value;
-  const messageKey = key();
   inbox.sending = true;
   send.disabled = true;
-  input.value = "";
-  inbox.replyTo = null;
-  const tempId = "pending-" + messageKey;
-  inbox.messages.push({ id: tempId, conversation_id: id, direction: "outgoing",
-    kind: "text", text: textValue, caption: null, created_at: new Date().toISOString(),
-    author_admin_telegram_id: null, telegram_message_id: null,
-    reply_to_telegram_message_id: null, delivery_status: "queued",
-    delivery_error_code: null, attachment: null });
+  pending.delivery_status = "sending";
   renderHistory();
   try {
-    const pending = inbox.messages.find((item) => item.id === tempId);
-    if (pending) pending.delivery_status = "sending";
-    renderHistory();
-    const response = await client.send(id, { text: textValue, reply_to_message_id: replyTo,
-      idempotency_key: messageKey });
+    const { message } = await client.send(id, pending._sendRequest);
     if (client !== inbox.client || inbox.current?.id !== id) return;
-    inbox.messages = inbox.messages.filter((item) => item.id !== tempId);
-    inbox.messages.push(response.message);
+    inbox.messages = inbox.messages.filter((item) => item !== pending && item.id !== message.id);
+    inbox.messages.push(message);
     inbox.messages.sort((a, b) => Number(a.id) - Number(b.id));
+    status("inbox-compose-status", "");
     renderHistory();
   } catch {
-    const pending = inbox.messages.find((item) => item.id === tempId);
-    if (pending) pending.delivery_status = "failed";
-    status("inbox-compose-status", "Не удалось отправить. Сообщение можно повторить.");
-    renderHistory();
+    if (client === inbox.client && inbox.current?.id === id) {
+      pending.delivery_status = "failed";
+      status("inbox-compose-status", "Не удалось отправить. Сообщение можно повторить.");
+      renderHistory();
+    }
   } finally {
-    inbox.sending = false;
-    send.disabled = false;
-    if (!input.value && !inbox.messages.some((item) => item.id === tempId && item.delivery_status === "failed"))
-      input.value = previous === textValue ? "" : input.value;
+    if (client === inbox.client) {
+      inbox.sending = false;
+      send.disabled = false;
+    }
   }
+}
+
+function sendMessage(textValue, replyTo = null) {
+  if (!inbox.client || !inbox.current || inbox.sending || !textValue.trim()) return;
+  const messageKey = key();
+  const request = Object.freeze({
+    text: textValue,
+    ...(replyTo != null ? { reply_to_message_id: replyTo } : {}),
+    idempotency_key: messageKey,
+  });
+  const pending = {
+    id: "pending-" + messageKey,
+    conversation_id: inbox.current.id,
+    direction: "outgoing",
+    kind: "text",
+    text: textValue,
+    caption: null,
+    created_at: new Date().toISOString(),
+    author_admin_telegram_id: null,
+    telegram_message_id: null,
+    reply_to_telegram_message_id: null,
+    delivery_status: "queued",
+    delivery_error_code: null,
+    attachment: null,
+    _sendRequest: request,
+  };
+  inbox.messages.push(pending);
+  el("inbox-text").value = "";
+  inbox.replyTo = null;
+  renderHistory();
+  void deliverPending(pending);
 }
 
 function openInbox() {
@@ -456,14 +485,14 @@ export function bindInbox() {
     }
     if (retry) {
       const message = inbox.messages.find((item) => String(item.id) === retry.dataset.inboxRetry);
-      if (message) void sendMessage(message.text || message.caption || "");
+      if (message?._sendRequest && message.delivery_status === "failed") void deliverPending(message);
     }
   });
   el("inbox-history")?.addEventListener("scroll", (event) => {
     const list = event.target;
     if (list.scrollTop < 48 && inbox.historyCursor && !inbox.historyLoading)
       void loadMessages({ older: true });
-    if (list.scrollHeight - list.scrollTop - list.clientHeight < 50) void markRead();
+    if (historyAtBottom()) void markRead();
   }, { passive: true });
   el("inbox-reply")?.addEventListener("click", (event) => {
     if (!event.target.closest("#inbox-clear-reply")) return;
