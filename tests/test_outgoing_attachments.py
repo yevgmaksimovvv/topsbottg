@@ -28,10 +28,10 @@ from topsbottg.models import (
 )
 from topsbottg.worker import deliver_chat_outbox
 
-PDF = b"%PDF-1.7\\n1 0 obj\\n<<>>\\nendobj\\n%%EOF\\n"
-JPEG = b"\\xff\\xd8\\xff\\xe0" + b"0" * 32 + b"\\xff\\xd9"
-PNG = b"\\x89PNG\\r\\n\\x1a\\n" + b"0" * 40
-VOICE = b"OggS" + b"\\x00" * 28 + b"OpusHead" + b"\\x00" * 40
+PDF = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 32 + b"\xff\xd9"
+PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 40
+VOICE = b"OggS" + b"\x00" * 28 + b"OpusHead" + b"\x00" * 40
 
 
 async def _conversation(factory, telegram_id=84501):
