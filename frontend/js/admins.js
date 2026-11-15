@@ -100,7 +100,7 @@ function renderCandidate() {
   const group = candidate.study_group ? ` · ${candidate.study_group}` : "";
   target.innerHTML = `<article class="admins-candidate-card">
     <div class="admins-member-identity">
-      <strong>${escapeHtml(nameFor(candidate))}</strong>
+      <strong>${escapeHtml(candidate.username ? `@${candidate.username.replace(/^@/, "")}` : nameFor(candidate))}</strong>
       <span>${escapeHtml(display + group)}</span>
     </div>
     ${candidate.role
