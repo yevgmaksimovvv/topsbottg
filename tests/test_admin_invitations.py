@@ -303,7 +303,7 @@ async def test_decline_expiration_reinvite_and_regrant(session_factory, settings
 
 
 @pytest.mark.asyncio
-async def test_invite_delivery_retries_and_expires_without_grant(session_factory, settings):
+async def test_uncertain_invitation_delivery_is_not_retried(session_factory, settings):
     await known(session_factory)
     async with session_factory() as session:
         invitation = await create_invitation(
@@ -318,14 +318,16 @@ async def test_invite_delivery_retries_and_expires_without_grant(session_factory
         assert invitation.delivery_attempts == 1
         assert invitation.last_delivery_error == "OSError"
         assert invitation.delivered_at is None
+        assert invitation.delivery_state == "unknown"
         invitation.next_delivery_at = datetime.now(UTC) - timedelta(seconds=1)
         await session.commit()
     await deliver_admin_invitations(bot, session_factory)
-    assert len(bot.sent) == 1
+    assert len(bot.sent) == 0
     async with session_factory() as session:
         invitation = await session.get(AdminInvitation, id_)
-        assert invitation.delivered_at is not None
-        assert invitation.last_delivery_error is None
+        assert invitation.delivered_at is None
+        assert invitation.delivery_state == "unknown"
+        assert invitation.last_delivery_error == "OSError"
         assert await get_principal(session, 555, settings.admin_ids_set) is None
 
 
