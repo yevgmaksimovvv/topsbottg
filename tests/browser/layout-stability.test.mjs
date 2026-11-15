@@ -98,6 +98,8 @@ async function withApp(width, theme, run) {
     await page.locator("#admins-open").waitFor({ state: "visible" });
     await page.locator("#inbox-open").waitFor({ state: "visible" });
     await page.evaluate((selectedTheme) => document.documentElement.dataset.theme = selectedTheme, theme);
+    // The finite mock SSE stream reconnects; hide its unrelated warning in visual evidence.
+    await page.addStyleTag({ content: "#toast { display: none !important; }" });
     await mkdir(evidence, { recursive: true });
     await run({ page, fixture });
     assert.deepEqual(errors, [], "Uncaught browser errors");
@@ -128,7 +130,9 @@ async function headerCoordinates(page) {
 function assertStableHeader(reference, current, label) {
   for (const key of ["inbox", "admins"]) {
     assert.ok(Math.abs(reference[key].x - current[key].x) <= 1,
-      `Header ${key} moved on ${label}: ${JSON.stringify({ reference, current })}`);
+      `Header ${key} moved horizontally on ${label}: ${JSON.stringify({ reference, current })}`);
+    assert.ok(Math.abs(reference[key].y - current[key].y) <= 1,
+      `Header ${key} moved vertically on ${label}: ${JSON.stringify({ reference, current })}`);
     assert.ok(Math.abs(reference[key].width - current[key].width) <= 1,
       `Header ${key} resized on ${label}`);
   }
