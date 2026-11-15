@@ -99,9 +99,6 @@ class User(Base, TimestampMixin):
         ForeignKey("study_groups.id", ondelete="SET NULL"), nullable=True
     )
     registration_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    telegram_username: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    telegram_display_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    telegram_profile_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     study_group: Mapped[StudyGroup | None] = relationship(back_populates="users")
     payment_profile: Mapped[PaymentProfile | None] = relationship(back_populates="user")
