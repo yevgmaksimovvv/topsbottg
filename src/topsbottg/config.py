@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     app_port: int = Field(default=8000, ge=1, le=65535)
     environment: Literal["development", "test", "production"] = "development"
 
+    @field_validator("telegram_api_id", "telegram_api_hash", mode="before")
+    @classmethod
+    def _empty_mtproto_setting(cls, value: str | int | None) -> str | int | None:
+        return None if value == "" else value
+
     @field_validator(
         "app_domain",
         "bot_token",
