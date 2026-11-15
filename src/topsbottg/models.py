@@ -117,6 +117,29 @@ class Conversation(Base, TimestampMixin):
     reads: Mapped[list[ConversationRead]] = relationship(back_populates="conversation")
 
 
+
+class ConversationListSnapshot(Base):
+    __tablename__ = "conversation_list_snapshots"
+
+    id: Mapped[str] = mapped_column(String(48), primary_key=True)
+    admin_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    search_query: Mapped[str] = mapped_column(Text, nullable=False)
+    study_group_id: Mapped[int | None] = mapped_column(nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ConversationListSnapshotItem(Base):
+    __tablename__ = "conversation_list_snapshot_items"
+
+    snapshot_id: Mapped[str] = mapped_column(
+        ForeignKey("conversation_list_snapshots.id", ondelete="CASCADE"), primary_key=True
+    )
+    position: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(nullable=False)
+    last_message_id: Mapped[int | None] = mapped_column(nullable=True)
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
     __table_args__ = (
@@ -273,6 +296,7 @@ Index("ix_payment_replies_recipient", PaymentReply.payout_recipient_id, PaymentR
 Index("ix_audit_log_created_at", AuditLog.created_at)
 
 Index("ix_conversations_last_message_at_id", Conversation.last_message_at.desc(), Conversation.id.desc())
+Index("ix_conversation_list_snapshots_expires_at", ConversationListSnapshot.expires_at)
 Index("ix_chat_messages_conversation_id_id", ChatMessage.conversation_id, ChatMessage.id)
 Index(
     "uq_chat_messages_telegram_direction",
