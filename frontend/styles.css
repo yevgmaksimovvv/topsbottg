@@ -1643,7 +1643,7 @@ textarea::placeholder {
   height: 100%;
   object-fit: cover;
 }
-.inbox-photo-button img:not([src]) { display: none; }
+.inbox-photo-button img:not([src]) { visibility: hidden; }
 .inbox-photo-placeholder {
   display: flex;
   align-items: center;
