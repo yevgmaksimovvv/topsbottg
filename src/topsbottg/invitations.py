@@ -5,13 +5,11 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from topsbottg.access import AccessDenied, get_principal, grant_admin_from_invitation, require_owner
 from topsbottg.models import AdminInvitation, AuditLog, User
 
 INVITATION_TTL = timedelta(hours=48)
-_USERNAME = re.compile(r"[a-zA-Z0-9_]{5,32}\Z")
 
 
 class InvitationConflict(ValueError):
