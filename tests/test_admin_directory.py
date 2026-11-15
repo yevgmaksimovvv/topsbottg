@@ -48,7 +48,7 @@ async def test_name_search_includes_people_without_group_and_can_invite_them(
     assert all("raw_payment_details" not in row for row in result.json()["items"])
 
     by_parts = await client.get(
-        "/api/admin/admin-candidates", params={"search": "Иван Иванов"}, headers=headers,
+        "/api/admin/admin-candidates", params={"search": "Иванов Иванович"}, headers=headers,
     )
     assert by_parts.status_code == 200
     assert [row["telegram_id"] for row in by_parts.json()["items"]] == [555, 666]
