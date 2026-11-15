@@ -522,8 +522,10 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             require_owner(actor_id, settings.admin_ids_set)
         except AccessDenied as exc:
             raise HTTPException(status_code=403, detail="owner only") from exc
-        if (search is None) == (telegram_id is None):
+        if search is not None and telegram_id is not None:
             raise HTTPException(status_code=422, detail="Укажите ФИО или Telegram ID.")
+        if search is None and telegram_id is None and study_group_id is None:
+            raise HTTPException(status_code=422, detail="Укажите ФИО, Telegram ID или группу.")
 
         if search is not None:
             name = " ".join(search.split())
@@ -539,6 +541,10 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
                 users, has_more = await search_candidates(
                     session, name=name, study_group_id=study_group_id, limit=limit, offset=offset,
                 )
+        elif telegram_id is None:
+            users, has_more = await search_candidates(
+                session, name="", study_group_id=study_group_id, limit=limit, offset=offset,
+            )
         if telegram_id is not None:
             # Exact ID search works even when a user's name or study group is not filled in.
             user = await find_candidate(session, telegram_id=telegram_id)

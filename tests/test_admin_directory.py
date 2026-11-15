@@ -60,6 +60,19 @@ async def test_name_search_includes_people_without_group_and_can_invite_them(
     assert filtered.status_code == 200
     assert [row["telegram_id"] for row in filtered.json()["items"]] == [555]
 
+    # Selecting a study group alone should list registered users in that group.
+    group_only = await client.get(
+        "/api/admin/admin-candidates", params={"study_group_id": group.id}, headers=headers,
+    )
+    assert group_only.status_code == 200, group_only.text
+    assert [row["telegram_id"] for row in group_only.json()["items"]] == [555]
+    assert group_only.json()["has_more"] is False
+
+    absent_group = await client.get(
+        "/api/admin/admin-candidates", params={"study_group_id": 999}, headers=headers,
+    )
+    assert absent_group.status_code == 200 and absent_group.json()["items"] == []
+
     # The group filter is only for searching. A person without a group may be invited.
     invited = await client.post(
         "/api/admin/admin-invitations",
@@ -153,6 +166,11 @@ async def test_candidate_search_is_owner_only_and_shows_existing_roles(
         headers={"X-Telegram-Init-Data": make_init_data(settings.bot_token, 555)},
     )
     assert forbidden.status_code == 403
+    denied_group_only = await client.get(
+        "/api/admin/admin-candidates", params={"study_group_id": 1},
+        headers={"X-Telegram-Init-Data": make_init_data(settings.bot_token, 555)},
+    )
+    assert denied_group_only.status_code == 403
 
 
 @pytest.mark.asyncio
