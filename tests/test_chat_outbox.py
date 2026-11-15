@@ -12,6 +12,8 @@ from sqlalchemy import func, select
 
 from topsbottg.chat_outbox import (
     MAX_CHAT_ATTEMPTS,
+    claim_chat_outbox,
+    settle_chat_outbox,
     create_outgoing_message,
 )
 from topsbottg.conversations import record_incoming_message
@@ -269,3 +271,93 @@ async def test_retry_attempts_bounded_and_bad_chat_is_terminal(session_factory):
             ChatMessageOutbox.idempotency_key == "not-found"
         ))
         assert row.status == "failed" and row.error_code == "chat_not_found"
+
+
+@pytest.mark.asyncio
+async def test_reply_to_pending_outgoing_waits_without_using_delivery_attempt(session_factory):
+    cid, _ = await _conversation(session_factory)
+    async with session_factory() as session:
+        parent, created = await create_outgoing_message(
+            session, conversation_id=cid, admin_telegram_id=123,
+            idempotency_key="parent", text="Первый",
+        )
+        assert created
+        child, created = await create_outgoing_message(
+            session, conversation_id=cid, admin_telegram_id=123,
+            idempotency_key="child", text="Ответ на первый", reply_to_message_id=parent.id,
+        )
+        assert created
+        await session.commit()
+        parent_id, child_id = parent.id, child.id
+
+    async with session_factory() as session:
+        [claim] = await claim_chat_outbox(session, limit=2)
+        assert claim.message_id == parent_id
+        waiting = await session.scalar(
+            select(ChatMessageOutbox).where(ChatMessageOutbox.message_id == child_id)
+        )
+        assert waiting.status == "queued" and waiting.attempts == 0
+        assert waiting.retry_at is not None
+        await session.commit()
+
+    async with session_factory() as session:
+        assert await settle_chat_outbox(session, claim, telegram_message_id=678)
+        await session.commit()
+
+    async with session_factory() as session:
+        waiting = await session.scalar(
+            select(ChatMessageOutbox).where(ChatMessageOutbox.message_id == child_id)
+        )
+        waiting.retry_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+
+    bot = FakeTelegram([SimpleNamespace(message_id=679)])
+    await deliver_chat_outbox(bot, session_factory)
+    assert len(bot.calls) == 1
+    assert bot.calls[0][2]["reply_parameters"].message_id == 678
+    async with session_factory() as session:
+        waiting = await session.scalar(
+            select(ChatMessageOutbox).where(ChatMessageOutbox.message_id == child_id)
+        )
+        assert waiting.status == "sent" and waiting.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_reply_to_failed_outgoing_becomes_terminal_without_send(session_factory):
+    cid, _ = await _conversation(session_factory)
+    async with session_factory() as session:
+        parent, _ = await create_outgoing_message(
+            session, conversation_id=cid, admin_telegram_id=123,
+            idempotency_key="failed-parent", text="Первый",
+        )
+        child, _ = await create_outgoing_message(
+            session, conversation_id=cid, admin_telegram_id=123,
+            idempotency_key="failed-child", text="Ответ на первый", reply_to_message_id=parent.id,
+        )
+        await session.commit()
+        child_id = child.id
+
+    async with session_factory() as session:
+        [parent_claim] = await claim_chat_outbox(session, limit=2)
+        await session.commit()
+
+    async with session_factory() as session:
+        assert await settle_chat_outbox(
+            session, parent_claim, error_code="blocked", permanent=True
+        )
+        child_row = await session.scalar(
+            select(ChatMessageOutbox).where(ChatMessageOutbox.message_id == child_id)
+        )
+        child_row.retry_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+
+    bot = FakeTelegram()
+    await deliver_chat_outbox(bot, session_factory)
+    assert bot.calls == []
+    async with session_factory() as session:
+        child_row = await session.scalar(
+            select(ChatMessageOutbox).where(ChatMessageOutbox.message_id == child_id)
+        )
+        assert child_row.status == "failed"
+        assert child_row.error_code == "reply_unavailable"
+        assert child_row.attempts == 0

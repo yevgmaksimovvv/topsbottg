@@ -310,17 +310,6 @@ async def deliver_chat_outbox(bot: MessageSender, session_factory: async_session
         await session.commit()
 
     for claim in claims:
-        if claim.reply_to_message_id is not None and claim.reply_to_telegram_message_id is None:
-            async with session_factory() as session:
-                await settle_chat_outbox(
-                    session, claim,
-                    error_code="reply_unavailable" if claim.reply_target_failed else "reply_pending",
-                    permanent=claim.reply_target_failed,
-                    retry_after=10 if not claim.reply_target_failed else None,
-                )
-                await session.commit()
-            continue
-
         error_code: str | None = None
         retry_after: float | None = None
         permanent = False

@@ -36,7 +36,6 @@ class ChatOutboxClaim:
     claim_token: str
     reply_to_message_id: int | None
     reply_to_telegram_message_id: int | None
-    reply_target_failed: bool
 
 
 def _fingerprint(text: str, reply_to_message_id: int | None) -> str:
@@ -172,7 +171,6 @@ async def claim_chat_outbox(
             raise RuntimeError("outbox conversation has no recipient")
 
         target_telegram_id = None
-        target_failed = False
         if row.reply_to_message_id is not None:
             target_telegram_id = await session.scalar(
                 select(ChatMessage.telegram_message_id).where(
@@ -186,7 +184,20 @@ async def claim_chat_outbox(
                         ChatMessageOutbox.message_id == row.reply_to_message_id
                     )
                 )
-                target_failed = target_status == "failed"
+                if target_status == "failed":
+                    row.status = "failed"
+                    row.error_code = "reply_unavailable"
+                    row.retry_at = None
+                    row.claimed_until = None
+                    row.claim_token = None
+                    queue_admin_event(session, "chat.changed", {"conversation_id": row.conversation_id})
+                else:
+                    # Await delivery of the parent without using a Telegram send attempt.
+                    row.status = "queued"
+                    row.retry_at = now + timedelta(seconds=10)
+                    row.claimed_until = None
+                    row.claim_token = None
+                continue
 
         token = secrets.token_hex(16)
         row.status = "sending"
@@ -205,7 +216,6 @@ async def claim_chat_outbox(
             claim_token=token,
             reply_to_message_id=row.reply_to_message_id,
             reply_to_telegram_message_id=target_telegram_id,
-            reply_target_failed=target_failed,
         ))
     return claims
 
