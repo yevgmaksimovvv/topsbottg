@@ -138,7 +138,15 @@ async function refreshDirectory() {
   }
 }
 
+function releaseTelegramBackButton() {
+  const backButton = telegramBack;
+  telegramBack = null;
+  backButton?.offClick?.(closeAdminDialog);
+  backButton?.hide?.();
+}
+
 function closeAdminDialog() {
+  releaseTelegramBackButton();
   if (dialog()?.open) dialog().close();
 }
 
@@ -271,12 +279,11 @@ export function bindAdminControls() {
     const button = event.target.closest?.("[data-admin-action]");
     if (button && !button.disabled) handleAction(button);
   });
+  dialog()?.addEventListener("cancel", releaseTelegramBackButton);
   dialog()?.addEventListener("close", () => {
     ++dialogRequestId;
     ++searchRequestId;
-    telegramBack?.offClick?.(closeAdminDialog);
-    telegramBack?.hide?.();
-    telegramBack = null;
+    releaseTelegramBackButton();
     pendingInvite = false;
     pendingRevoke = null;
     candidate = null;
