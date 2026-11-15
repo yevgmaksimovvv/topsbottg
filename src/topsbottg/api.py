@@ -551,6 +551,26 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if user is None and username is not None:
+            # Owner IDs are known independently of the cached Telegram profile.
+            # Resolve only those IDs; the Bot API cannot search arbitrary private users.
+            wanted = username.strip().removeprefix("@").casefold()
+            async with Bot(token=settings.bot_token) as bot:
+                for owner_id in sorted(settings.admin_ids_set):
+                    try:
+                        chat = await bot.get_chat(owner_id)
+                    except Exception:
+                        continue
+                    if (chat.username or "").casefold() != wanted:
+                        continue
+                    user = await session.scalar(select(User).where(User.telegram_id == owner_id))
+                    if user is not None:
+                        await observe_telegram_profile(
+                            session, owner_id, chat.username,
+                            chat.first_name, chat.last_name,
+                        )
+                        await session.commit()
+                    break
         if user is None:
             return []
         role = await get_principal(session, user.telegram_id, settings.admin_ids_set)
