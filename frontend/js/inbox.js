@@ -772,10 +772,26 @@ async function deliverPending(pending) {
   pending.delivery_status = "sending";
   renderHistory();
   try {
-    const { message } = await client.send(id, pending._sendRequest);
+    const { message } = pending._sendRequest.file
+      ? await client.upload(id, pending._sendRequest)
+      : await client.send(id, pending._sendRequest);
     if (client !== inbox.client || inbox.current?.id !== id) return;
+    if (pending._sendRequest.file && inbox.draftPending === pending) {
+      const { file, caption } = pending._sendRequest;
+      if (inbox.draftFile?.file === file && el("inbox-text").value === caption) {
+        inbox.draftFile = null;
+        inbox.draftPending = null;
+        el("inbox-file").value = "";
+        el("inbox-text").value = "";
+        inbox.replyTo = null;
+        resizeComposer();
+        renderFilePreview();
+      } else {
+        inbox.draftPending = null;
+      }
+    }
     inbox.messages = inbox.messages.filter((item) => item !== pending && item.id !== message.id);
-    inbox.messages.push(message);
+    inbox.messages.push({ ...message, _replyTo: pending._replyTo });
     inbox.messages.sort((a, b) => Number(a.id) - Number(b.id));
     status("inbox-compose-status", "");
     renderHistory();
@@ -798,6 +814,82 @@ function resizeComposer() {
   if (!field) return;
   field.style.height = "44px";
   field.style.height = Math.min(140, Math.max(44, field.scrollHeight)) + "px";
+}
+
+function normalizedFile(file) {
+  if (file.type) return file;
+  const ext = file.name.split(".").at(-1)?.toLowerCase();
+  const mimes = {
+    jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+    pdf: "application/pdf", zip: "application/zip", txt: "text/plain",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ogg: "audio/ogg", oga: "audio/ogg",
+  };
+  return mimes[ext] ? new File([file], file.name, { type: mimes[ext] }) : file;
+}
+
+function chooseAttachment(file) {
+  inbox.draftFile = file ? { file: normalizedFile(file), kind: fileKind(normalizedFile(file)) } : null;
+  inbox.draftPending = null;
+  renderFilePreview();
+  status("inbox-file-status", "");
+  if (!inbox.draftFile) return;
+  if (inbox.draftFile.file.size > MAX_UPLOAD_BYTES) {
+    status("inbox-file-status", "Файл превышает 20 МБ. Выберите файл меньшего размера.");
+  } else if (!FILE_TYPES.has(inbox.draftFile.file.type)) {
+    status("inbox-file-status", "Формат файла не поддерживается.");
+  }
+}
+
+function sendAttachment(caption, replyTo = null) {
+  if (!inbox.client || !inbox.current || !inbox.draftFile || inbox.sending) return;
+  const { file, kind } = inbox.draftFile;
+  if (file.size > MAX_UPLOAD_BYTES) {
+    status("inbox-file-status", "Файл превышает 20 МБ. Выберите файл меньшего размера.");
+    return;
+  }
+  if (!FILE_TYPES.has(file.type)) {
+    status("inbox-file-status", "Формат файла не поддерживается.");
+    return;
+  }
+  if (caption.length > 1024) {
+    status("inbox-file-status", "Подпись не должна превышать 1024 символа.");
+    return;
+  }
+  const old = inbox.draftPending;
+  if (old && old._sendRequest?.file === file &&
+      old._sendRequest.caption === caption &&
+      old._sendRequest.reply_to_message_id === replyTo) {
+    void deliverPending(old);
+    return;
+  }
+  const request = Object.freeze({
+    file, kind, caption, reply_to_message_id: replyTo, idempotency_key: key(),
+  });
+  const pending = {
+    id: "pending-" + request.idempotency_key,
+    conversation_id: inbox.current.id,
+    direction: "outgoing",
+    kind,
+    text: null,
+    caption,
+    created_at: new Date().toISOString(),
+    author_admin_telegram_id: null,
+    telegram_message_id: null,
+    reply_to_telegram_message_id: null,
+    delivery_status: "queued",
+    delivery_error_code: null,
+    attachment: { kind, filename: file.name, size: file.size, mime_type: file.type, available: false },
+    _replyTo: replyTo,
+    _sendRequest: request,
+  };
+  inbox.messages.push(pending);
+  inbox.draftPending = pending;
+  status("inbox-file-status", "");
+  renderHistory();
+  void deliverPending(pending);
 }
 
 function sendMessage(textValue, replyTo = null) {
@@ -970,7 +1062,8 @@ export function bindInbox() {
       const message = inbox.messages.find((item) => String(item.id) === retry.dataset.inboxRetry);
       if (message?.delivery_status === "failed") {
         if (message._sendRequest) void deliverPending(message);
-        else if (message.text) sendMessage(message.text);
+        else if (message.kind === "text" && message.text) sendMessage(message.text);
+        else status("inbox-compose-status", "Для повторной отправки вложения выберите исходный файл.");
       }
     }
   });
@@ -991,10 +1084,21 @@ export function bindInbox() {
     el("inbox-text").focus();
   });
   el("inbox-text")?.addEventListener("input", resizeComposer);
+  el("inbox-file")?.addEventListener("change", (event) => {
+    chooseAttachment(event.target.files?.[0] || null);
+  });
+  el("inbox-file-preview")?.addEventListener("click", (event) => {
+    if (!event.target.closest("#inbox-remove-file")) return;
+    inbox.draftFile = null;
+    inbox.draftPending = null;
+    el("inbox-file").value = "";
+    renderFilePreview();
+  });
   el("inbox-composer")?.addEventListener("submit", (event) => {
     event.preventDefault();
     status("inbox-compose-status", "");
-    void sendMessage(el("inbox-text").value, inbox.replyTo);
+    if (inbox.draftFile) sendAttachment(el("inbox-text").value, inbox.replyTo);
+    else void sendMessage(el("inbox-text").value, inbox.replyTo);
   });
 }
 
