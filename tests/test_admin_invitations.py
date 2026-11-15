@@ -84,6 +84,13 @@ async def test_lookup_uses_recent_observed_identity_not_global_telegram_search(s
         user.telegram_profile_seen_at = datetime.now(UTC) - timedelta(days=15)
         await session.commit()
         assert (await find_candidate(session, telegram_id=555)).telegram_id == 555
+        # A stale username can be found; the live Telegram identity is checked at invite time.
+        assert (await find_candidate(session, username="new_handle")).telegram_id == 555
+        invite = await create_invitation(
+            session, actor_id=123, target_id=555, owner_ids={123},
+            expected_username="new_handle",
+        )
+        assert invite.target_telegram_id == 555
 
 
 @pytest.mark.asyncio
