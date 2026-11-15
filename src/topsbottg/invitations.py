@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from topsbottg.access import AccessDenied, get_principal, grant_admin, require_owner
+from topsbottg.access import AccessDenied, get_principal, grant_admin_from_invitation, require_owner
 from topsbottg.models import AdminInvitation, AuditLog, User
 
 PROFILE_MAX_AGE = timedelta(days=14)
@@ -64,9 +64,12 @@ async def find_candidate(
     if (username is None) == (telegram_id is None):
         raise ValueError("Specify exactly one of username or telegram_id.")
     cutoff = datetime.now(UTC) - PROFILE_MAX_AGE
-    query = select(User).where(User.telegram_profile_seen_at >= cutoff)
+    query = select(User)
     if username is not None:
-        query = query.where(func.lower(User.telegram_username) == normalize_username(username))
+        query = query.where(
+            User.telegram_profile_seen_at >= cutoff,
+            func.lower(User.telegram_username) == normalize_username(username),
+        )
     else:
         if telegram_id is None or telegram_id <= 0:
             raise ValueError("Telegram ID must be positive.")
@@ -89,12 +92,12 @@ async def create_invitation(
     target = await session.scalar(
         select(User).where(User.telegram_id == target_id).with_for_update()
     )
-    if target is None or target.telegram_profile_seen_at is None or (
-        now - _utc(target.telegram_profile_seen_at) > PROFILE_MAX_AGE
-    ):
-        raise InvitationConflict("Пользователь не найден или давно не открывал бота. Попросите его отправить /start.")
+    if target is None:
+        raise InvitationConflict("Пользователь не найден. Попросите его отправить /start.")
     if expected_username is not None and (
-        not target.telegram_username
+        target.telegram_profile_seen_at is None
+        or now - _utc(target.telegram_profile_seen_at) > PROFILE_MAX_AGE
+        or not target.telegram_username
         or target.telegram_username.lower() != normalize_username(expected_username)
     ):
         raise InvitationConflict("Telegram username изменился. Повторите поиск.")
@@ -167,9 +170,9 @@ async def decide_invitation(
     elif actor_id in owner_ids:
         invitation.status = "cancelled"
     elif accept:
-        await grant_admin(
-            session, actor_telegram_id=invitation.created_by_owner_id,
-            target_telegram_id=actor_id, owner_ids=owner_ids,
+        await grant_admin_from_invitation(
+            session, invitation=invitation, target_telegram_id=actor_id,
+            owner_ids=owner_ids,
         )
         invitation.status = "accepted"
     else:

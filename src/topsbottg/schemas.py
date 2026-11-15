@@ -82,7 +82,6 @@ class AddRecipientsIn(BaseModel):
 
 
 class AdminEventsTokenOut(BaseModel):
-    token: str
     expires_in: int
 
 

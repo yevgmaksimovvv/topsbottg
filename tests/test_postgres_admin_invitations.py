@@ -62,7 +62,7 @@ async def test_two_owners_cannot_create_two_pending_invitations(postgres_invitat
         }
         return await client.post(
             "/api/admin/admin-invitations",
-            json={"target_telegram_id": 555, "expected_username": "valid_name"},
+            json={"target_telegram_id": 555},
             headers=headers,
         )
 

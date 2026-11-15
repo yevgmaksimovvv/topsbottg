@@ -56,13 +56,19 @@ async def client(app):
         yield client
 
 
-def make_init_data(bot_token: str, user_id: int, *, auth_date: int | None = None) -> str:
+def make_init_data(
+    bot_token: str, user_id: int, *, auth_date: int | None = None,
+    username: str | None = None,
+) -> str:
     if auth_date is None:
         auth_date = int(datetime.now(UTC).timestamp())
+    user = {"id": user_id, "first_name": "Test"}
+    if username is not None:
+        user["username"] = username
     payload = {
         "auth_date": str(auth_date),
         "query_id": "AAE",
-        "user": json.dumps({"id": user_id, "first_name": "Test"}, separators=(",", ":")),
+        "user": json.dumps(user, separators=(",", ":")),
     }
     data_check_string = "\n".join(f"{key}={value}" for key, value in sorted(payload.items()))
     secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()

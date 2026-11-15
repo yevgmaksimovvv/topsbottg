@@ -316,14 +316,21 @@ jobs:
 
   deploy:
     name: Deploy production
-    needs: checks
+    needs: [checks, changes]
     # Explicit status function prevents a skipped optional CI job from suppressing deployment.
     if: >-
       ${{
         !cancelled() &&
         needs.checks.result == 'success' &&
         (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-        github.ref == 'refs/heads/main'
+        github.ref == 'refs/heads/main' &&
+        (github.event_name == 'workflow_dispatch' ||
+         needs.changes.outputs.lint == 'true' ||
+         needs.changes.outputs.python == 'true' ||
+         needs.changes.outputs.postgres == 'true' ||
+         needs.changes.outputs.browser == 'true' ||
+         needs.changes.outputs.migrations == 'true' ||
+         needs.changes.outputs.package == 'true')
       }}
     runs-on: ubuntu-latest
     environment: production

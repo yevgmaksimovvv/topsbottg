@@ -124,6 +124,14 @@ def test_nginx_template_uses_app_domain() -> None:
     assert "ssl_certificate" not in text
 
 
+def test_sse_route_does_not_write_access_logs() -> None:
+    template = (Path(__file__).resolve().parents[1] / "nginx/templates/default.conf.template").read_text(
+        encoding="utf-8"
+    )
+    events = template.split("location = /api/admin/events {", 1)[1].split("location /api/ {", 1)[0]
+    assert "access_log off;" in events
+
+
 def test_local_cert_bootstrap_uses_host_openssl_and_volume_copy() -> None:
     text = _read_text("scripts/generate-local-certs.sh")
     assert "command -v openssl" in text

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
 
+import topsbottg.api as api_module
 from topsbottg.access import get_principal, revoke_admin
 from topsbottg.invitations import (
     InvitationConflict,
@@ -18,6 +20,27 @@ from topsbottg.invitations import (
 from topsbottg.models import AdminInvitation, AuditLog, User
 from topsbottg.services import get_or_create_user
 from topsbottg.worker import deliver_admin_invitations
+
+
+@pytest.fixture(autouse=True)
+def telegram_identity(monkeypatch):
+    current = {"username": "valid_name"}
+
+    class FakeBot:
+        def __init__(self, token):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get_chat(self, telegram_id):
+            return SimpleNamespace(username=current["username"])
+
+    monkeypatch.setattr(api_module, "Bot", FakeBot)
+    return current
 
 
 class InvitationBot:
@@ -60,7 +83,45 @@ async def test_lookup_uses_recent_observed_identity_not_global_telegram_search(s
         user = await session.scalar(select(User).where(User.telegram_id == 555))
         user.telegram_profile_seen_at = datetime.now(UTC) - timedelta(days=15)
         await session.commit()
-        assert await find_candidate(session, telegram_id=555) is None
+        assert (await find_candidate(session, telegram_id=555)).telegram_id == 555
+
+
+@pytest.mark.asyncio
+async def test_legacy_user_can_be_invited_by_stable_telegram_id(session_factory, settings):
+    async with session_factory() as session:
+        await get_or_create_user(session, 777, "Старый пользователь")
+        await session.commit()
+    async with session_factory() as session:
+        found = await find_candidate(session, telegram_id=777)
+        assert found is not None and found.telegram_username is None
+        invite = await create_invitation(
+            session, actor_id=123, target_id=777, owner_ids=settings.admin_ids_set
+        )
+        assert invite.target_telegram_id == 777
+        await session.commit()
+        with pytest.raises(InvitationConflict):
+            await create_invitation(
+                session, actor_id=123, target_id=777, owner_ids=settings.admin_ids_set,
+                expected_username="unverified_name",
+            )
+
+
+@pytest.mark.asyncio
+async def test_invitation_remains_valid_if_inviting_owner_loses_access(session_factory, settings):
+    await known(session_factory)
+    async with session_factory() as session:
+        invite = await create_invitation(
+            session, actor_id=123, target_id=555, owner_ids={123}
+        )
+        await session.commit()
+    async with session_factory() as session:
+        outcome = await decide_invitation(
+            session, invitation_id=invite.id, actor_id=555,
+            accept=True, owner_ids={456},
+        )
+        await session.commit()
+        assert outcome == "accepted"
+        assert (await get_principal(session, 555, {456})).role == "admin"
 
 
 @pytest.mark.asyncio
@@ -142,8 +203,9 @@ async def test_owner_api_lookup_invites_and_grants_only_after_acceptance(
 
 @pytest.mark.asyncio
 async def test_username_change_blocks_stale_invitation_and_unknown_identity(
-    client, session_factory, admin_init_data
+    client, session_factory, admin_init_data, telegram_identity
 ):
+    telegram_identity["username"] = "changed_name"
     await known(session_factory)
     headers = {"X-Telegram-Init-Data": admin_init_data}
     async with session_factory() as session:
@@ -240,7 +302,7 @@ async def test_decline_expiration_reinvite_and_regrant(session_factory, settings
 
 
 @pytest.mark.asyncio
-async def test_invite_delivery_retries_and_expires_without_grant(session_factory, settings):
+async def test_uncertain_invitation_delivery_is_not_retried(session_factory, settings):
     await known(session_factory)
     async with session_factory() as session:
         invitation = await create_invitation(
@@ -255,15 +317,39 @@ async def test_invite_delivery_retries_and_expires_without_grant(session_factory
         assert invitation.delivery_attempts == 1
         assert invitation.last_delivery_error == "OSError"
         assert invitation.delivered_at is None
+        assert invitation.delivery_state == "unknown"
         invitation.next_delivery_at = datetime.now(UTC) - timedelta(seconds=1)
         await session.commit()
     await deliver_admin_invitations(bot, session_factory)
-    assert len(bot.sent) == 1
+    assert len(bot.sent) == 0
     async with session_factory() as session:
         invitation = await session.get(AdminInvitation, id_)
-        assert invitation.delivered_at is not None
-        assert invitation.last_delivery_error is None
+        assert invitation.delivered_at is None
+        assert invitation.delivery_state == "unknown"
+        assert invitation.last_delivery_error == "OSError"
         assert await get_principal(session, 555, settings.admin_ids_set) is None
+
+
+@pytest.mark.asyncio
+async def test_inflight_invitation_is_not_resent_after_worker_restart(session_factory, settings):
+    await known(session_factory)
+    async with session_factory() as session:
+        invitation = await create_invitation(
+            session, actor_id=123, target_id=555, owner_ids=settings.admin_ids_set
+        )
+        invitation.delivery_state = "sending"
+        invitation.updated_at = datetime.now(UTC) - timedelta(minutes=3)
+        invitation_id = invitation.id
+        await session.commit()
+
+    bot = InvitationBot()
+    await deliver_admin_invitations(bot, session_factory)
+    await deliver_admin_invitations(bot, session_factory)
+    assert bot.sent == []
+    async with session_factory() as session:
+        invitation = await session.get(AdminInvitation, invitation_id)
+        assert invitation.delivery_state == "unknown"
+        assert invitation.last_delivery_error == "delivery_outcome_unknown"
 
 
 @pytest.mark.asyncio

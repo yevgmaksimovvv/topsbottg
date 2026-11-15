@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFile } from "node:fs/promises";
 import { suites, verifyResults } from "../../scripts/ci/check-results.mjs";
 
 function policy(enabled) {
@@ -46,6 +47,20 @@ test("missing or invalid change-detection output fails closed", () => {
   assert.match(verifyResults("failure", required, results).join(" "), /Change detection must succeed/);
   required.python = "";
   assert.match(verifyResults("success", required, results).join(" "), /invalid or missing selection/);
+});
+
+test("documentation-only pushes skip production deployment", async () => {
+  const workflow = await readFile(
+    new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8",
+  );
+  assert.match(workflow, /needs: \[checks, changes\]/u);
+  assert.match(workflow, /github\.event_name == 'workflow_dispatch' \|\|/u);
+  for (const suite of suites) {
+    assert.ok(
+      workflow.includes("needs.changes.outputs." + suite + " == 'true'"),
+      "Missing deploy gate for " + suite,
+    );
+  }
 });
 
 test("all previously selected jobs are still required in a mixed change", () => {

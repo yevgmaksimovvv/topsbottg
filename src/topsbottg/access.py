@@ -11,7 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from topsbottg.models import AdminGrant, AuditLog
+from topsbottg.models import AdminGrant, AdminInvitation, AuditLog
 
 AdminRole = Literal["owner", "admin"]
 
@@ -65,6 +65,29 @@ async def grant_admin(
 ) -> bool:
     """Создаёт грант или повторно активирует отозванный, сохраняя аудит."""
     require_owner(actor_telegram_id, owner_ids)
+    return await _upsert_admin_grant(
+        session, actor_telegram_id=actor_telegram_id,
+        target_telegram_id=target_telegram_id, owner_ids=owner_ids,
+    )
+
+
+async def grant_admin_from_invitation(
+    session: AsyncSession, *, invitation: AdminInvitation, target_telegram_id: int,
+    owner_ids: set[int],
+) -> bool:
+    """Применяет ранее выданное приглашение, заблокированное вызывающим кодом."""
+    if invitation.status != "pending" or invitation.target_telegram_id != target_telegram_id:
+        raise AccessDenied("Invalid invitation context")
+    return await _upsert_admin_grant(
+        session, actor_telegram_id=invitation.created_by_owner_id,
+        target_telegram_id=target_telegram_id, owner_ids=owner_ids,
+    )
+
+
+async def _upsert_admin_grant(
+    session: AsyncSession, *, actor_telegram_id: int, target_telegram_id: int,
+    owner_ids: set[int],
+) -> bool:
     if target_telegram_id <= 0 or target_telegram_id in owner_ids:
         raise ValueError("Cannot grant an owner or invalid Telegram ID.")
     existing = await session.scalar(

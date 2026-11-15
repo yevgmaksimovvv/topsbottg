@@ -9,6 +9,7 @@ from typing import Literal
 from urllib.parse import quote, urlencode
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 import topsbottg.api as api_module
@@ -230,8 +231,8 @@ async def test_admin_can_get_events_token(client, admin_init_data):
     response = await client.post("/api/admin/events-token", headers={"X-Telegram-Init-Data": admin_init_data})
     assert response.status_code == 200
     payload = response.json()
-    assert isinstance(payload["token"], str)
-    assert payload["token"]
+    assert "token" not in payload
+    assert "topsbottg_events=" in response.headers["set-cookie"]
     assert payload["expires_in"] == 300
 
 
@@ -265,16 +266,22 @@ async def test_invalid_or_missing_events_token_rejected(client, admin_init_data)
     assert missing.status_code == 401
 
     token_response = await client.post("/api/admin/events-token", headers={"X-Telegram-Init-Data": admin_init_data})
-    token = token_response.json()["token"]
+    token = token_response.cookies["topsbottg_events"]
 
-    invalid = await client.get("/api/admin/events", params={"token": f"{token}x"})
+    assert "httponly" in token_response.headers["set-cookie"].lower()
+    assert "secure" in token_response.headers["set-cookie"].lower()
+    invalid = await client.get(
+        "/api/admin/events", headers={"Cookie": f"topsbottg_events={token}x"}
+    )
     assert invalid.status_code == 403
+    query_only = await client.get("/api/admin/events", params={"token": token})
+    assert query_only.status_code == 401
 
 
 @pytest.mark.asyncio
 async def test_valid_events_token_opens_sse_response(client, app, admin_init_data):
     token_response = await client.post("/api/admin/events-token", headers={"X-Telegram-Init-Data": admin_init_data})
-    token = token_response.json()["token"]
+    token = token_response.cookies["topsbottg_events"]
 
     route = next(route for route in app.router.routes if getattr(route, "path", None) == "/api/admin/events")
     response = await route.endpoint(token=token)
@@ -284,6 +291,26 @@ async def test_valid_events_token_opens_sse_response(client, app, admin_init_dat
     assert response.headers["content-type"].startswith("text/event-stream")
     assert response.headers["cache-control"] == "no-cache"
     assert response.headers["x-accel-buffering"] == "no"
+
+
+@pytest.mark.asyncio
+async def test_sse_uses_secure_cookie_without_url_token(app, admin_init_data, monkeypatch):
+    async def one_ping(**kwargs):
+        yield "event: ping\\ndata: {}\\n\\n"
+
+    monkeypatch.setattr(api_module, "_admin_events_stream", one_ping)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="https://test") as secure_client:
+        issued = await secure_client.post(
+            "/api/admin/events-token",
+            headers={"X-Telegram-Init-Data": admin_init_data},
+        )
+        assert issued.status_code == 200
+        cookie = issued.headers["set-cookie"].lower()
+        assert "secure" in cookie and "httponly" in cookie and "samesite=strict" in cookie
+        response = await secure_client.get("/api/admin/events")
+        assert response.status_code == 200
+        assert "event: ping" in response.text
+        assert (await secure_client.get("/api/admin/events")).status_code == 403
 
 
 @pytest.mark.asyncio
