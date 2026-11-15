@@ -332,6 +332,28 @@ async def test_uncertain_invitation_delivery_is_not_retried(session_factory, set
 
 
 @pytest.mark.asyncio
+async def test_inflight_invitation_is_not_resent_after_worker_restart(session_factory, settings):
+    await known(session_factory)
+    async with session_factory() as session:
+        invitation = await create_invitation(
+            session, actor_id=123, target_id=555, owner_ids=settings.admin_ids_set
+        )
+        invitation.delivery_state = "sending"
+        invitation.updated_at = datetime.now(UTC) - timedelta(minutes=3)
+        invitation_id = invitation.id
+        await session.commit()
+
+    bot = InvitationBot()
+    await deliver_admin_invitations(bot, session_factory)
+    await deliver_admin_invitations(bot, session_factory)
+    assert bot.sent == []
+    async with session_factory() as session:
+        invitation = await session.get(AdminInvitation, invitation_id)
+        assert invitation.delivery_state == "unknown"
+        assert invitation.last_delivery_error == "delivery_outcome_unknown"
+
+
+@pytest.mark.asyncio
 async def test_other_owner_can_invite_and_revoke_and_admin_cannot(session_factory, settings):
     settings.admin_telegram_ids = "123,456"
     await known(session_factory)
