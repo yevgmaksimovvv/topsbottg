@@ -297,6 +297,9 @@ function showNewDialog() {
 function showList() {
   ++inbox.historyRequest;
   ++inbox.newRequest;
+  ++inbox.openRequest;
+  inbox.openController?.abort();
+  inbox.openingUser = false;
   inbox.newController?.abort();
   clearTimeout(inbox.newSearchTimer);
   inbox.historyController?.abort();
