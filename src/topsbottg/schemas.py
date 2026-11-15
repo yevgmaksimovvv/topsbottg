@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from topsbottg.constants import MAX_PAYOUT_MESSAGE_LENGTH
 
@@ -177,6 +177,24 @@ class ChatMessageOut(BaseModel):
     delivery_status: Literal["queued", "sending", "sent", "failed"] | None = None
     delivery_error_code: str | None = None
     attachment: dict | None = None
+
+
+class ChatMessageCreateIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1, max_length=4096)
+    reply_to_message_id: int | None = Field(default=None, gt=0, strict=True)
+
+    @field_validator("text")
+    @classmethod
+    def _nonempty_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("message text must not be blank")
+        return value
+
+
+class ChatMessageAcceptedOut(BaseModel):
+    message: ChatMessageOut
 
 
 class ConversationItemOut(BaseModel):

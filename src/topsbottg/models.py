@@ -9,6 +9,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Integer,
     Index,
     String,
     Text,
@@ -161,6 +162,51 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
+    outbox: Mapped[ChatMessageOutbox | None] = relationship(
+        back_populates="message", foreign_keys="ChatMessageOutbox.message_id",
+        uselist=False, lazy="selectin",
+    )
+
+
+class ChatMessageOutbox(Base, TimestampMixin):
+    __tablename__ = "chat_message_outbox"
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id", "admin_telegram_id", "idempotency_key",
+            name="uq_chat_outbox_idempotency",
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'sending', 'sent', 'failed')",
+            name="ck_chat_outbox_status",
+        ),
+        CheckConstraint("attempts >= 0", name="ck_chat_outbox_attempts"),
+        Index("ix_chat_outbox_claim", "status", "retry_at", "claimed_until"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    message_id: Mapped[int] = mapped_column(
+        ForeignKey("chat_messages.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    admin_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    reply_to_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(8), nullable=False, default="queued", server_default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claim_token: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    message: Mapped[ChatMessage] = relationship(
+        back_populates="outbox", foreign_keys=[message_id]
+    )
 
 
 class ConversationRead(Base):
