@@ -8,7 +8,7 @@
     />
     <meta name="color-scheme" content="light dark" />
     <title>topsbottg</title>
-    <link rel="stylesheet" href="/miniapp/styles.css?v=20261115-inbox-shell" />
+    <link rel="stylesheet" href="/miniapp/styles.css?v=20261115-inbox-api" />
   </head>
   <body>
     <main class="app-shell">
@@ -344,6 +344,7 @@
           </div>
           <p id="inbox-list-status" class="inbox-feedback" role="status"></p>
           <div id="inbox-conversations" class="inbox-scroll" aria-label="Диалоги"></div>
+          <button type="button" id="inbox-list-retry" class="button button-quiet inbox-page-button hidden">Повторить загрузку</button>
           <button type="button" id="inbox-more" class="button button-quiet inbox-page-button hidden">Загрузить ещё</button>
         </section>
         <section id="inbox-history-screen" class="inbox-screen" aria-label="История диалога" hidden>
@@ -440,6 +441,6 @@
       <pre id="preview" class="preview-root"></pre>
     </dialog>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script type="module" src="/miniapp/app.js?v=20261115-inbox-shell"></script>
+    <script type="module" src="/miniapp/app.js?v=20261115-inbox-api"></script>
   </body>
 </html>
