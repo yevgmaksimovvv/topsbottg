@@ -43,7 +43,7 @@ async def search_candidates(
     limit: int = 30, offset: int = 0,
 ) -> tuple[list[User], bool]:
     """Find registered users by any fragments of their name, independently of group membership."""
-    words = name.lower().split()
+    words = name.split()
     if not words:
         return [], False
     query = (
@@ -54,7 +54,7 @@ async def search_candidates(
     for word in words:
         # LIKE wildcards in names are literal, not a way to enumerate all users.
         literal = word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        query = query.where(func.lower(User.full_name).like(f"%{literal}%", escape="\\"))
+        query = query.where(User.full_name.ilike(f"%{literal}%", escape="\\"))
     if study_group_id is not None:
         query = query.where(User.study_group_id == study_group_id)
     rows = list((await session.scalars(
