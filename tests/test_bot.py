@@ -13,13 +13,19 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, WebAppInfo
 from sqlalchemy import select
 
-from topsbottg.bot import CHANGE_PAYMENT_DETAILS_BUTTON_TEXT, build_router, main_keyboard
-from topsbottg.models import PaymentProfile, PayoutStatus, RecipientStatus, User
+from topsbottg.bot import (
+    CHANGE_PAYMENT_DETAILS_BUTTON_TEXT,
+    CHAT_ENTRYPOINT_TEXT,
+    build_router,
+    main_keyboard,
+)
+from topsbottg.models import ChatMessage, Conversation, PaymentProfile, PayoutStatus, RecipientStatus, User
 from topsbottg.services import (
     add_recipients,
     create_payout,
     get_or_create_user,
     get_payment_profile,
+    get_admin_events_broadcaster,
     upsert_payment_profile,
 )
 
@@ -1133,3 +1139,178 @@ async def test_invite_decline_button_never_grants_admin(session_factory, setting
     assert _last_method(recording).text == "Приглашение отклонено."
     async with session_factory() as session:
         assert await get_principal(session, 555, settings.admin_ids_set) is None
+
+
+def _chat_update(
+    bot: Bot,
+    user_id: int,
+    text: str,
+    update_id: int,
+    *,
+    chat_type: str = "private",
+    chat_id: int | None = None,
+    message_id: int | None = None,
+    reply_to_id: int | None = None,
+    is_bot: bool = False,
+) -> Update:
+    chat_id = chat_id if chat_id is not None else user_id
+    payload = {
+        "message_id": message_id if message_id is not None else 1000 + update_id,
+        "date": int(datetime.now(UTC).timestamp()),
+        "chat": {"id": chat_id, "type": chat_type},
+        "from": {"id": user_id, "is_bot": is_bot, "first_name": "Test"},
+        "text": text,
+    }
+    if reply_to_id is not None:
+        payload["reply_to_message"] = {
+            "message_id": reply_to_id,
+            "date": int(datetime.now(UTC).timestamp()),
+            "chat": {"id": chat_id, "type": chat_type},
+            "from": {"id": 9999, "is_bot": True, "first_name": "Bot"},
+            "text": "Ответ",
+        }
+    return Update.model_validate(
+        {"update_id": update_id, "message": payload}, context={"bot": bot}
+    )
+
+
+@pytest.mark.asyncio
+async def test_private_chat_persists_in_order_and_deduplicates_across_dispatchers(
+    session_factory, settings, caplog
+):
+    caplog.set_level(logging.INFO)
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 411, "Пользователь без группы")
+        assert user.study_group_id is None
+        await session.commit()
+
+    events = get_admin_events_broadcaster().subscribe()
+    bot, _ = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+    try:
+        for number in range(5):
+            await dispatcher.feed_update(
+                bot, _chat_update(
+                    bot, 411, f"Обращение {number}", 200 + number,
+                    reply_to_id=9000 if number == 4 else None,
+                ),
+            )
+        for _ in range(5):
+            assert (await events.get())["event"] == "chat.changed"
+        assert events.empty()
+
+        restarted = _make_dispatcher(session_factory, settings)
+        await restarted.feed_update(
+            bot, _chat_update(bot, 411, "Повтор", 300, message_id=1203)
+        )
+        assert events.empty()
+    finally:
+        get_admin_events_broadcaster().unsubscribe(events)
+
+    async with session_factory() as session:
+        conversations = list((await session.scalars(select(Conversation))).all())
+        assert len(conversations) == 1
+        assert conversations[0].user_id == user.id
+        rows = list((await session.scalars(select(ChatMessage).order_by(ChatMessage.id))).all())
+        assert len(rows) == 5
+        assert [row.telegram_message_id for row in rows] == [1200, 1201, 1202, 1203, 1204]
+        assert [row.text for row in rows] == [f"Обращение {i}" for i in range(5)]
+        assert all(row.telegram_chat_id == 411 for row in rows)
+        assert rows[-1].reply_to_telegram_message_id == 9000
+        assert rows[-1].source == "telegram_reply"
+        assert all(row.source == "telegram" for row in rows[:-1])
+
+    assert all(event.get("payload") is None for event in _events(caplog))
+    assert "Обращение 4" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unregistered_draft_group_channel_bot_and_commands_do_not_create_chat(session_factory, settings):
+    async with session_factory() as session:
+        await get_or_create_user(session, 411, "Готовый пользователь")
+        await get_or_create_user(session, 412, "Без ФИО")
+        session.add(User(telegram_id=413, full_name="Регистрация не окончена"))
+        await session.commit()
+
+    bot, _ = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+    updates = [
+        _chat_update(bot, 411, "Сообщение в группе", 410, chat_type="supergroup", chat_id=-100411),
+        _chat_update(bot, 411, "Сообщение в канале", 411, chat_type="channel", chat_id=-100412),
+        _chat_update(bot, 412, "Черновик", 412),
+        _chat_update(bot, 413, "ФИО без завершения", 413),
+        _chat_update(bot, 414, "Неизвестный пользователь", 414),
+        _chat_update(bot, 411, "/неизвестная_команда", 415),
+        _chat_update(bot, 411, "Сообщение бота", 416, is_bot=True),
+    ]
+    for update in updates:
+        await dispatcher.feed_update(bot, update)
+    async with session_factory() as session:
+        assert (await session.scalars(select(Conversation))).all() == []
+        assert (await session.scalars(select(ChatMessage))).all() == []
+
+
+@pytest.mark.asyncio
+async def test_chat_does_not_capture_registration_or_payment_fsm_and_preserves_payout(
+    session_factory, settings, caplog
+):
+    caplog.set_level(logging.INFO)
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 411, "Зарегистрированный пользователь")
+        payout = await create_payout(session, actor_telegram_id=123, payload=_payout_payload())
+        payout.status = PayoutStatus.sent.value
+        [recipient] = await add_recipients(session, payout, [user.id])
+        recipient.status = RecipientStatus.sent.value
+        await session.commit()
+        payout_id, recipient_id = payout.id, recipient.id
+
+    bot, _ = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+    await dispatcher.feed_update(bot, _make_update(bot, 411, "/start", 501))
+    await dispatcher.feed_update(bot, _make_update(bot, 411, "Изменить ФИО", 502))
+    await dispatcher.feed_update(bot, _make_update(bot, 411, "Новое имя", 503))
+    await dispatcher.feed_update(bot, _make_update(bot, 411, "Изменить группу", 504))
+    await dispatcher.feed_update(bot, _make_update(bot, 411, "М3О-207СВ-25", 505))
+    await dispatcher.feed_update(bot, _make_update(bot, 411, CHANGE_PAYMENT_DETAILS_BUTTON_TEXT, 506))
+    confidential = "confidential-profile-value"
+    await dispatcher.feed_update(bot, _make_update(bot, 411, confidential, 507))
+
+    async with session_factory() as session:
+        assert (await session.scalars(select(ChatMessage))).all() == []
+        assert (await session.scalars(select(Conversation))).all() == []
+        assert (await session.get(type(payout), payout_id)).status == PayoutStatus.sent.value
+        assert (await session.get(type(recipient), recipient_id)).status == RecipientStatus.sent.value
+        profile = await get_payment_profile(session, user.id)
+        assert profile is not None and profile.raw_payment_details == confidential
+
+    await dispatcher.feed_update(bot, _make_update(bot, 411, "Обычный текст", 508))
+    async with session_factory() as session:
+        messages = list((await session.scalars(select(ChatMessage))).all())
+        assert len(messages) == 1 and messages[0].text == "Обычный текст"
+    assert confidential not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_chat_entrypoint_is_hidden_by_default_and_enabled_only_with_flag(session_factory, settings):
+    assert settings.chat_entrypoint_enabled is False
+    assert all(CHAT_ENTRYPOINT_TEXT not in row for row in _keyboard_texts(main_keyboard()))
+    enabled = settings.model_copy(update={"chat_entrypoint_enabled": True})
+    assert _keyboard_texts(main_keyboard(chat_entrypoint_enabled=True))[-1] == [CHAT_ENTRYPOINT_TEXT]
+
+    async with session_factory() as session:
+        await get_or_create_user(session, 411, "Готовый пользователь")
+        await session.commit()
+
+    bot, recording = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, enabled)
+    await dispatcher.feed_update(bot, _make_update(bot, 411, "/start", 600))
+    assert _keyboard_texts(_last_message_method(recording).reply_markup)[-1] == [CHAT_ENTRYPOINT_TEXT]
+    await dispatcher.feed_update(bot, _make_update(bot, 411, CHAT_ENTRYPOINT_TEXT, 601))
+    assert _last_message_method(recording).text == "Напишите сообщение администратору."
+
+    async with session_factory() as session:
+        assert (await session.scalars(select(ChatMessage))).all() == []
+    await dispatcher.feed_update(bot, _make_update(bot, 411, "Вопрос администратору", 602))
+    async with session_factory() as session:
+        messages = list((await session.scalars(select(ChatMessage))).all())
+        assert len(messages) == 1 and messages[0].text == "Вопрос администратору"
