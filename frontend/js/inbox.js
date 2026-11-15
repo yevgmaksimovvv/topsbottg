@@ -224,6 +224,7 @@ function renderHistory({ preserveScroll = false } = {}) {
   renderReply();
   if (preserveScroll) list.scrollTop = oldTop + list.scrollHeight - oldHeight;
   else if (atBottom || !oldHeight) list.scrollTop = list.scrollHeight;
+  else list.scrollTop = oldTop;
 }
 
 async function loadMessages({ older = false, refresh = false } = {}) {
