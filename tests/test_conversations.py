@@ -109,8 +109,10 @@ async def test_unread_is_incoming_only_and_independent_for_admins(session_factor
                 telegram_message_id=num, text=f"Текст {num}",
             )
             incoming.append(message.id)
+        outgoing = ChatMessage(conversation_id=conv.id, direction="outgoing", text="Ответ", source="admin")
+        session.add(outgoing)
         await lock_conversation_for_message(session, conversation_id=conv.id)
-        session.add(ChatMessage(conversation_id=conv.id, direction="outgoing", text="Ответ", source="admin"))
+        assert outgoing.id is None
         await session.flush()
         outgoing_id = (await session.scalar(
             select(ChatMessage.id).where(ChatMessage.direction == "outgoing")

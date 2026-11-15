@@ -171,11 +171,13 @@ async def test_postgres_foreign_keys_unique_and_direction_constraint(postgres_co
             await session.commit()
         await session.rollback()
 
-        await lock_conversation_for_message(session, conversation_id=conv_id)
-        session.add_all([
+        outgoing = [
             ChatMessage(conversation_id=conv_id, direction="outgoing", source="admin", text="Первый"),
             ChatMessage(conversation_id=conv_id, direction="outgoing", source="admin", text="Второй"),
-        ])
+        ]
+        session.add_all(outgoing)
+        await lock_conversation_for_message(session, conversation_id=conv_id)
+        assert all(message.id is None for message in outgoing)
         await session.commit()
         assert await session.scalar(select(func.count(ChatMessage.id))) == 3
         assert await get_unread_count(session, conversation_id=conv_id, admin_telegram_id=123) == 1
