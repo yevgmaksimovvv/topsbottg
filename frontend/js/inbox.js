@@ -382,6 +382,139 @@ function messageClock(value) {
     : new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(date);
 }
 
+function mediaMarkup(message) {
+  const attachment = message.attachment;
+  if (!attachment) return "";
+  const id = Number(message.id);
+  const kind = attachment.kind || message.kind;
+  const name = attachment.filename || (kind === "voice" ? "Голосовое сообщение" :
+    kind === "photo" ? "Фотография" : "Документ");
+  const size = fileSize(attachment.size);
+  const meta = size ? " · " + size : "";
+  const unavailable = !attachment.available || !Number.isSafeInteger(id) || id <= 0;
+  const error = inbox.mediaErrors.get(id);
+  let content;
+  if (kind === "photo" && !unavailable) {
+    content = '<button type="button" class="inbox-photo-button" data-inbox-view-photo="' + id +
+      '" aria-label="Открыть фотографию">' +
+      '<img data-inbox-photo="' + id + '" alt="Фотография" />' +
+      '<span class="inbox-photo-placeholder">Фотография' + text(meta) + '</span></button>';
+  } else if (kind === "voice" && !unavailable) {
+    const cached = inbox.mediaUrls.get(id);
+    content = cached
+      ? '<audio controls preload="metadata" data-inbox-audio-player="' + id +
+        '" src="' + text(cached) + '" aria-label="Голосовое сообщение"></audio>'
+      : '<button type="button" class="inbox-media-link" data-inbox-load-voice="' + id +
+        '">▶ Голосовое сообщение' + text(attachment.duration ? " · " + attachment.duration + " с" : "") +
+        text(meta) + '</button>';
+  } else if (!unavailable) {
+    content = '<button type="button" class="inbox-media-link" data-inbox-download="' + id +
+      '">↓ ' + text(name) + text(meta) + '</button>';
+  } else {
+    content = '<span class="inbox-media-unavailable">' + text(name) + text(meta) +
+      (message.delivery_status === "queued" || message.delivery_status === "sending"
+        ? " · Ожидает отправки" : " · Недоступно") + '</span>';
+  }
+  return '<div class="inbox-attachment">' + content +
+    (error ? '<div class="inbox-media-error" role="status">' + text(error) +
+      '<button type="button" data-inbox-reload-media="' + id + '">Повторить</button></div>' : "") +
+    '</div>';
+}
+
+function syncMedia() {
+  inbox.mediaObserver?.disconnect();
+  inbox.mediaObserver = null;
+  const photos = [...(el("inbox-messages")?.querySelectorAll("[data-inbox-photo]") || [])];
+  const pending = [];
+  for (const photo of photos) {
+    const id = Number(photo.dataset.inboxPhoto);
+    const url = inbox.mediaUrls.get(id);
+    if (url) photo.src = url;
+    else if (!inbox.mediaErrors.has(id) && !inbox.mediaRequests.has(id)) pending.push(photo);
+  }
+  if (pending.length && typeof IntersectionObserver !== "undefined") {
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        observer.unobserve(entry.target);
+        const id = Number(entry.target.dataset.inboxPhoto);
+        const message = inbox.messages.find((item) => Number(item.id) === id);
+        if (message) void loadMedia(message);
+      }
+    }, { root: el("inbox-history"), rootMargin: "180px" });
+    inbox.mediaObserver = observer;
+    for (const photo of pending) observer.observe(photo);
+  }
+}
+
+async function loadMedia(message, { download = false } = {}) {
+  const id = Number(message.id);
+  if (!Number.isSafeInteger(id) || id <= 0 || !message.attachment?.available ||
+      !inbox.client || inbox.mediaRequests.has(id)) return;
+  if (!download && inbox.mediaUrls.has(id)) return inbox.mediaUrls.get(id);
+  const conversationId = inbox.current?.id;
+  const client = inbox.client;
+  const controller = new AbortController();
+  inbox.mediaRequests.set(id, controller);
+  inbox.mediaErrors.delete(id);
+  try {
+    const blob = await client.download(id, { signal: controller.signal });
+    if (controller.signal.aborted || client !== inbox.client ||
+        inbox.current?.id !== conversationId || !isOpen()) return;
+    if (!(blob instanceof Blob)) throw new Error("Файл недоступен.");
+    const url = URL.createObjectURL(blob);
+    if (download) {
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = (message.attachment.filename || (message.kind === "photo" ? "photo.jpg" :
+        message.kind === "voice" ? "voice.ogg" : "document")).replaceAll("\\", "/").split("/").at(-1);
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+    } else {
+      inbox.mediaUrls.set(id, url);
+    }
+    inbox.mediaErrors.delete(id);
+    renderHistory({ preserveScroll: true });
+    return url;
+  } catch (error) {
+    if (controller.signal.aborted || isAbort(error)) return;
+    if (handleRequestError(error)) return;
+    if (inbox.current?.id !== conversationId || client !== inbox.client) return;
+    const label = error?.status === 413 ? "Файл превышает допустимый размер." :
+      error?.status === 415 ? "Формат файла не поддерживается." :
+        error?.status === 404 ? "Файл больше недоступен." :
+          error?.message || "Не удалось загрузить файл.";
+    inbox.mediaErrors.set(id, label);
+    renderHistory({ preserveScroll: true });
+  } finally {
+    if (inbox.mediaRequests.get(id) === controller) inbox.mediaRequests.delete(id);
+  }
+}
+
+function renderFilePreview() {
+  const preview = el("inbox-file-preview");
+  if (!preview) return;
+  if (!inbox.draftFile) {
+    preview.hidden = true;
+    preview.replaceChildren();
+    status("inbox-file-status", "");
+    return;
+  }
+  const { file, kind } = inbox.draftFile;
+  const name = document.createElement("span");
+  name.textContent = (kind === "photo" ? "Фото: " : kind === "voice" ? "Голосовое: " : "Файл: ") +
+    file.name + " · " + fileSize(file.size);
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.textContent = "×";
+  remove.setAttribute("aria-label", "Убрать вложение");
+  remove.id = "inbox-remove-file";
+  preview.replaceChildren(name, remove);
+  preview.hidden = false;
+}
+
 function renderHistory({ preserveScroll = false } = {}) {
   const scroll = el("inbox-history");
   const list = el("inbox-messages");
