@@ -612,7 +612,8 @@ test("Authorized photo, document and voice stay in history after reload, faults 
     const { page, errors } = await createPage(123, 390);
     await page.locator("#inbox-open").click();
     await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
-    await page.locator('[data-inbox-message="203"]').scrollIntoViewIfNeeded();
+    await page.locator('[data-inbox-message="203"]').waitFor({ state: "attached" });
+    await page.evaluate(() => document.querySelector('[data-inbox-message="203"]')?.scrollIntoView({ block: "center" }));
     await page.locator('[data-inbox-photo="203"][src^="blob:"]').waitFor();
     assert.match(await page.locator('[data-inbox-message="203"]').innerText(), /Фотография с подписью/);
     assert.match(await page.locator('[data-inbox-message="204"]').innerText(), /план.pdf/);
@@ -665,7 +666,8 @@ test("Authorized photo, document and voice stay in history after reload, faults 
     await page.locator("#inbox-open").click();
     await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
     await page.locator('[data-inbox-message="205"]').waitFor();
-    await page.locator('[data-inbox-message="203"]').scrollIntoViewIfNeeded();
+    await page.locator('[data-inbox-message="203"]').waitFor({ state: "attached" });
+    await page.evaluate(() => document.querySelector('[data-inbox-message="203"]')?.scrollIntoView({ block: "center" }));
     await page.locator('[data-inbox-photo="203"][src^="blob:"]').waitFor();
     await page.locator('[data-inbox-load-voice="205"]').click();
     await page.locator('[data-inbox-audio-player="205"][src^="blob:"]').waitFor();
