@@ -15,6 +15,10 @@ ADMIN_ROUTES = [
     ("POST", "/api/admin/events-token", None),
     ("GET", "/api/admin/admin-grants", None),
     ("DELETE", "/api/admin/admin-grants/10", None),
+    ("GET", "/api/admin/admin-candidates", None),
+    ("GET", "/api/admin/admin-invitations", None),
+    ("POST", "/api/admin/admin-invitations", {"target_telegram_id": 10}),
+    ("POST", "/api/admin/admin-invitations/10/cancel", None),
     ("GET", "/api/admin/study-groups", None),
     ("GET", "/api/admin/users", None),
     ("GET", "/api/admin/users/10", None),
@@ -61,6 +65,7 @@ def _route_template(path: str) -> str:
     parts = path.split("/")
     return "/".join("{user_id}" if value == "10" and parts[index - 1] == "users"
                     else "{telegram_id}" if value == "10" and parts[index - 1] == "admin-grants"
+                    else "{invitation_id}" if value == "10" and parts[index - 1] == "admin-invitations"
                     else "{payout_id}" if value == "10" and parts[index - 1] == "payouts"
                     else "{recipient_id}" if value == "20" and parts[index - 1] == "recipients"
                     else value for index, value in enumerate(parts))
@@ -87,6 +92,10 @@ async def test_admin_route_rejects_unauthorized_user(
 OWNER_ONLY_ROUTES = {
     ("GET", "/api/admin/admin-grants"),
     ("DELETE", "/api/admin/admin-grants/10"),
+    ("GET", "/api/admin/admin-candidates"),
+    ("GET", "/api/admin/admin-invitations"),
+    ("POST", "/api/admin/admin-invitations"),
+    ("POST", "/api/admin/admin-invitations/10/cancel"),
 }
 
 

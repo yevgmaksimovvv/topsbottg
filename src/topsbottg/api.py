@@ -9,13 +9,20 @@ import urllib.request
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import inspect, select, text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from topsbottg.access import AccessDenied, require_admin, require_owner, revoke_admin
 from topsbottg.config import Settings
 from topsbottg.db import get_session
+from topsbottg.invitations import (
+    InvitationConflict,
+    cancel_invitation,
+    create_invitation,
+    find_candidate,
+    list_invitations,
+)
 from topsbottg.logging_utils import log_event
 from topsbottg.models import (
     AdminGrant,
@@ -30,6 +37,7 @@ from topsbottg.models import (
 from topsbottg.schemas import (
     AddRecipientsIn,
     AdminEventsTokenOut,
+    AdminInvitationCreateIn,
     MarkPaidIn,
     PaymentProfileRevealOut,
     PayoutCreate,
@@ -449,6 +457,111 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         await session.commit()
+
+    @app.get("/api/admin/admin-candidates")
+    async def admin_candidates(
+        username: str | None = Query(default=None, max_length=33),
+        telegram_id: int | None = Query(default=None, gt=0),
+        session: AsyncSession = Depends(get_session),
+        x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
+    ) -> list[dict[str, object]]:
+        actor_id = await _require_admin(x_telegram_init_data, settings, session)
+        try:
+            require_owner(actor_id, settings.admin_ids_set)
+        except AccessDenied as exc:
+            raise HTTPException(status_code=403, detail="owner only") from exc
+        try:
+            user = await find_candidate(session, username=username, telegram_id=telegram_id)
+        except InvitationConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if user is None:
+            return []
+        group = await session.get(StudyGroup, user.study_group_id) if user.study_group_id else None
+        return [{
+            "telegram_id": user.telegram_id,
+            "username": user.telegram_username,
+            "display_name": user.telegram_display_name,
+            "full_name": user.full_name,
+            "study_group": group.display_code if group else None,
+            "profile_seen_at": user.telegram_profile_seen_at,
+        }]
+
+    @app.get("/api/admin/admin-invitations")
+    async def admin_list_invitations(
+        session: AsyncSession = Depends(get_session),
+        x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
+    ) -> list[dict[str, object]]:
+        actor_id = await _require_admin(x_telegram_init_data, settings, session)
+        try:
+            invitations = await list_invitations(session, actor_id=actor_id, owner_ids=settings.admin_ids_set)
+        except AccessDenied as exc:
+            raise HTTPException(status_code=403, detail="owner only") from exc
+        return [
+            {
+                "id": item.id,
+                "target_telegram_id": item.target_telegram_id,
+                "created_by_owner_id": item.created_by_owner_id,
+                "status": item.status,
+                "expires_at": item.expires_at,
+                "delivered_at": item.delivered_at,
+                "created_at": item.created_at,
+            }
+            for item in invitations
+        ]
+
+    @app.post("/api/admin/admin-invitations", status_code=201)
+    async def admin_create_invitation(
+        payload: AdminInvitationCreateIn,
+        session: AsyncSession = Depends(get_session),
+        x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
+    ) -> dict[str, object]:
+        actor_id = await _require_admin(x_telegram_init_data, settings, session)
+        try:
+            invitation = await create_invitation(
+                session,
+                actor_id=actor_id,
+                target_id=payload.target_telegram_id,
+                owner_ids=settings.admin_ids_set,
+                expected_username=payload.expected_username,
+            )
+            await session.commit()
+        except AccessDenied as exc:
+            raise HTTPException(status_code=403, detail="owner only") from exc
+        except (InvitationConflict, IntegrityError) as exc:
+            await session.rollback()
+            raise HTTPException(status_code=409, detail="Приглашение уже существует или пользователь недоступен.") from exc
+        except ValueError as exc:
+            await session.rollback()
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "id": invitation.id,
+            "target_telegram_id": invitation.target_telegram_id,
+            "status": invitation.status,
+            "expires_at": invitation.expires_at,
+        }
+
+    @app.post("/api/admin/admin-invitations/{invitation_id}/cancel")
+    async def admin_cancel_invitation(
+        invitation_id: int,
+        session: AsyncSession = Depends(get_session),
+        x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
+    ) -> dict[str, str]:
+        actor_id = await _require_admin(x_telegram_init_data, settings, session)
+        try:
+            result = await cancel_invitation(
+                session, actor_id=actor_id, invitation_id=invitation_id,
+                owner_ids=settings.admin_ids_set,
+            )
+        except AccessDenied as exc:
+            raise HTTPException(status_code=403, detail="owner only") from exc
+        if result == "missing":
+            raise HTTPException(status_code=404, detail="invitation not found")
+        if result not in {"cancelled", "expired"}:
+            raise HTTPException(status_code=409, detail="invitation already processed")
+        await session.commit()
+        return {"status": result}
 
     @app.get("/api/admin/study-groups", response_model=list[StudyGroupOut])
     async def admin_study_groups(
