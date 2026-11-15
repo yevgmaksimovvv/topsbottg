@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -185,3 +185,109 @@ async def test_pg_personal_read_markers_remain_monotonic_under_races(
         assert {(marker.admin_telegram_id, marker.last_read_message_id) for marker in markers} == {
             (123, messages[-1]), (555, messages[0]),
         }
+
+
+@pytest.mark.postgres
+async def test_activity_uses_max_timestamp_not_last_message_id(postgres_chat_client, admin_init_data):
+    client, factory = postgres_chat_client
+    headers = {"X-Telegram-Init-Data": admin_init_data}
+    async with factory() as session:
+        users = [
+            User(telegram_id=74001 + i, full_name=f"Собеседник {i}",
+                 registration_completed_at=datetime.now(UTC))
+            for i in range(2)
+        ]
+        session.add_all(users)
+        await session.commit()
+        user_ids = [user.id for user in users]
+
+    ids = []
+    for user_id in user_ids:
+        opened = await client.post("/api/admin/conversations", headers=headers, json={"user_id": user_id})
+        ids.append(opened.json()["conversation_id"])
+
+    baseline = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
+    async with factory() as session:
+        session.add_all([
+            ChatMessage(conversation_id=ids[0], direction="incoming", text="A: позднее время",
+                        created_at=baseline + timedelta(seconds=20)),
+            ChatMessage(conversation_id=ids[1], direction="incoming", text="B: среднее время",
+                        created_at=baseline + timedelta(seconds=10)),
+            ChatMessage(conversation_id=ids[0], direction="incoming", text="A: больший ID",
+                        created_at=baseline),
+        ])
+        await session.commit()
+
+    page = await client.get("/api/admin/conversations", headers=headers, params={"limit": 1})
+    assert page.status_code == 200
+    first = page.json()["items"][0]
+    assert first["id"] == ids[0]
+    assert first["last_message"]["text"] == "A: больший ID"
+    assert datetime.fromisoformat(first["last_message_at"]) == baseline + timedelta(seconds=20)
+
+    second = await client.get("/api/admin/conversations", headers=headers, params={
+        "limit": 1, "cursor": page.json()["next_cursor"],
+    })
+    assert second.json()["items"][0]["id"] == ids[1]
+    assert second.json()["next_cursor"] is None
+
+
+@pytest.mark.postgres
+async def test_late_commit_with_smaller_sequence_id_never_skips_snapshot_page(
+    postgres_chat_client, admin_init_data,
+):
+    client, factory = postgres_chat_client
+    headers = {"X-Telegram-Init-Data": admin_init_data}
+    async with factory() as session:
+        users = [
+            User(telegram_id=75001 + i, full_name=f"Участник {i}",
+                 registration_completed_at=datetime.now(UTC))
+            for i in range(2)
+        ]
+        session.add_all(users)
+        await session.commit()
+        user_ids = [user.id for user in users]
+
+    conversations = []
+    for user_id in user_ids:
+        response = await client.post("/api/admin/conversations", headers=headers, json={"user_id": user_id})
+        conversations.append(response.json()["conversation_id"])
+    first_id, late_id = conversations
+    async with factory() as pending:
+        late_message, created = await record_incoming_message(
+            pending, conversation_id=late_id, telegram_chat_id=75002,
+            telegram_message_id=1, text="Поздно закоммичено",
+        )
+        assert created
+        late_message.created_at = datetime.now(UTC) + timedelta(minutes=1)
+        await pending.flush()
+
+        async with factory() as committed:
+            early_message, created = await record_incoming_message(
+                committed, conversation_id=first_id, telegram_chat_id=75001,
+                telegram_message_id=1, text="Уже видно",
+            )
+            assert created
+            await committed.commit()
+        assert late_message.id < early_message.id
+
+        page1 = await client.get("/api/admin/conversations", headers=headers, params={"limit": 1})
+        assert page1.status_code == 200
+        assert [item["id"] for item in page1.json()["items"]] == [first_id]
+        assert page1.json()["next_cursor"]
+
+        await pending.commit()
+
+    page2 = await client.get("/api/admin/conversations", headers=headers, params={
+        "cursor": page1.json()["next_cursor"], "limit": 1,
+    })
+    assert page2.status_code == 200
+    assert [item["id"] for item in page2.json()["items"]] == [late_id]
+    assert page2.json()["items"][0]["last_message"] is None
+    assert page2.json()["next_cursor"] is None
+    assert {page1.json()["items"][0]["id"], page2.json()["items"][0]["id"]} == set(conversations)
+
+    fresh = await client.get("/api/admin/conversations", headers=headers)
+    assert fresh.status_code == 200
+    assert fresh.json()["items"][0]["id"] == late_id
+    assert fresh.json()["items"][0]["last_message"]["text"] == "Поздно закоммичено"
