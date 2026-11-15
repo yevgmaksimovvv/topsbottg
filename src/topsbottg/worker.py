@@ -7,12 +7,21 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from aiogram import Bot
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+    TelegramUnauthorizedError,
+)
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from topsbottg.access import get_principal
+from topsbottg.chat_outbox import claim_chat_outbox, settle_chat_outbox
 from topsbottg.models import (
     AdminInvitation,
     Payout,
@@ -272,6 +281,79 @@ async def deliver_admin_invitations(bot: MessageSender, session_factory: async_s
             await session.commit()
 
 
+CHAT_SEND_TIMEOUT_SECONDS = 20
+
+
+def _chat_delivery_error(exc: Exception) -> tuple[str, bool, float | None]:
+    if isinstance(exc, TelegramRetryAfter):
+        return "rate_limited", False, float(exc.retry_after)
+    if isinstance(exc, TelegramForbiddenError):
+        return "blocked", True, None
+    if isinstance(exc, TelegramBadRequest):
+        if "chat not found" in exc.message.lower():
+            return "chat_not_found", True, None
+        return "bad_request", True, None
+    if isinstance(exc, TelegramUnauthorizedError):
+        return "telegram_unauthorized", True, None
+    if isinstance(exc, TelegramServerError):
+        return "telegram_server_error", False, None
+    if isinstance(exc, TelegramNetworkError):
+        return "network_error", False, None
+    if isinstance(exc, TimeoutError):
+        return "timeout", False, None
+    return "send_error", False, None
+
+
+async def deliver_chat_outbox(bot: MessageSender, session_factory: async_sessionmaker) -> None:
+    async with session_factory() as session:
+        claims = await claim_chat_outbox(session, limit=1)
+        await session.commit()
+
+    for claim in claims:
+        if claim.reply_to_message_id is not None and claim.reply_to_telegram_message_id is None:
+            async with session_factory() as session:
+                await settle_chat_outbox(
+                    session, claim,
+                    error_code="reply_unavailable" if claim.reply_target_failed else "reply_pending",
+                    permanent=claim.reply_target_failed,
+                    retry_after=10 if not claim.reply_target_failed else None,
+                )
+                await session.commit()
+            continue
+
+        error_code: str | None = None
+        retry_after: float | None = None
+        permanent = False
+        telegram_message_id: int | None = None
+        try:
+            kwargs = (
+                {"reply_parameters": ReplyParameters(message_id=claim.reply_to_telegram_message_id)}
+                if claim.reply_to_telegram_message_id is not None else {}
+            )
+            # Telegram has no client-supplied idempotency token. A crash after
+            # Telegram accepts the message but before "sent" commits can resend it.
+            response = await asyncio.wait_for(
+                bot.send_message(claim.chat_id, claim.text, **kwargs),
+                timeout=CHAT_SEND_TIMEOUT_SECONDS,
+            )
+            telegram_message_id = getattr(response, "message_id", None)
+            if type(telegram_message_id) is not int or telegram_message_id <= 0:
+                telegram_message_id = None
+                error_code = "missing_telegram_message_id"
+        except Exception as exc:  # noqa: BLE001
+            error_code, permanent, retry_after = _chat_delivery_error(exc)
+
+        async with session_factory() as session:
+            await settle_chat_outbox(
+                session, claim,
+                telegram_message_id=telegram_message_id,
+                error_code=error_code,
+                retry_after=retry_after,
+                permanent=permanent,
+            )
+            await session.commit()
+
+
 async def run_worker(
     bot: Bot, session_factory: async_sessionmaker, settings, stop_event: asyncio.Event,
     heartbeat: Callable[[float], None] | None = None,
@@ -280,6 +362,7 @@ async def run_worker(
     next_recovery = 0.0
     next_notification = 0.0
     next_invitations = 0.0
+    next_chat = 0.0
     while not stop_event.is_set():
         now = loop.time()
         if now >= next_recovery:
@@ -293,6 +376,9 @@ async def run_worker(
         if now >= next_invitations:
             await deliver_admin_invitations(bot, session_factory)
             next_invitations = loop.time() + 5
+        if now >= next_chat:
+            await deliver_chat_outbox(bot, session_factory)
+            next_chat = loop.time() + 1
         async with session_factory() as session:
             rows = await claim_pending_recipients(session, limit=max(1, int(settings.broadcast_rate_per_second)))
             await session.commit()
