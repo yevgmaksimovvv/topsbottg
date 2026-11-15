@@ -591,6 +591,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
                 "expires_at": item.expires_at,
                 "delivered_at": item.delivered_at,
                 "delivery_attempts": item.delivery_attempts,
+                "delivery_state": item.delivery_state,
                 "created_at": item.created_at,
                 "username": (
                     known[item.target_telegram_id].telegram_username
