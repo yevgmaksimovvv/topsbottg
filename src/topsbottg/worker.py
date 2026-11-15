@@ -15,13 +15,23 @@ from aiogram.exceptions import (
     TelegramServerError,
     TelegramUnauthorizedError,
 )
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
+from aiogram.types import FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from topsbottg.access import get_principal
-from topsbottg.chat_outbox import claim_chat_outbox, settle_chat_outbox
+from topsbottg.attachment_staging import (
+    cleanup_staging,
+    release_staging_reference,
+    remove_staged_file,
+    staging_path,
+)
+from topsbottg.chat_outbox import (
+    CHAT_MEDIA_SEND_TIMEOUT_SECONDS,
+    claim_chat_outbox,
+    settle_chat_outbox,
+)
 from topsbottg.models import (
     AdminInvitation,
     Payout,
@@ -304,7 +314,10 @@ def _chat_delivery_error(exc: Exception) -> tuple[str, bool, float | None]:
     return "send_error", False, None
 
 
-async def deliver_chat_outbox(bot: MessageSender, session_factory: async_sessionmaker) -> None:
+async def deliver_chat_outbox(
+    bot: MessageSender, session_factory: async_sessionmaker,
+    staging_dir: str = "/var/lib/topsbottg/chat-staging",
+) -> None:
     async with session_factory() as session:
         claims = await claim_chat_outbox(session, limit=1)
         await session.commit()
@@ -314,33 +327,81 @@ async def deliver_chat_outbox(bot: MessageSender, session_factory: async_session
         retry_after: float | None = None
         permanent = False
         telegram_message_id: int | None = None
+        telegram_file_id: str | None = None
+        telegram_file_unique_id: str | None = None
         try:
             kwargs = (
                 {"reply_parameters": ReplyParameters(message_id=claim.reply_to_telegram_message_id)}
                 if claim.reply_to_telegram_message_id is not None else {}
             )
-            # Telegram has no client-supplied idempotency token. A crash after
-            # Telegram accepts the message but before "sent" commits can resend it.
+            # Telegram has no upload idempotency token: a crash after send and
+            # before the final DB commit can deliver the same media twice.
+            if claim.kind == "text":
+                operation = bot.send_message(claim.chat_id, claim.text, **kwargs)
+            else:
+                if claim.staging_key is None:
+                    raise FileNotFoundError("staging key missing")
+                path = staging_path(staging_dir, claim.staging_key)
+                if not path.is_file() or path.is_symlink():
+                    raise FileNotFoundError("staged media missing")
+                media = FSInputFile(path, filename=claim.filename)
+                kwargs["request_timeout"] = CHAT_MEDIA_SEND_TIMEOUT_SECONDS
+                if claim.kind == "photo":
+                    operation = bot.send_photo(claim.chat_id, media, caption=claim.caption, **kwargs)
+                elif claim.kind == "document":
+                    operation = bot.send_document(claim.chat_id, media, caption=claim.caption, **kwargs)
+                elif claim.kind == "voice":
+                    operation = bot.send_voice(claim.chat_id, media, caption=claim.caption, **kwargs)
+                else:
+                    raise ValueError("unsupported outbox media kind")
             response = await asyncio.wait_for(
-                bot.send_message(claim.chat_id, claim.text, **kwargs),
-                timeout=CHAT_SEND_TIMEOUT_SECONDS,
+                operation,
+                timeout=(
+                    CHAT_SEND_TIMEOUT_SECONDS
+                    if claim.kind == "text" else CHAT_MEDIA_SEND_TIMEOUT_SECONDS
+                ),
             )
             telegram_message_id = getattr(response, "message_id", None)
             if type(telegram_message_id) is not int or telegram_message_id <= 0:
                 telegram_message_id = None
                 error_code = "missing_telegram_message_id"
+            if telegram_message_id is not None and claim.kind != "text":
+                if claim.kind == "photo":
+                    photos = getattr(response, "photo", None) or []
+                    media_result = photos[-1] if photos else None
+                else:
+                    media_result = getattr(response, claim.kind, None)
+                telegram_file_id = getattr(media_result, "file_id", None)
+                telegram_file_unique_id = getattr(media_result, "file_unique_id", None)
+                if not telegram_file_id:
+                    telegram_message_id = None
+                    error_code = "missing_telegram_file_id"
+        except FileNotFoundError:
+            error_code, permanent = "staging_file_missing", True
         except Exception as exc:  # noqa: BLE001
             error_code, permanent, retry_after = _chat_delivery_error(exc)
 
+        terminal = False
         async with session_factory() as session:
-            await settle_chat_outbox(
+            changed = await settle_chat_outbox(
                 session, claim,
                 telegram_message_id=telegram_message_id,
+                telegram_file_id=telegram_file_id,
+                telegram_file_unique_id=telegram_file_unique_id,
                 error_code=error_code,
                 retry_after=retry_after,
                 permanent=permanent,
             )
+            if changed:
+                from topsbottg.models import ChatMessageOutbox
+
+                row = await session.get(ChatMessageOutbox, claim.id)
+                terminal = row is not None and row.status in ("sent", "failed")
             await session.commit()
+        if terminal and claim.staging_key and remove_staged_file(staging_dir, claim.staging_key):
+            await release_staging_reference(
+                session_factory, message_id=claim.message_id, key=claim.staging_key,
+            )
 
 
 async def run_worker(
@@ -352,49 +413,68 @@ async def run_worker(
     next_notification = 0.0
     next_invitations = 0.0
     next_chat = 0.0
-    while not stop_event.is_set():
-        now = loop.time()
-        if now >= next_recovery:
+    next_stage_cleanup = 0.0
+    chat_task: asyncio.Task[None] | None = None
+    try:
+        while not stop_event.is_set():
+            now = loop.time()
+            # Keep at most one in-flight Telegram upload. Its network timeout may
+            # be five minutes; payouts, invitations and heartbeat must continue.
+            if chat_task is not None and chat_task.done():
+                chat_task.result()  # Fail the worker if delivery crashes unexpectedly.
+                chat_task = None
+            if now >= next_recovery:
+                async with session_factory() as session:
+                    await recover_stale_sending(session)
+                    await session.commit()
+                next_recovery = loop.time() + 60
+            if now >= next_notification:
+                await deliver_ready_notifications(bot, session_factory, settings)
+                next_notification = loop.time() + 5
+            if now >= next_invitations:
+                await deliver_admin_invitations(bot, session_factory)
+                next_invitations = loop.time() + 5
+            if now >= next_chat and chat_task is None:
+                chat_task = asyncio.create_task(
+                    deliver_chat_outbox(bot, session_factory, settings.chat_staging_dir),
+                    name="chat-outbox-delivery",
+                )
+                next_chat = loop.time() + 1
+            if now >= next_stage_cleanup:
+                await cleanup_staging(settings.chat_staging_dir, session_factory)
+                next_stage_cleanup = loop.time() + 60
             async with session_factory() as session:
-                await recover_stale_sending(session)
+                rows = await claim_pending_recipients(session, limit=max(1, int(settings.broadcast_rate_per_second)))
                 await session.commit()
-            next_recovery = loop.time() + 60
-        if now >= next_notification:
-            await deliver_ready_notifications(bot, session_factory, settings)
-            next_notification = loop.time() + 5
-        if now >= next_invitations:
-            await deliver_admin_invitations(bot, session_factory)
-            next_invitations = loop.time() + 5
-        if now >= next_chat:
-            await deliver_chat_outbox(bot, session_factory)
-            next_chat = loop.time() + 1
-        async with session_factory() as session:
-            rows = await claim_pending_recipients(session, limit=max(1, int(settings.broadcast_rate_per_second)))
-            await session.commit()
-        if not rows:
+            if not rows:
+                if heartbeat is not None:
+                    heartbeat(loop.time())
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(stop_event.wait(), timeout=1)
+                continue
+            payout_ids = {row.payout_id for row in rows}
+            for row in rows:
+                if stop_event.is_set():
+                    break
+                await process_recipient(bot, session_factory, settings, row.id)
+                await asyncio.sleep(1 / max(1, int(settings.broadcast_rate_per_second)))
+            async with session_factory() as session:
+                payouts = await session.scalars(
+                    select(Payout).where(
+                        Payout.id.in_(payout_ids),
+                        Payout.deleted_at.is_(None),
+                        Payout.status.in_(
+                            [PayoutStatus.sending.value, PayoutStatus.sent.value, PayoutStatus.partially_failed.value]
+                        ),
+                    )
+                )
+                for payout in payouts:
+                    await finalize_payout_after_worker(session, payout)
+                await session.commit()
             if heartbeat is not None:
                 heartbeat(loop.time())
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(stop_event.wait(), timeout=1)
-            continue
-        payout_ids = {row.payout_id for row in rows}
-        for row in rows:
-            if stop_event.is_set():
-                break
-            await process_recipient(bot, session_factory, settings, row.id)
-            await asyncio.sleep(1 / max(1, int(settings.broadcast_rate_per_second)))
-        async with session_factory() as session:
-            payouts = await session.scalars(
-                select(Payout).where(
-                    Payout.id.in_(payout_ids),
-                    Payout.deleted_at.is_(None),
-                    Payout.status.in_(
-                        [PayoutStatus.sending.value, PayoutStatus.sent.value, PayoutStatus.partially_failed.value]
-                    ),
-                )
-            )
-            for payout in payouts:
-                await finalize_payout_after_worker(session, payout)
-            await session.commit()
-        if heartbeat is not None:
-            heartbeat(loop.time())
+    finally:
+        if chat_task is not None:
+            if not chat_task.done():
+                chat_task.cancel()
+            await asyncio.gather(chat_task, return_exceptions=True)

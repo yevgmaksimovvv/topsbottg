@@ -33,6 +33,8 @@ server {
         add_header X-Accel-Buffering "no" always;
     }
 
+    client_max_body_size 21m;
+
     location /api/ {
         proxy_pass http://app:8000;
         proxy_http_version 1.1;
