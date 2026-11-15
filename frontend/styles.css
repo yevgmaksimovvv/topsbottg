@@ -886,6 +886,14 @@ textarea::placeholder {
   gap: 12px;
   margin-top: 10px;
 }
+.admins-candidate-card .admins-member-identity {
+  flex: 0 0 auto;
+  width: 100%;
+}
+.admins-candidate-card .admins-empty {
+  padding: 0;
+}
+
 .admins-feedback {
   margin: 8px 0 0;
   font-size: 12px;
