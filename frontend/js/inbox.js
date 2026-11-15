@@ -250,6 +250,7 @@ async function loadMessages({ older = false, refresh = false } = {}) {
     renderHistory();
     if (older) list.scrollTop = oldTop + list.scrollHeight - oldScrollHeight;
     else if (wasAtBottom || !refresh) list.scrollTop = list.scrollHeight;
+    else list.scrollTop = oldTop;
     if (historyAtBottom()) void markRead();
   } catch (error) {
     if (generation === inbox.historyRequest && client === inbox.client)
