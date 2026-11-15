@@ -616,7 +616,10 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
     ) -> dict[str, object]:
         actor_id = await _require_admin(x_telegram_init_data, settings, session)
         if payload.expected_username is not None:
-            require_owner(actor_id, settings.admin_ids_set)
+            try:
+                require_owner(actor_id, settings.admin_ids_set)
+            except AccessDenied as exc:
+                raise HTTPException(status_code=403, detail="owner only") from exc
             async with Bot(token=settings.bot_token) as bot:
                 try:
                     chat = await bot.get_chat(payload.target_telegram_id)
