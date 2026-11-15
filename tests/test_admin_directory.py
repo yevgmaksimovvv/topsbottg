@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-
 from conftest import make_init_data
+
 from topsbottg.access import grant_admin
 from topsbottg.invitations import create_invitation, observe_telegram_profile
 from topsbottg.services import get_or_create_user

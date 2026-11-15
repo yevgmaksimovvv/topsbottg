@@ -161,6 +161,20 @@ async function browserFixture(role, run) {
 
 test("owner can invite, cancel, revoke; modal retains payout state and supports BackButton", async () => {
   await browserFixture("owner", async ({ page, state }) => {
+    const snapshot = await page.evaluate(async () => {
+      const { state } = await import("/miniapp/js/store.js");
+      const button = document.querySelector("#admins-open");
+      return {
+        role: state.adminRole,
+        buttonClass: button?.className,
+        buttonDisplay: button ? getComputedStyle(button).display : null,
+        ancestorHidden: button?.closest("[hidden], .hidden")?.outerHTML.slice(0, 180),
+      };
+    });
+    assert.equal(snapshot.role, "owner",
+      JSON.stringify({ snapshot, requests: state.requests }));
+    assert.equal(snapshot.buttonDisplay, "inline-flex",
+      JSON.stringify({ snapshot, requests: state.requests }));
     await page.locator("#admins-open").waitFor({ state: "visible" });
     await page.evaluate(async () => {
       const { state } = await import("/miniapp/js/store.js");
