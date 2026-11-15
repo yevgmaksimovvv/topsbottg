@@ -3,13 +3,12 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from topsbottg.access import AccessDenied, get_principal, grant_admin_from_invitation, require_owner
 from topsbottg.models import AdminInvitation, AuditLog, User
 
-PROFILE_MAX_AGE = timedelta(days=14)
 INVITATION_TTL = timedelta(hours=48)
 _USERNAME = re.compile(r"[a-zA-Z0-9_]{5,32}\Z")
 
@@ -40,47 +39,15 @@ def _audit(session: AsyncSession, actor_id: int, action: str, invitation_id: int
     )
 
 
-async def observe_telegram_profile(
-    session: AsyncSession, telegram_id: int, username: str | None, first_name: str | None,
-    last_name: str | None,
-) -> bool:
-    """Обновляет ник только у существующей записи; права привязаны к Telegram ID."""
-    name = " ".join(part for part in (first_name, last_name) if part).strip()[:256]
-    result = await session.execute(
-        update(User)
-        .where(User.telegram_id == telegram_id)
-        .values(
-            telegram_username=username[:32] if username else None,
-            telegram_display_name=name or None,
-            telegram_profile_seen_at=datetime.now(UTC),
-        )
-    )
-    return bool(result.rowcount)
-
-
-async def find_candidate(
-    session: AsyncSession, *, username: str | None = None, telegram_id: int | None = None
-) -> User | None:
-    if (username is None) == (telegram_id is None):
-        raise ValueError("Specify exactly one of username or telegram_id.")
-    query = select(User)
-    if username is not None:
-        query = query.where(
-            func.lower(User.telegram_username) == normalize_username(username),
-        )
-    else:
-        if telegram_id is None or telegram_id <= 0:
-            raise ValueError("Telegram ID must be positive.")
-        query = query.where(User.telegram_id == telegram_id)
-    users = list((await session.scalars(query.limit(2))).all())
-    if len(users) > 1:
-        raise InvitationConflict("Имя пользователя неоднозначно. Используйте Telegram ID.")
-    return users[0] if users else None
+async def find_candidate(session: AsyncSession, *, telegram_id: int) -> User | None:
+    """An invitation target must already exist in the registration database."""
+    if telegram_id <= 0:
+        raise ValueError("Telegram ID must be positive.")
+    return await session.scalar(select(User).where(User.telegram_id == telegram_id))
 
 
 async def create_invitation(
     session: AsyncSession, *, actor_id: int, target_id: int, owner_ids: set[int],
-    expected_username: str | None = None,
 ) -> AdminInvitation:
     require_owner(actor_id, owner_ids)
     if target_id <= 0 or target_id in owner_ids:
@@ -92,11 +59,6 @@ async def create_invitation(
     )
     if target is None:
         raise InvitationConflict("Пользователь не найден. Попросите его отправить /start.")
-    if expected_username is not None and (
-        not target.telegram_username
-        or target.telegram_username.lower() != normalize_username(expected_username)
-    ):
-        raise InvitationConflict("Telegram username изменился. Повторите поиск.")
     if await get_principal(session, target_id, owner_ids) is not None:
         raise InvitationConflict("У пользователя уже есть административный доступ.")
 
