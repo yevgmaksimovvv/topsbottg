@@ -78,7 +78,6 @@ async def test_legacy_user_can_be_invited_by_stable_telegram_id(session_factory,
         with pytest.raises(InvitationConflict):
             await create_invitation(
                 session, actor_id=123, target_id=777, owner_ids=settings.admin_ids_set,
-                expected_username="unverified_name",
             )
 
 
