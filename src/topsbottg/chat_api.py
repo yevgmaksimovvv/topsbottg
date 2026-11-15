@@ -9,7 +9,8 @@ import secrets
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from starlette.datastructures import UploadFile
 from sqlalchemy import and_, delete, func, insert, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased

@@ -217,14 +217,13 @@ async def cleanup_staging(root: str | Path, session_factory: async_sessionmaker)
     if not root.exists():
         return 0
     async with session_factory() as session:
-        active = set((await session.scalars(
-            select(ChatAttachment.staging_key)
+        rows = (await session.execute(
+            select(ChatAttachment.staging_key, ChatMessageOutbox.status)
             .join(ChatMessageOutbox, ChatMessageOutbox.message_id == ChatAttachment.chat_message_id)
-            .where(
-                ChatAttachment.staging_key.is_not(None),
-                ChatMessageOutbox.status.in_(("queued", "sending")),
-            )
-        )).all())
+            .where(ChatAttachment.staging_key.is_not(None))
+        )).all()
+    active = {key for key, status in rows if status in ("queued", "sending")}
+    terminal = {key for key, status in rows if status in ("sent", "failed")}
     cutoff = datetime.now(UTC) - ORPHAN_TTL
     deleted = 0
     async with _staging_lock:
@@ -236,7 +235,7 @@ async def cleanup_staging(root: str | Path, session_factory: async_sessionmaker)
                 if item.name in active:
                     continue
                 try:
-                    if datetime.fromtimestamp(item.stat().st_mtime, tz=UTC) > cutoff:
+                    if item.name not in terminal and datetime.fromtimestamp(item.stat().st_mtime, tz=UTC) > cutoff:
                         # Uncommitted uploads might have no database row yet.
                         continue
                     item.unlink()
