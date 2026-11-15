@@ -331,6 +331,8 @@ test("Inbox: history, read marker, older messages, incoming refresh, send/retry 
     assert.deepEqual(sent.requests[0].send, sent.requests[1].send,
       "An uncertain response must be retried with the original key and payload");
     assert.equal(sent.accepted.length, 1, "Backend accepted only one message");
+    await page.waitForFunction(() => [...document.querySelectorAll("#inbox-history .inbox-message")]
+      .filter((node) => node.textContent.includes("Первый ответ")).length === 1);
     assert.equal(await page.locator("#inbox-history .inbox-message").filter({ hasText: "Первый ответ" }).count(), 1);
     assert.equal(await page.locator("#inbox-history .inbox-message").filter({ hasText: "Первый ответ" }).locator("[data-inbox-retry]").count(), 0);
     assert.equal(await page.locator("#inbox-history [data-inbox-retry='54']").innerText(),
@@ -462,6 +464,8 @@ test("Failed retry remains one bubble after a second timeout and keeps its origi
     assert.deepEqual(state.attempts[0], state.attempts[1]);
     assert.deepEqual(state.attempts[1], state.attempts[2]);
     assert.equal(state.records, 1);
+    await page.waitForFunction(() => [...document.querySelectorAll("#inbox-history .inbox-message")]
+      .filter((node) => node.textContent.includes("Три попытки — одно сообщение")).length === 1);
     assert.equal(await bubble.count(), 1);
     assert.equal(await bubble.locator("[data-inbox-retry]").count(), 0);
   });
