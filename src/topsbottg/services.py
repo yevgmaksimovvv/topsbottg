@@ -629,6 +629,7 @@ async def list_users(
     search: str | None = None,
     has_payment_profile: bool | None = None,
     study_group_id: int | None = None,
+    registered_only: bool = False,
     limit: int = 50,
     offset: int = 0,
 ) -> list[tuple[User, PaymentProfile | None]]:
@@ -643,6 +644,8 @@ async def list_users(
         )
     )
     stmt = select(User.id).order_by(func.lower(User.full_name), User.id)
+    if registered_only:
+        stmt = stmt.where(User.registration_completed_at.is_not(None))
     if study_group_id is not None:
         stmt = stmt.where(User.study_group_id == study_group_id)
     if search:
