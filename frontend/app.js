@@ -1,8 +1,8 @@
-export const FRONTEND_BUILD = "20261115-inbox-shell";
+export const FRONTEND_BUILD = "20261115-inbox-api";
 
 window.__TOPSBOTTG_FRONTEND_BUILD__ = FRONTEND_BUILD;
 console.info("[topsbottg] frontend build", window.__TOPSBOTTG_FRONTEND_BUILD__);
 
-import { bootstrap } from "./js/bootstrap.js?v=20261115-inbox-shell";
+import { bootstrap } from "./js/bootstrap.js?v=20261115-inbox-api";
 
 bootstrap();
