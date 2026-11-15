@@ -12,6 +12,12 @@ export function createInboxApiClient(request) {
       if (cursor != null) params.set("cursor", cursor);
       return request(BASE + "?" + params.toString(), { signal });
     },
+    users({ search = "", study_group_id = "", offset = 0, limit = 50, signal } = {}) {
+      const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+      if (search.trim()) params.set("search", search.trim());
+      if (study_group_id) params.set("study_group_id", String(study_group_id));
+      return request("/admin/users?" + params.toString(), { signal });
+    },
     open(user_id, { signal } = {}) {
       return request(BASE, {
         method: "POST",
