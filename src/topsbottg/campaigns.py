@@ -6,7 +6,7 @@ import base64
 import binascii
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert

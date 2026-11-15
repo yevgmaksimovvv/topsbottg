@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -28,7 +27,6 @@ from topsbottg.models import (
     StudyGroup,
     User,
 )
-from topsbottg.worker import deliver_chat_outbox
 
 
 @pytest.fixture
@@ -49,23 +47,24 @@ async def postgres_campaign(settings):
             await connection.run_sync(Base.metadata.create_all)
         factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
         app = create_app(settings.model_copy(update={"database_url": url}), factory)
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            async with factory() as session:
-                a = StudyGroup(display_code="Группа A", normalized_code="GROUP-A")
-                b = StudyGroup(display_code="Группа B", normalized_code="GROUP-B")
-                session.add_all([a, b])
-                await session.flush()
-                users = [
-                    User(
-                        telegram_id=88000 + index, full_name=f"Recipient {index}",
-                        study_group_id=a.id if index <= 10 else b.id if index <= 19 else None,
-                        registration_completed_at=datetime.now(UTC),
-                    )
-                    for index in range(1, 21)
-                ]
-                session.add_all(users)
-                await session.commit()
-                yield client, factory, [u.id for u in users], a.id, b.id
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client, factory() as session:
+            a = StudyGroup(display_code="Группа A", normalized_code="GROUP-A")
+            b = StudyGroup(display_code="Группа B", normalized_code="GROUP-B")
+            session.add_all([a, b])
+            await session.flush()
+            users = [
+                User(
+                    telegram_id=88000 + index, full_name=f"Recipient {index}",
+                    study_group_id=a.id if index <= 10 else b.id if index <= 19 else None,
+                    registration_completed_at=datetime.now(UTC),
+                )
+                for index in range(1, 21)
+            ]
+            session.add_all(users)
+            await session.commit()
+            yield client, factory, [u.id for u in users], a.id, b.id
     finally:
         if engine is not None:
             await engine.dispose()
