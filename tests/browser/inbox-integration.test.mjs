@@ -481,7 +481,7 @@ test("New dialog search is paginated and isolated from payout selection", async 
     assert.ok(await page.locator("#inbox-new-users").getByText("Анна Петрова").count() === 1);
     await page.locator("#inbox-new-group").selectOption("");
     await page.locator("#inbox-new-search").fill("Новый Пользователь");
-    await page.locator("#inbox-new-users").getByText("Новый Пользователь").waitFor();
+    await page.waitForFunction(() => document.querySelectorAll("#inbox-new-users .inbox-new-user").length === 1);
     assert.equal(await page.locator(".inbox-new-user").count(), 1);
     await page.locator("[data-inbox-new-user='3']").click();
     await page.locator("#inbox-title").getByText("Новый Пользователь").waitFor();
