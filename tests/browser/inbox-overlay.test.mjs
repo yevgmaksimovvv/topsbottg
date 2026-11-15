@@ -315,7 +315,8 @@ test("Inbox: history, read marker, older messages, incoming refresh, send/retry 
     assert.match(await page.locator("#inbox-history").innerText(), /В очереди/);
     assert.match(await page.locator("#inbox-history").innerText(), /Отправляется/);
     assert.match(await page.locator("#inbox-history").innerText(), /Ошибка отправки/);
-    assert.match(await page.locator("#inbox-history").innerText(), /Админ · 456/);
+    assert.match(await page.locator("#inbox-history").innerText(), /Администратор 2/);
+    assert.doesNotMatch(await page.locator("#inbox-history").innerText(), /Админ · 456/);
     assert.match(await page.locator("#inbox-history .inbox-message-reply").first().innerText(), /Длинное сообщение/);
     assert.equal(await page.locator(".inbox-read-marker").count(), 0);
     assert.equal(await page.locator("#inbox-refresh").count(), 0);
@@ -515,7 +516,14 @@ test("Telegram-style bubbles and composer remain readable across mobile and desk
     assert.equal(await page.locator("#inbox-refresh").count(), 0);
     assert.equal(await page.locator(".inbox-history-tools, .inbox-read-marker").count(), 0);
     assert.equal(await page.locator(".inbox-message-reply").count(), 1);
-    assert.equal(await page.locator(".inbox-message-author").count(), 3);
+    assert.deepEqual(await page.locator(".inbox-message-author").allTextContents(), [
+      "Администратор 1", "Администратор 2", "Администратор 1",
+    ]);
+    assert.deepEqual(await page.locator(".inbox-message-author").evaluateAll((nodes) =>
+      nodes.map((node) => node.title)), [
+      "Telegram ID: 123", "Telegram ID: 456", "Telegram ID: 123",
+    ]);
+    assert.doesNotMatch(await page.locator("#inbox-messages").innerText(), /Админ · (123|456)/);
     assert.equal(await page.locator('[data-inbox-reply="51"]').getAttribute("aria-label"), "Ответить на сообщение");
     assert.equal(await page.locator('[data-inbox-retry="54"]').innerText(), "Отправить заново");
 
@@ -574,6 +582,18 @@ test("Telegram-style bubbles and composer remain readable across mobile and desk
     await page.screenshot({ path: resolve(evidence, "inbox-new-dialog-390.png") });
     await page.locator("#inbox-new-users [data-inbox-new-user='3']").click();
     await page.locator("#inbox-history-status").getByText("Сообщений пока нет.").waitFor();
+    assert.equal(await page.locator("#inbox-text").inputValue(), "");
+    assert.equal(await page.locator("#inbox-text").evaluate((node) =>
+      node.getBoundingClientRect().height), 44,
+      "An empty chat must reset the previous conversation's expanded composer");
+    assert.equal(await page.locator("#inbox-send").evaluate((node) =>
+      node.getBoundingClientRect().height), 44);
     await page.screenshot({ path: resolve(evidence, "inbox-empty-dialog-390.png") });
+
+    await page.locator("#inbox-back").click();
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.locator("#inbox-history [data-inbox-message='54']").waitFor();
+    assert.equal(await page.locator("#inbox-text").evaluate((node) =>
+      node.getBoundingClientRect().height), 44);
   });
 });
