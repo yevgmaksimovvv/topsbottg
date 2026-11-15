@@ -75,6 +75,7 @@ def _route_template(path: str) -> str:
                     else "{telegram_id}" if value == "10" and parts[index - 1] == "admin-grants"
                     else "{invitation_id}" if value == "10" and parts[index - 1] == "admin-invitations"
                     else "{conversation_id}" if value == "10" and parts[index - 1] == "conversations"
+                    else "{message_id}" if value == "10" and parts[index - 1] == "chat-messages"
                     else "{payout_id}" if value == "10" and parts[index - 1] == "payouts"
                     else "{recipient_id}" if value == "20" and parts[index - 1] == "recipients"
                     else value for index, value in enumerate(parts))
