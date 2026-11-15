@@ -19,11 +19,11 @@ let loadingSearch = false;
 let memberError = "";
 let searchError = "";
 
-const nameFor = (user) => user?.username
-  ? `@${user.username.replace(/^@/, "")}`
+const nameFor = (user) => (user?.full_name && user.full_name !== "Без ФИО")
+  ? user.full_name
   : (user?.display_name && user.display_name !== "Без ФИО"
       ? user.display_name
-      : "Имя не указано");
+      : user?.username ? `@${user.username.replace(/^@/, "")}` : "Имя не указано");
 
 function renderMembers() {
   const status = $("admins-status");
