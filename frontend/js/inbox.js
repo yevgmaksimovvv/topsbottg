@@ -1,5 +1,5 @@
 import { SEARCH_DEBOUNCE_MS } from "./constants.js";
-import { state } from "./store.js";
+import { setToast, state } from "./store.js";
 import { telegramWebApp } from "./telegram.js";
 import { escapeHtml } from "./utils.js";
 
@@ -10,6 +10,13 @@ const inbox = {
   listRequest: 0,
   listLoading: false,
   listError: "",
+  listController: null,
+  summaryController: null,
+  summaryRequest: 0,
+  historyController: null,
+  openController: null,
+  openRequest: 0,
+  readController: null,
   readingId: null,
   query: "",
   group: "",
@@ -20,6 +27,7 @@ const inbox = {
   historyLoading: false,
   historyError: "",
   readThrough: null,
+  seenIncoming: new Set(),
   replyTo: null,
   unread: 0,
   searchTimer: null,
@@ -60,6 +68,33 @@ function status(nodeId, message) {
   if (node) node.textContent = message || "";
 }
 
+function isAbort(error) {
+  return error?.name === "AbortError";
+}
+
+function handleRequestError(error) {
+  if (error?.status === 401 || error?.status === 403) {
+    disableInboxAccess();
+    return true;
+  }
+  return false;
+}
+
+function cancelRequests() {
+  for (const prop of ["listController", "summaryController", "historyController", "openController", "readController"]) {
+    inbox[prop]?.abort();
+    inbox[prop] = null;
+  }
+}
+
+export function disableInboxAccess() {
+  if (!inbox.client) return;
+  configureInboxClient(null);
+  state.adminRole = null;
+  el("admins-open")?.classList.add("hidden");
+  setToast("Доступ к переписке прекращён. Откройте Mini App заново после проверки прав.", "warning");
+}
+
 function paintBadge() {
   const badge = el("inbox-unread");
   if (!badge) return;
@@ -69,21 +104,26 @@ function paintBadge() {
 
 async function loadSummary() {
   if (!inbox.client) return;
+  const requestId = ++inbox.summaryRequest;
+  inbox.summaryController?.abort();
+  const controller = new AbortController();
+  inbox.summaryController = controller;
   const client = inbox.client;
   try {
-    const response = await client.summary();
-    if (client !== inbox.client) return;
+    const response = await client.summary({ signal: controller.signal });
+    if (requestId !== inbox.summaryRequest || client !== inbox.client || controller.signal.aborted) return;
     inbox.unread = Math.max(0, Number(response?.unread_count) || 0);
     paintBadge();
-  } catch {
-    if (client === inbox.client) paintBadge();
+  } catch (error) {
+    if (!isAbort(error) && requestId === inbox.summaryRequest) handleRequestError(error);
+  } finally {
+    if (inbox.summaryController === controller) inbox.summaryController = null;
   }
 }
 
 function renderGroups() {
   const control = el("inbox-group");
   if (!control) return;
-  const previous = control.value;
   control.replaceChildren(new Option("Все группы", ""));
   for (const group of state.studyGroups) {
     control.add(new Option(group.code, String(group.id)));
@@ -115,6 +155,7 @@ function renderConversations() {
   const more = el("inbox-more");
   more?.classList.toggle("hidden", !inbox.nextCursor);
   if (more) more.disabled = inbox.listLoading;
+  el("inbox-list-retry")?.classList.toggle("hidden", !inbox.listError);
   status("inbox-list-status", inbox.listLoading
     ? "Загружаем диалоги…"
     : inbox.listError || (inbox.conversations.length ? "" : "Диалогов пока нет."));
@@ -123,6 +164,9 @@ function renderConversations() {
 async function loadConversations(reset = false) {
   if (!inbox.client || (inbox.listLoading && !reset)) return;
   const generation = ++inbox.listRequest;
+  inbox.listController?.abort();
+  const controller = new AbortController();
+  inbox.listController = controller;
   const client = inbox.client;
   const query = inbox.query;
   const group = inbox.group;
@@ -135,18 +179,25 @@ async function loadConversations(reset = false) {
   inbox.listError = "";
   renderConversations();
   try {
-    const response = await client.conversations({ query, study_group_id: group, cursor, limit: 50 });
-    if (generation !== inbox.listRequest || client !== inbox.client || !isOpen()) return;
+    const response = await client.conversations({ query, study_group_id: group, cursor, limit: 50, signal: controller.signal });
+    if (generation !== inbox.listRequest || controller.signal.aborted || client !== inbox.client || !isOpen()) return;
     const byId = new Map((reset ? [] : inbox.conversations).map((item) => [item.id, item]));
     for (const item of response.items || []) byId.set(item.id, item);
     inbox.conversations = [...byId.values()];
     inbox.nextCursor = response.next_cursor ?? null;
+    const current = inbox.conversations.find((item) => Number(item.id) === Number(inbox.current?.id));
+    if (current) {
+      inbox.current.unread_count = current.unread_count;
+      renderHistory();
+      void markRead();
+    }
   } catch (error) {
-    if (generation === inbox.listRequest && client === inbox.client)
-      inbox.listError = error?.message || "Не удалось загрузить диалоги.";
-    return;
+    if (generation === inbox.listRequest && client === inbox.client && !isAbort(error)) {
+      if (!handleRequestError(error)) inbox.listError = error?.message || "Не удалось загрузить диалоги.";
+    }
   } finally {
-    if (generation === inbox.listRequest) {
+    if (inbox.listController === controller) inbox.listController = null;
+    if (generation === inbox.listRequest && client === inbox.client) {
       inbox.listLoading = false;
       renderConversations();
     }
@@ -155,8 +206,11 @@ async function loadConversations(reset = false) {
 
 function showList() {
   ++inbox.historyRequest;
+  inbox.historyController?.abort();
+  inbox.readController?.abort();
   inbox.current = null;
   inbox.messages = [];
+  inbox.seenIncoming.clear();
   inbox.replyTo = null;
   el("inbox-list-screen").hidden = false;
   el("inbox-history-screen").hidden = true;
@@ -195,7 +249,7 @@ function renderHistory({ preserveScroll = false } = {}) {
   const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 75;
   const unread = Math.max(0, Number(inbox.current?.unread_count) || 0);
   const inbound = inbox.messages.filter((message) => message.direction === "incoming");
-  const unreadStart = unread > 0 ? inbound.at(-Math.min(unread, inbound.length))?.id : null;
+  const unreadStart = unread > 0 && inbound.length >= unread ? inbound.at(-unread)?.id : null;
   list.innerHTML = inbox.messages.map((message) => {
     const outgoing = message.direction === "outgoing";
     const delivery = outgoing && message.delivery_status ? message.delivery_status : null;
@@ -213,7 +267,8 @@ function renderHistory({ preserveScroll = false } = {}) {
       (delivery ? '<span class="' + (delivery === "failed" ? "inbox-failed" : "") + '">' + text(statusText[delivery] || delivery) + '</span>' : "") +
       '</span>' +
       '<span class="inbox-message-actions"><button type="button" data-inbox-reply="' + text(message.id) + '">Ответить</button>' +
-      (delivery === "failed" && message._sendRequest ? '<button type="button" data-inbox-retry="' + text(message.id) + '">Повторить</button>' : "") +
+      (delivery === "failed" ? '<button type="button" data-inbox-retry="' + text(message.id) + '">' +
+        (message._sendRequest ? "Повторить" : "Отправить заново") + '</button>' : "") +
       '</span></article>' +
       (inbox.readThrough === message.id ? '<div class="inbox-read-marker">Прочитано до этого сообщения</div>' : "");
   }).join("");
@@ -230,6 +285,9 @@ function renderHistory({ preserveScroll = false } = {}) {
 async function loadMessages({ older = false, refresh = false } = {}) {
   if (!inbox.client || !inbox.current || (inbox.historyLoading && older)) return;
   const generation = ++inbox.historyRequest;
+  inbox.historyController?.abort();
+  const controller = new AbortController();
+  inbox.historyController = controller;
   const client = inbox.client;
   const conversationId = inbox.current.id;
   const before = older ? inbox.historyCursor : null;
@@ -242,22 +300,32 @@ async function loadMessages({ older = false, refresh = false } = {}) {
   const oldTop = list.scrollTop;
   const wasAtBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 75;
   try {
-    const response = await client.messages(conversationId, { before, limit: 50 });
-    if (generation !== inbox.historyRequest || client !== inbox.client || inbox.current?.id !== conversationId || !isOpen()) return;
-    const byId = new Map((older || refresh ? inbox.messages : []).map((item) => [item.id, item]));
-    for (const item of response.items || []) byId.set(item.id, item);
+    const response = await client.messages(conversationId, { before, limit: 50, signal: controller.signal });
+    if (generation !== inbox.historyRequest || controller.signal.aborted || client !== inbox.client || inbox.current?.id !== conversationId || !isOpen()) return;
+    const page = response.items || [];
+    const continuous = !refresh || page.some((item) =>
+      inbox.messages.some((existing) => existing.id === item.id));
+    const preserved = older || (refresh && continuous) ? inbox.messages : [];
+    const byId = new Map(preserved.map((item) => [item.id, item]));
+    for (const item of page) byId.set(item.id, item);
     inbox.messages = [...byId.values()].sort((a, b) => Number(a.id) - Number(b.id));
-    if (older || !refresh) inbox.historyCursor = response.next_cursor ?? null;
+    if (refresh && !continuous) {
+      inbox.seenIncoming.clear();
+      inbox.current.unread_count = null;
+    }
+    if (older || !refresh || !continuous) inbox.historyCursor = response.next_cursor ?? null;
     renderHistory();
     if (older) list.scrollTop = oldTop + list.scrollHeight - oldScrollHeight;
     else if (wasAtBottom || !refresh) list.scrollTop = list.scrollHeight;
     else list.scrollTop = oldTop;
-    if (historyAtBottom()) void markRead();
+    void markRead();
   } catch (error) {
-    if (generation === inbox.historyRequest && client === inbox.client)
-      inbox.historyError = error?.message || "Не удалось загрузить сообщения.";
+    if (generation === inbox.historyRequest && client === inbox.client && !isAbort(error)) {
+      if (!handleRequestError(error)) inbox.historyError = error?.message || "Не удалось загрузить сообщения.";
+    }
   } finally {
-    if (generation === inbox.historyRequest) {
+    if (inbox.historyController === controller) inbox.historyController = null;
+    if (generation === inbox.historyRequest && client === inbox.client) {
       inbox.historyLoading = false;
       status("inbox-history-status", inbox.historyError || (inbox.messages.length ? "" : "Сообщений пока нет."));
       el("inbox-older").disabled = false;
@@ -266,37 +334,73 @@ async function loadMessages({ older = false, refresh = false } = {}) {
   }
 }
 
-function historyAtBottom() {
+function visibleIncomingIds() {
   const history = el("inbox-history");
-  return Boolean(isOpen() && !el("inbox-history-screen")?.hidden && history &&
-    history.scrollHeight - history.scrollTop - history.clientHeight < 50);
+  if (!isOpen() || el("inbox-history-screen")?.hidden ||
+      document.visibilityState !== "visible" || !document.hasFocus() || !history) return [];
+  const viewport = history.getBoundingClientRect();
+  if (!viewport.width || !viewport.height) return [];
+  const visible = [];
+  for (const message of history.querySelectorAll(".inbox-message.is-incoming")) {
+    const rect = message.getBoundingClientRect();
+    const visibleHeight = Math.min(rect.bottom, viewport.bottom) - Math.max(rect.top, viewport.top);
+    if (visibleHeight >= Math.min(24, rect.height / 2)) {
+      const id = Number(message.dataset.inboxMessage);
+      if (Number.isInteger(id) && id > 0) visible.push(id);
+    }
+  }
+  return visible;
 }
 
 async function markRead() {
-  if (!inbox.client || !inbox.current || !historyAtBottom()) return;
-  const last = [...inbox.messages].reverse().find((message) => message.direction === "incoming" && Number.isInteger(Number(message.id)));
-  if (!last || Number(last.id) <= Number(inbox.readThrough || 0) || Number(last.id) <= Number(inbox.readingId || 0)) return;
+  if (!inbox.client || !inbox.current) return;
+  const visible = visibleIncomingIds();
+  if (!visible.length) return;
+  for (const id of visible) inbox.seenIncoming.add(id);
+  const unreadCount = inbox.current.unread_count;
+  if (!Number.isInteger(unreadCount) || unreadCount <= 0) return;
+  const incoming = inbox.messages.filter((message) => message.direction === "incoming" &&
+    Number.isInteger(message.id)).map((message) => message.id);
+  // A monotone marker cannot skip any unread message, even one on an unloaded page.
+  if (incoming.length < unreadCount) return;
+  let lastSeen = null;
+  for (const id of incoming.slice(-unreadCount)) {
+    if (!inbox.seenIncoming.has(id)) break;
+    lastSeen = id;
+  }
+  if (!lastSeen || lastSeen <= Number(inbox.readThrough || 0) ||
+      lastSeen <= Number(inbox.readingId || 0)) return;
   const client = inbox.client;
   const id = inbox.current.id;
-  inbox.readingId = last.id;
+  const controller = new AbortController();
+  inbox.readController?.abort();
+  inbox.readController = controller;
+  inbox.readingId = lastSeen;
   try {
-    const result = await client.read(id, last.id);
-    if (client !== inbox.client || inbox.current?.id !== id) return;
+    const result = await client.read(id, lastSeen, { signal: controller.signal });
+    if (controller.signal.aborted || client !== inbox.client || inbox.current?.id !== id) return;
     if (Number(result.last_read_message_id) < Number(inbox.readThrough || 0)) return;
     inbox.readThrough = result.last_read_message_id;
     inbox.current.unread_count = result.unread_count;
     renderHistory();
     void loadSummary();
-  } catch {
-    // A read marker may be retried on the next refresh or scroll to bottom.
+  } catch (error) {
+    if (!isAbort(error)) handleRequestError(error);
   } finally {
-    if (inbox.readingId === last.id) inbox.readingId = null;
+    if (inbox.readController === controller) inbox.readController = null;
+    if (inbox.readingId === lastSeen) inbox.readingId = null;
   }
 }
 
 async function openConversation(conversation) {
+  ++inbox.openRequest;
+  inbox.openController?.abort();
+  inbox.openingUser = false;
+  inbox.historyController?.abort();
+  inbox.readController?.abort();
   inbox.current = conversation;
   inbox.messages = [];
+  inbox.seenIncoming.clear();
   inbox.historyCursor = null;
   inbox.readThrough = null;
   inbox.readingId = null;
@@ -317,18 +421,26 @@ async function openForUser(userId) {
   if (!inbox.client || inbox.openingUser) return;
   inbox.openingUser = true;
   const user = state.users.find((item) => Number(item.id) === Number(userId));
+  const generation = ++inbox.openRequest;
+  inbox.openController?.abort();
+  const controller = new AbortController();
+  inbox.openController = controller;
+  const client = inbox.client;
   try {
     if (!isOpen()) openInbox();
-    const result = await inbox.client.open(Number(userId));
-    if (!isOpen()) return;
+    const result = await client.open(Number(userId), { signal: controller.signal });
+    if (generation !== inbox.openRequest || controller.signal.aborted || client !== inbox.client || !isOpen()) return;
     const existing = inbox.conversations.find((item) => Number(item.id) === Number(result.conversation_id));
     await openConversation(existing || { id: result.conversation_id,
       user: { id: userId, full_name: user?.full_name, study_group_name: user?.study_group?.code },
       unread_count: 0 });
   } catch (error) {
-    status("inbox-list-status", error?.message || "Не удалось открыть диалог.");
+    if (!isAbort(error) && generation === inbox.openRequest && client === inbox.client &&
+        !handleRequestError(error))
+      status("inbox-list-status", error?.message || "Не удалось открыть диалог.");
   } finally {
-    inbox.openingUser = false;
+    if (inbox.openController === controller) inbox.openController = null;
+    if (generation === inbox.openRequest) inbox.openingUser = false;
   }
 }
 
@@ -352,10 +464,10 @@ async function deliverPending(pending) {
     inbox.messages.sort((a, b) => Number(a.id) - Number(b.id));
     status("inbox-compose-status", "");
     renderHistory();
-  } catch {
-    if (client === inbox.client && inbox.current?.id === id) {
+  } catch (error) {
+    if (client === inbox.client && inbox.current?.id === id && !handleRequestError(error)) {
       pending.delivery_status = "failed";
-      status("inbox-compose-status", "Не удалось отправить. Сообщение можно повторить.");
+      status("inbox-compose-status", error?.message || "Не удалось отправить. Сообщение можно повторить.");
       renderHistory();
     }
   } finally {
@@ -419,6 +531,10 @@ function closeInbox() {
 function cleanup() {
   ++inbox.listRequest;
   ++inbox.historyRequest;
+  ++inbox.summaryRequest;
+  ++inbox.openRequest;
+  cancelRequests();
+  inbox.openingUser = false;
   clearTimeout(inbox.searchTimer);
   const back = telegramWebApp()?.BackButton;
   if (inbox.backHandler) back?.offClick?.(inbox.backHandler);
@@ -436,6 +552,20 @@ export function configureInboxClient(client) {
   if (isOpen()) closeInbox();
   inbox.client = client;
   inbox.unread = 0;
+  if (!client) {
+    cancelRequests();
+    ++inbox.summaryRequest;
+    inbox.conversations = [];
+    inbox.messages = [];
+    inbox.seenIncoming.clear();
+    inbox.current = null;
+    inbox.nextCursor = null;
+    inbox.historyCursor = null;
+    inbox.listError = "";
+    inbox.historyError = "";
+    el("inbox-conversations")?.replaceChildren();
+    el("inbox-history")?.replaceChildren();
+  }
   paintBadge();
   el("inbox-open")?.classList.toggle("hidden", !client);
   const list = el("users-list");
@@ -466,6 +596,7 @@ export function bindInbox() {
     void loadConversations(true);
   });
   el("inbox-more")?.addEventListener("click", () => void loadConversations());
+  el("inbox-list-retry")?.addEventListener("click", () => void loadConversations(true));
   el("inbox-older")?.addEventListener("click", () => void loadMessages({ older: true }));
   el("inbox-refresh")?.addEventListener("click", () => void loadMessages({ refresh: true }));
   el("inbox-conversations")?.addEventListener("click", (event) => {
@@ -487,15 +618,22 @@ export function bindInbox() {
     }
     if (retry) {
       const message = inbox.messages.find((item) => String(item.id) === retry.dataset.inboxRetry);
-      if (message?._sendRequest && message.delivery_status === "failed") void deliverPending(message);
+      if (message?.delivery_status === "failed") {
+        if (message._sendRequest) void deliverPending(message);
+        else if (message.text) sendMessage(message.text);
+      }
     }
   });
   el("inbox-history")?.addEventListener("scroll", (event) => {
     const list = event.target;
     if (list.scrollTop < 48 && inbox.historyCursor && !inbox.historyLoading)
       void loadMessages({ older: true });
-    if (historyAtBottom()) void markRead();
+    void markRead();
   }, { passive: true });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void markRead();
+  });
+  window.addEventListener("focus", () => void markRead());
   el("inbox-reply")?.addEventListener("click", (event) => {
     if (!event.target.closest("#inbox-clear-reply")) return;
     inbox.replyTo = null;
@@ -511,4 +649,15 @@ export function bindInbox() {
     const write = event.target.closest("[data-inbox-write]");
     if (write && inbox.client) void openForUser(write.dataset.inboxWrite);
   });
+}
+
+export function refreshInboxFromEvent(conversationId = null, { reconnect = false } = {}) {
+  if (!inbox.client) return;
+  void loadSummary();
+  if (!isOpen()) return;
+  void loadConversations(true);
+  if (el("inbox-list-screen")?.hidden && inbox.current &&
+      (reconnect || conversationId == null || Number(inbox.current.id) === Number(conversationId))) {
+    void loadMessages({ refresh: true });
+  }
 }

@@ -69,6 +69,7 @@ async function withPage(run) {
         data = [{ id: 9, code: "Г-9" }];
       else if (path === "/api/admin/payouts" || path === "/api/admin/admin-directory" || path === "/api/admin/admin-invitations")
         data = [];
+      else if (path === "/api/admin/conversations/summary") data = { unread_count: 0 };
       else if (path === "/api/admin/events-token")
         data = { token: "fixture", expires_in: 60 };
       else if (path === "/api/admin/events")
@@ -83,8 +84,8 @@ async function withPage(run) {
     await page.waitForFunction(async () => (await import("/miniapp/js/store.js")).state.adminRole === "owner");
     await run({ page, requests });
     assert.deepEqual(errors, []);
-    assert.equal(requests.some((request) => /\/conversations|\/chat-messages/.test(request)), false,
-      "Inbox fixture must not call absent backend API");
+    assert.equal(requests.some((request) => /\/conversations\/\d+\/messages/.test(request)), false,
+      "Fixture must not send real conversation messages");
   } finally {
     await browser.close();
     if (server.listening) await new Promise((done) => server.close(done));
@@ -116,9 +117,9 @@ async function installFixture(page, unread = 3) {
     ];
     const conversations = [
       { id: 11, user: { id: 1, full_name: "Анна Петрова", study_group_id: 9, study_group_name: "Г-9" },
-        last_message: messages[3], last_message_at: date, unread_count: unreadCount },
+        last_message: messages[3], last_message_at: date, unread_count: Math.min(unreadCount, 1) },
       { id: 12, user: { id: 2, full_name: "Иван Иванов", study_group_id: null, study_group_name: null },
-        last_message: { text: "Привет" }, last_message_at: date, unread_count: 1 },
+        last_message: { text: "Привет" }, last_message_at: date, unread_count: Math.max(0, unreadCount - 1) },
     ];
     const state = { unread: unreadCount, conversations, messages, log: [],
       sendFailures: 1, accepted: new Map(), opened: [], read: [], newId: 60, delayed: "Анна" };
@@ -193,9 +194,9 @@ async function installFixture(page, unread = 3) {
   await page.locator("#inbox-open").waitFor({ state: "visible" });
 }
 
-test("Inbox stays hidden in production and preserves four payout tabs", async () => {
+test("Inbox appears after admin authorization and preserves four payout tabs", async () => {
   await withPage(async ({ page, requests }) => {
-    assert.equal(await page.locator("#inbox-open").isVisible(), false);
+    await page.locator("#inbox-open").waitFor({ state: "visible" });
     assert.equal(await page.locator("#inbox-dialog").isVisible(), false);
     assert.deepEqual((await page.locator("[data-mobile-view]").allTextContents()).map((name) => name.trim()),
       ["Создать", "Выбор", "Получатели", "История"]);
@@ -203,8 +204,9 @@ test("Inbox stays hidden in production and preserves four payout tabs", async ()
       await page.locator('[data-mobile-view="' + tab + '"]').click();
       assert.equal(await page.locator('[data-screen="' + tab + '"]').isVisible(), true);
     }
-    assert.equal(requests.some((req) => req.includes("/conversations")), false);
-    assert.equal(await page.locator("[data-inbox-write]").count(), 0);
+    assert.equal(requests.some((req) => req.includes("/conversations/summary")), true);
+    await page.waitForFunction(() => document.querySelectorAll("[data-inbox-write]").length === 3);
+    assert.equal(await page.locator("[data-inbox-write]").count(), 3);
   });
 });
 
@@ -329,10 +331,12 @@ test("Inbox: history, read marker, older messages, incoming refresh, send/retry 
     assert.deepEqual(sent.requests[0].send, sent.requests[1].send,
       "An uncertain response must be retried with the original key and payload");
     assert.equal(sent.accepted.length, 1, "Backend accepted only one message");
+    await page.waitForFunction(() => [...document.querySelectorAll("#inbox-history .inbox-message")]
+      .filter((node) => node.textContent.includes("Первый ответ")).length === 1);
     assert.equal(await page.locator("#inbox-history .inbox-message").filter({ hasText: "Первый ответ" }).count(), 1);
     assert.equal(await page.locator("#inbox-history .inbox-message").filter({ hasText: "Первый ответ" }).locator("[data-inbox-retry]").count(), 0);
-    assert.equal(await page.locator("#inbox-history [data-inbox-retry='54']").count(), 0,
-      "Failed server messages without an original key must not be blindly re-sent");
+    assert.equal(await page.locator("#inbox-history [data-inbox-retry='54']").innerText(),
+      "Отправить заново", "A server-side failure needs an explicit new send");
 
     await page.evaluate(() => {
       const fixture = window.__inboxFixture;
@@ -394,6 +398,8 @@ test("Unread stays unread when history is scrolled up during refresh", async () 
     await page.locator("#inbox-history [data-inbox-message='54']").waitFor();
     await page.locator("#inbox-older").click();
     await page.locator("#inbox-history [data-inbox-message='2']").waitFor();
+    await page.locator("#inbox-history [data-inbox-message='51']").scrollIntoViewIfNeeded();
+    await page.evaluate(() => document.getElementById("inbox-history").dispatchEvent(new Event("scroll")));
     await page.waitForFunction(() => window.__inboxFixture.read.length > 0);
     const scrollHeight = await page.evaluate(() => {
       const list = document.getElementById("inbox-history");
@@ -458,6 +464,8 @@ test("Failed retry remains one bubble after a second timeout and keeps its origi
     assert.deepEqual(state.attempts[0], state.attempts[1]);
     assert.deepEqual(state.attempts[1], state.attempts[2]);
     assert.equal(state.records, 1);
+    await page.waitForFunction(() => [...document.querySelectorAll("#inbox-history .inbox-message")]
+      .filter((node) => node.textContent.includes("Три попытки — одно сообщение")).length === 1);
     assert.equal(await bubble.count(), 1);
     assert.equal(await bubble.locator("[data-inbox-retry]").count(), 0);
   });

@@ -63,6 +63,8 @@ for (const [width, height] of [[320, 740], [390, 844], [768, 900]]) {
           result = [];
         } else if (request.method() === "GET" && path === "/api/admin/users") {
           result = { items: [], limit: 50, offset: 0, has_more: false };
+        } else if (request.method() === "GET" && path === "/api/admin/conversations/summary") {
+          result = { unread_count: 0 };
         } else if (request.method() === "GET" && path === "/api/admin/me") {
           result = { telegram_user_id: 123, is_admin: true, role: "owner" };
         } else if (request.method() === "GET" && path === "/api/admin/events") {

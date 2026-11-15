@@ -15,6 +15,7 @@ import {
   renderPayouts,
 } from "./render-common.js";
 import { renderUsers } from "./render-users.js";
+import { disableInboxAccess, refreshInboxFromEvent } from "./inbox.js";
 import { renderRecipients } from "./render-recipients.js";
 import {
   createPayout as renderCreatePayout,
@@ -28,7 +29,10 @@ const FORBIDDEN_ERROR = "Недостаточно прав администра�
 
 let adminEventsSource = null;
 let adminEventsStartPromise = null;
-let adminEventsRecoveryUsed = false;
+let adminEventsRetryTimer = null;
+let adminEventsReconnectAttempts = 0;
+let adminEventsGeneration = 0;
+let adminEventsDesired = false;
 let adminEventsWarningShown = false;
 const selectedRefreshPromises = new Map();
 let payoutsRefreshPromise = null;
@@ -115,6 +119,10 @@ async function api(path, options = {}) {
     throw new Error("Нет доступа к данным");
   }
   const controller = new AbortController();
+  const externalSignal = options.signal;
+  const abortExternally = () => controller.abort();
+  if (externalSignal?.aborted) abortExternally();
+  else externalSignal?.addEventListener("abort", abortExternally, { once: true });
   const timeoutId = window.setTimeout(
     () => controller.abort("timeout"),
     API_TIMEOUT_MS,
@@ -142,6 +150,7 @@ async function api(path, options = {}) {
     if (isJsonResponse(response)) return response.json();
     return response.text();
   } catch (error) {
+    if (externalSignal?.aborted) throw new DOMException("Запрос отменён.", "AbortError");
     if (error?.name === "AbortError" || error === "timeout") {
       throw new Error("Запрос превысил время ожидания.");
     }
@@ -151,6 +160,7 @@ async function api(path, options = {}) {
     throw wrapped;
   } finally {
     clearTimeout(timeoutId);
+    externalSignal?.removeEventListener("abort", abortExternally);
   }
 }
 
@@ -463,16 +473,37 @@ export async function createEventsToken() {
 }
 
 export function stopAdminEvents({ resetRecovery = true } = {}) {
+  ++adminEventsGeneration;
+  if (adminEventsRetryTimer !== null) {
+    clearTimeout(adminEventsRetryTimer);
+    adminEventsRetryTimer = null;
+  }
   if (adminEventsSource) {
     adminEventsSource.close();
     adminEventsSource = null;
   }
-  if (resetRecovery) adminEventsRecoveryUsed = false;
+  if (resetRecovery) {
+    adminEventsDesired = false;
+    adminEventsReconnectAttempts = 0;
+  }
   adminEventsStartPromise = null;
+}
+
+function scheduleAdminEventsRetry() {
+  if (!adminEventsDesired || !canUseApi() || adminEventsRetryTimer !== null) return;
+  const delay = Math.min(30000, 500 * 2 ** Math.min(adminEventsReconnectAttempts++, 6));
+  adminEventsRetryTimer = window.setTimeout(() => {
+    adminEventsRetryTimer = null;
+    if (adminEventsDesired) void startAdminEvents(true);
+  }, delay);
 }
 
 export function handleAdminEvent(type, payload = {}) {
   if (type === "ping" || !state.initData) return;
+  if (type === "chat.changed") {
+    void refreshInboxFromEvent(payload.conversation_id);
+    return;
+  }
   if (type === "users_changed") {
     void loadUsers({ reset: true, silent: true });
     void loadStudyGroups();
@@ -504,43 +535,48 @@ export function handleAdminEvent(type, payload = {}) {
   }
 }
 
-function handleAdminEventsError(source, retryTokenRefresh) {
+function handleAdminEventsError(source, openedAt) {
   if (source !== adminEventsSource) return;
-  if (!adminEventsRecoveryUsed) {
-    adminEventsRecoveryUsed = true;
-    stopAdminEvents({ resetRecovery: false });
-    void startAdminEvents(retryTokenRefresh);
-    return;
-  }
-  stopAdminEvents();
+  if (openedAt && Date.now() - openedAt > 15000) adminEventsReconnectAttempts = 0;
+  stopAdminEvents({ resetRecovery: false });
   if (!adminEventsWarningShown) {
     adminEventsWarningShown = true;
     setToast("Realtime обновление временно недоступно.", "warning");
     renderApp();
   }
+  scheduleAdminEventsRetry();
 }
 
 export async function startAdminEvents(retryTokenRefresh = false) {
   if (!state.initData || !canUseApi()) return null;
+  adminEventsDesired = true;
   if (adminEventsSource && adminEventsSource.readyState !== EventSource.CLOSED)
     return adminEventsSource;
   if (adminEventsStartPromise) return adminEventsStartPromise;
+  if (adminEventsRetryTimer !== null) {
+    clearTimeout(adminEventsRetryTimer);
+    adminEventsRetryTimer = null;
+  }
+  const generation = adminEventsGeneration;
   adminEventsStartPromise = (async () => {
     try {
       await createEventsToken();
-      if (
-        adminEventsSource &&
-        adminEventsSource.readyState !== EventSource.CLOSED
-      ) {
+      if (generation !== adminEventsGeneration || !adminEventsDesired) return null;
+      if (adminEventsSource && adminEventsSource.readyState !== EventSource.CLOSED)
         return adminEventsSource;
-      }
       const source = new EventSource("/api/admin/events");
       adminEventsSource = source;
-      adminEventsWarningShown = false;
+      let openedAt = null;
       source.addEventListener("open", () => {
-        adminEventsRecoveryUsed = false;
+        if (source !== adminEventsSource) return;
+        openedAt = Date.now();
+        adminEventsWarningShown = false;
+        void refreshInboxFromEvent(null, { reconnect: true });
       });
       source.addEventListener("ping", () => handleAdminEvent("ping", {}));
+      source.addEventListener("chat.changed", (event) =>
+        handleAdminEvent("chat.changed", parseEventPayload(event.data)),
+      );
       source.addEventListener("users_changed", (event) =>
         handleAdminEvent("users_changed", parseEventPayload(event.data)),
       );
@@ -551,25 +587,27 @@ export async function startAdminEvents(retryTokenRefresh = false) {
         handleAdminEvent("payout_changed", parseEventPayload(event.data)),
       );
       source.addEventListener("payout_recipients_changed", (event) =>
-        handleAdminEvent(
-          "payout_recipients_changed",
-          parseEventPayload(event.data),
-        ),
+        handleAdminEvent("payout_recipients_changed", parseEventPayload(event.data)),
       );
-      source.onerror = () => {
-        handleAdminEventsError(source, true);
-      };
+      source.onerror = () => handleAdminEventsError(source, openedAt);
       return source;
     } catch (error) {
+      if (generation !== adminEventsGeneration || !adminEventsDesired) return null;
+      if (error?.status === 401 || error?.status === 403) {
+        disableInboxAccess();
+        stopAdminEvents();
+        return null;
+      }
+      stopAdminEvents({ resetRecovery: false });
       if (retryTokenRefresh && !adminEventsWarningShown) {
         adminEventsWarningShown = true;
         setToast("Realtime обновление временно недоступно.", "warning");
         renderApp();
       }
-      stopAdminEvents();
+      scheduleAdminEventsRetry();
       return null;
     } finally {
-      adminEventsStartPromise = null;
+      if (generation === adminEventsGeneration) adminEventsStartPromise = null;
     }
   })();
   return adminEventsStartPromise;

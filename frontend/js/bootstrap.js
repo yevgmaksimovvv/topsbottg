@@ -16,6 +16,7 @@ import {
   state,
 } from "./store.js";
 import {
+  api,
   loadPayouts,
   loadStudyGroups,
   loadUsers,
@@ -28,7 +29,8 @@ import {
 } from "./api.js";
 import { createPayout, sendPayout } from "./render-payouts.js";
 import { bindMessageEditors } from "./message-editor.js";
-import { bindInbox } from "./inbox.js";
+import { bindInbox, configureInboxClient } from "./inbox.js";
+import { createInboxApiClient } from "./inbox-client.js";
 import { renderRecipients } from "./render-recipients.js";
 import { renderUsers } from "./render-users.js";
 import { parsePeriodInput, plural } from "./utils.js";
@@ -448,7 +450,10 @@ export async function bootstrap() {
   window.addEventListener("beforeunload", stopAdminEvents);
   if (!canUseApi()) return;
   void startAdminEvents();
+  const authTask = initAdminControls().then(() => {
+    if (state.adminRole && canUseApi()) configureInboxClient(createInboxApiClient(api));
+  });
   await Promise.allSettled([
-    initAdminControls(), loadStudyGroups(), loadUsers({ reset: true }), loadPayouts(),
+    authTask, loadStudyGroups(), loadUsers({ reset: true }), loadPayouts(),
   ]);
 }
