@@ -1,5 +1,3 @@
-"""Admin invitations require a recent known identity and an explicit Telegram confirmation."""
-
 from __future__ import annotations
 
 import re
@@ -46,7 +44,7 @@ async def observe_telegram_profile(
     session: AsyncSession, telegram_id: int, username: str | None, first_name: str | None,
     last_name: str | None,
 ) -> bool:
-    """Only update a user already known to the bot. Never treat username as identity."""
+    """Обновляет ник только у существующей записи; права привязаны к Telegram ID."""
     name = " ".join(part for part in (first_name, last_name) if part).strip()[:256]
     result = await session.execute(
         update(User)
@@ -87,7 +85,7 @@ async def create_invitation(
     if target_id <= 0 or target_id in owner_ids:
         raise InvitationConflict("Нельзя пригласить владельца или неверный Telegram ID.")
     now = datetime.now(UTC)
-    # Lock the known identity row to serialize owner requests for the same target.
+    # Блокировка строки пользователя не даёт двум владельцам создать дублирующие приглашения.
     target = await session.scalar(
         select(User).where(User.telegram_id == target_id).with_for_update()
     )

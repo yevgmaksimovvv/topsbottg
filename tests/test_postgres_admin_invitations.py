@@ -1,4 +1,4 @@
-"""PostgreSQL locking and uniqueness for concurrent owner invitations."""
+"""Конкурентные приглашения и отправка уведомлений на PostgreSQL."""
 
 from __future__ import annotations
 

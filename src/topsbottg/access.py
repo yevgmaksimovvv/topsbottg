@@ -63,7 +63,7 @@ def require_owner(telegram_id: int, owner_ids: set[int]) -> Principal:
 async def grant_admin(
     session: AsyncSession, *, actor_telegram_id: int, target_telegram_id: int, owner_ids: set[int]
 ) -> bool:
-    """Internal grant operation for the invitation workflow (PR 05), not a public REST endpoint."""
+    """Создаёт грант или повторно активирует отозванный, сохраняя аудит."""
     require_owner(actor_telegram_id, owner_ids)
     if target_telegram_id <= 0 or target_telegram_id in owner_ids:
         raise ValueError("Cannot grant an owner or invalid Telegram ID.")

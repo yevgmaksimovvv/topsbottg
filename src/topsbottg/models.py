@@ -64,8 +64,6 @@ class StudyGroup(Base, TimestampMixin):
 
 
 class AdminGrant(Base, TimestampMixin):
-    """A revocable admin role independent of the user's registration."""
-
     __tablename__ = "admin_grants"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -181,8 +179,6 @@ class PaymentReply(Base, TimestampMixin):
 
 
 class PayoutReadyNotification(Base, TimestampMixin):
-    """Persistent Telegram outbox entry, unique per payout."""
-
     __tablename__ = "payout_ready_notifications"
     __table_args__ = (UniqueConstraint("payout_id", name="uq_payout_ready_payout"),)
 

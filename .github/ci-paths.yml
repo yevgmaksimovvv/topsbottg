@@ -1,5 +1,5 @@
-# Default to a full CI run for workflow/dependency changes or unclassified files.
-# dorny/paths-filter@v4 uses "some-with-excludes": a negative rule is final.
+# Workflow and dependency changes require the full test suite.
+# With some-with-excludes, negative patterns exclude a file from a matched group.
 full:
   - '.github/**'
   - 'AGENTS.md'
@@ -49,8 +49,8 @@ package:
   - 'docker-compose.yml'
   - 'alembic.ini'
   - '!**/*.md'
-# Any file outside the explicitly classified areas forces a full CI run.
-# Markdown files (including README and docs/) are documentation-only.
+# Files outside known categories trigger full CI.
+# Most Markdown is documentation-only; AGENTS.md and .github/** are exceptions.
 unclassified:
   - '**'
   - '!**/*.md'

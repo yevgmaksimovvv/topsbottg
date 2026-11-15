@@ -65,8 +65,7 @@ async def process_recipient(
         payout_id = await session.scalar(select(PayoutRecipient.payout_id).where(PayoutRecipient.id == recipient_id))
         if payout_id is None:
             return
-        # Keep the transaction lock on this session so cancellation and deletion
-        # in other processes serialize without consuming another pool connection.
+        # Держим блокировку в сессии отправки: отмена и удаление в других процессах ждут её освобождения.
         async with payout_send_lock(payout_id, session):
             recipient = await session.scalar(
                 select(PayoutRecipient)
@@ -176,8 +175,7 @@ async def deliver_ready_notification(
             if not ready:
                 await settle_ready_notification(session, message_id, discard=True)
                 return
-            # An admin may have lost access since the outbox entry was queued.
-            # Do not deliver payment-ready notifications to revoked identities.
+            # Перед отправкой проверяем, что адресату не отозвали доступ.
             if not await get_principal(session, notification.telegram_id, settings.admin_ids_set):
                 await settle_ready_notification(session, message_id, discard=True)
                 return
@@ -203,7 +201,7 @@ def _admin_invitation_keyboard(invitation_id: int) -> InlineKeyboardMarkup:
 
 
 async def deliver_admin_invitations(bot: MessageSender, session_factory: async_sessionmaker) -> None:
-    """Existing worker delivers pending invitations; row locks prevent concurrent sends."""
+    """Отправляет приглашения; блокировка строки исключает параллельную отправку worker-ами."""
     now = datetime.now(UTC)
     async with session_factory() as session:
         await session.execute(

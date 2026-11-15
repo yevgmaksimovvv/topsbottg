@@ -1,4 +1,4 @@
-"""Admin study group endpoints preserve search, pagination and access rules."""
+"""Поиск по учебным группам и доступ к административным маршрутам."""
 
 from __future__ import annotations
 

@@ -82,7 +82,6 @@ def create_runtime(settings: Settings) -> FastAPI:
         dp.include_router(router)
         app.state.bot = bot
         app.state.dispatcher = dp
-        # Один Python-процесс держит и polling, и worker, чтобы не получить два потребителя одной очереди.
         app.state.bot_task = asyncio.create_task(dp.start_polling(bot))
         app.state.worker_task = asyncio.create_task(run_worker(bot, session_factory, settings, app.state.stop_event))
 

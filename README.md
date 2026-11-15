@@ -1,228 +1,122 @@
 # topsbottg
-Telegram-сервис для рассылки уведомлений о выплатах, сбора платежных данных и ручного закрытия выплат после внешнего перевода.
 
-![Python](https://img.shields.io/badge/Python-3.12-blue)
-![FastAPI](https://img.shields.io/badge/FastAPI-API-009688)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791)
-![Docker](https://img.shields.io/badge/Docker-Compose-2496ED)
-![License](https://img.shields.io/badge/License-MIT-green)
+Telegram-бот и Mini App для учёта выплат: отправка сообщений получателям, сбор реквизитов и ручное подтверждение оплаты. Деньги сервис не переводит.
 
-## Что делает сервис
+## Работа с выплатами
 
-- создает выплаты и список получателей;
-- отправляет уведомления через Telegram Bot API;
-- собирает или подтверждает платежный профиль пользователя;
-- дает администратору Mini App для контроля, CSV и ручного закрытия выплат.
+Администратор создаёт выплату, выбирает получателей и отправляет сообщения через Telegram. В Mini App доступны подготовка сообщения, выбор получателей, работа с ответами и история выплат. Оплату администратор отмечает после перевода вне сервиса.
 
-Банковские переводы сервис не выполняет: статус выплаты закрывается администратором вручную после внешней оплаты.
+При создании выплаты сохраняются платёжные данные получателя на момент отправки. Если они изменятся до подтверждения оплаты, сервер не даст отметить оплату по устаревшему снимку. Выплаты можно скрывать из истории без удаления записей об операциях.
 
-## Регистрация в боте
+Повторный запрос отправки **не** защищён полноценным механизмом `Idempotency-Key`: API принимает этот заголовок, но не использует его для дедупликации. Не отправляйте повторно запрос после сетевого сбоя, пока не проверите состояние выплаты.
 
-После первого `/start` новый пользователь вводит ФИО и учебную группу (например, `М3О-207СВ-25`). Платёжные данные можно добавить сразу или позже.
+## Регистрация получателя
 
-Те, кто зарегистрировался до появления учебных групп, продолжают пользоваться ботом без группы и ничего повторно заполнять не обязаны. При желании группу можно указать через «Изменить группу». Она также отображается в «Мои данные».
+При первом `/start` бот запрашивает ФИО и учебную группу. Платёжные реквизиты можно указать сразу или позднее. Группа вводится вручную, например `М3О-207СВ-25`; справочник формируется по мере регистрации. Регистр нормализуется, но похожие латинские и кириллические буквы не заменяются.
 
-Группы создаются при первом вводе кода: отдельный заранее подготовленный список не требуется. Ввод без учёта регистра, пробелы около дефисов убираются. Латинские и кириллические символы не подменяются автоматически.
+Существующим пользователям повторная регистрация не нужна. Добавить группу можно через «Изменить группу».
 
-## Скриншоты
+## Администраторы
 
-> TODO: добавить скриншоты Mini App после финального UI.
+Есть две роли:
 
-## Архитектура
+- **Владелец (`owner`)** — Telegram ID из `ADMIN_TELEGRAM_IDS`. Все перечисленные ID равноправны. Роль нельзя отозвать из интерфейса: для этого нужно менять переменную окружения.
+- **Администратор (`admin`)** — пользователь с активным разрешением в таблице `admin_grants`. Может работать с выплатами, но не управлять правами других пользователей.
 
-```text
-Telegram users/admins
-        │
-        ▼
-topsbottg app ──► Telegram Bot API
-  ├─ Bot handlers
-  ├─ FastAPI admin API
-  └─ Background worker
-        │
-        ▼
-PostgreSQL
-Admin Mini App ──► Nginx ──► FastAPI
-```
+У владельца в шапке Mini App есть кнопка управления администраторами. Там можно найти пользователя, отправить приглашение, увидеть ожидающие приглашения и отозвать доступ. Приглашённый подтверждает назначение кнопкой в личном чате с ботом. До подтверждения права не выдаются.
 
-- app запускает bot, API и worker в одном Python process;
-- Nginx публикует 80/443, отдает Mini App и проксирует API;
-- PostgreSQL хранит пользователей, выплаты, получателей, профили и audit log;
-- Redis, Celery, RabbitMQ и Google Sheets не используются.
+Поиск по `@username` и Telegram ID работает **только среди пользователей, с которыми бот уже взаимодействовал за последние 14 дней**. Бот не ищет произвольные аккаунты Telegram. Если пользователь не находится, попросите его отправить боту `/start`. Приглашение действует 48 часов; повторные и отменённые приглашения обрабатываются отдельно. Привязка прав идёт по Telegram ID, не по нику.
 
-## Стек
+Список и назначение ролей проверяются на сервере. Владелец может отозвать грант через Mini App; после отзыва доступ к административному API, команде `/admin` и потоку событий закрывается.
 
-| Layer | Technology |
-|---|---|
-| Bot | aiogram 3 |
-| API | FastAPI |
-| DB | PostgreSQL 16, SQLAlchemy 2, Alembic |
-| Frontend | Static Telegram Mini App |
-| Runtime | Docker Compose, Nginx |
-| Package manager | uv |
+## Устройство
 
-## Быстрый запуск локально
+- `src/topsbottg/` — aiogram, FastAPI, SQLAlchemy и worker в одном Python-процессе.
+- `frontend/` — статический Mini App (HTML, CSS, JavaScript).
+- `migrations/` — миграции Alembic для PostgreSQL 16.
+- `nginx/` — отдача Mini App и проксирование API.
+- `scripts/` — выкладка, резервные копии и вспомогательные команды.
+- `tests/` — Python, PostgreSQL, браузерные и JS-тесты.
+
+Бот использует Telegram polling; второй экземпляр приложения с тем же токеном запускать нельзя. Redis и внешней очереди задач нет. Worker отправляет сообщения и отложенные уведомления внутри процесса приложения.
+
+### Порты и HTTPS
+
+**Текущий `docker-compose.yml` не публикует HTTPS.** Nginx слушает HTTP внутри контейнера, наружу проброшен только `127.0.0.1:18080:80`. PostgreSQL и API напрямую не опубликованы.
+
+Для доступа из Telegram нужен **отдельный публичный HTTPS reverse proxy**, который принимает запросы на домене `APP_DOMAIN` и передаёт их на `127.0.0.1:18080` с сохранением `Host`. Сертификатом занимается этот внешний прокси. Сам Nginx из Compose не слушает 443 и не читает сертификаты из тома `certbot_etc`.
+
+Скрипты `generate-local-certs.sh`, `prod-bootstrap.sh`, `issue-letsencrypt-cert.sh` и `renew-letsencrypt-cert.sh` остались от схемы, где Nginx обслуживал публичные 80/443. **Для текущей конфигурации Compose их недостаточно**: сертификаты не включатся в Nginx автоматически, а проверка локального порта 80 в `issue-letsencrypt-cert.sh` не соответствует порту 18080.
+
+## Запуск
+
+Нужны Docker с Compose plugin и действующий токен Telegram-бота. Для работы Mini App внутри Telegram нужен публичный HTTPS-домен.
 
 ```bash
 cp .env.example .env
-chmod +x scripts/generate-local-certs.sh
-./scripts/generate-local-certs.sh
+# Заполните BOT_TOKEN, ADMIN_TELEGRAM_IDS и пароль PostgreSQL в .env
 docker compose up -d --build
+docker compose ps
 ```
 
-Открыть:
+Для локального осмотра интерфейса Nginx доступен по `http://127.0.0.1:18080/miniapp/`, а проверка состояния приложения — по `http://127.0.0.1:18080/healthz`. Обычное открытие Mini App в браузере не создаёт действительный Telegram `initData`, поэтому административные запросы без него отклоняются.
 
-- `https://localhost/miniapp/`
-- `https://localhost/healthz`
+`.env` не коммитьте. В `DATABASE_URL` укажите того же пользователя, пароль и базу, что в `POSTGRES_USER`, `POSTGRES_PASSWORD` и `POSTGRES_DB`. `MINI_APP_URL` должен быть HTTPS-адресом опубликованного Mini App. В `ADMIN_TELEGRAM_IDS` можно перечислить несколько числовых ID через запятую.
 
-- `APP_DOMAIN=localhost`;
-- `MINI_APP_URL=https://localhost/miniapp/`;
-- `scripts/generate-local-certs.sh` кладет bootstrap cert в volume `certbot`;
-- для production нужен реальный домен с доверенным HTTPS, а не `localhost`.
+Остальные параметры:
 
-## Production
+| Переменная | Назначение |
+| --- | --- |
+| `APP_DOMAIN` | Имя публичного хоста без схемы и пути |
+| `BROADCAST_RATE_PER_SECOND` | Скорость отправки сообщений |
+| `MINI_APP_INIT_DATA_MAX_AGE_SECONDS` | Максимальный возраст Telegram initData; по умолчанию 86400 |
+| `LOG_LEVEL` | Уровень логирования; по умолчанию INFO |
+| `LETSENCRYPT_EMAIL` | Нужен только старым скриптам выпуска сертификатов |
 
-Одна команда на production-сервере:
+`POSTGRESQL_MAX_CONNECTIONS` читается настройками Python-приложения, но в текущем Compose не пробрасывается в контейнер `app`: без отдельной передачи переменной используется значение по умолчанию (5).
 
-```bash
-chmod +x scripts/prod-bootstrap.sh scripts/issue-letsencrypt-cert.sh
-./scripts/prod-bootstrap.sh
-```
+## CI и выкладка
 
-Что нужно до запуска:
+Правила выбора тестов — в [docs/ci.md](docs/ci.md). PR проверяются автоматически, но на сервер **не выкладываются**. После успешных проверок любого push в `main` запускается `Deploy production`; это относится и к коммитам, меняющим только документацию. Ручной запуск `Actions → CI → Run workflow` для `main` также выполняет полный CI и затем деплой.
 
-- DNS `A` record для `APP_DOMAIN` должен указывать на публичный IPv4 сервера;
-- на сервере должны быть открыты порты `80` и `443`;
-- HTTP-01 validation требует публичный порт `80`;
-- если ACME preflight не проходит, скрипт остановится до реального Let's Encrypt attempt.
+Для выкладки создайте GitHub Environment `production` и настройте:
 
-Если нужно отдельно проверить только issuance flow:
+- Secret `DEPLOY_SSH_PRIVATE_KEY` — закрытый ключ для CI.
+- Variables `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_KNOWN_HOSTS` — параметры SSH и доверенный ключ сервера.
 
-```bash
-LETSENCRYPT_STAGING=1 ./scripts/issue-letsencrypt-cert.sh
-```
+По умолчанию скрипт `scripts/deploy-production.sh` работает с `/home/deploy/apps/topsbottg`, а SSH-пользователь должен иметь доступ к Git, Docker Compose, `curl`, `flock`, `timeout` и репозиторию GitHub. На сервере должны существовать настроенный `.env`, работающий Compose-проект и доступный внешний HTTPS-прокси.
 
-### Renew
+CI выкладывает проверенный SHA. Скрипт проверяет, что он всё ещё совпадает с `origin/main`, блокирует параллельную выкладку, сохраняет SQL-дамп и подготавливает Git worktree с нужной ревизией. Затем пересобирает **единственный** контейнер `app`, проверяет health и текущую Alembic-ревизию. После этого обновляет checkout, пересоздаёт Nginx и проверяет локальные URL через `127.0.0.1:18080`. Успешный SHA записывается в `.deployed-sha`.
 
-```bash
-chmod +x scripts/renew-letsencrypt-cert.sh
-./scripts/renew-letsencrypt-cert.sh
-```
+**Автоматического отката нет.** Если обновление приложения сорвалось после замены контейнера, backend может остаться недоступным. Миграции назад не откатываются. Диагностика остаётся в `.deploy-failures.log` на сервере, SQL-копии — в `backups/`. Журнал содержит диагностические сведения; доступ к нему должен быть ограничен.
 
-Пример cron или systemd timer можно сделать поверх этого скрипта.
-
-### Контур Nginx
-
-- реальный runtime-конфиг лежит в `nginx/templates/default.conf.template`;
-- официальный nginx image подхватывает template через envsubst на старте;
-- `docker-compose.yml` передает `APP_DOMAIN` в nginx;
-- `app:8000` наружу не публикуется.
-- `/healthz` публичный и не требует `initData`.
-
-## Переменные окружения
-
-| Variable | Required | Description |
-|---|---:|---|
-| `APP_DOMAIN` | yes | Домен сервиса |
-| `LETSENCRYPT_EMAIL` | no | Email для Let’s Encrypt issuance script |
-| `BOT_TOKEN` | yes | Telegram bot token |
-| `ADMIN_TELEGRAM_IDS` | yes | Telegram ID администраторов через запятую |
-| `DATABASE_URL` | yes | Async SQLAlchemy URL |
-| `POSTGRES_DB` | yes | PostgreSQL database |
-| `POSTGRES_USER` | yes | PostgreSQL user |
-| `POSTGRES_PASSWORD` | yes | PostgreSQL password |
-| `MINI_APP_URL` | yes | Public Mini App URL |
-| `BROADCAST_RATE_PER_SECOND` | yes | Лимит отправки сообщений |
-| `MINI_APP_INIT_DATA_MAX_AGE_SECONDS` | yes | Max age Telegram Mini App initData |
-| `LOG_LEVEL` | no | Logging level |
-| `POSTGRESQL_MAX_CONNECTIONS` | no | PostgreSQL connection tuning |
-
-- `.env` не коммитить;
-- `DATABASE_URL` должен соответствовать `POSTGRES_*`;
-- `BOT_TOKEN` и `POSTGRES_PASSWORD` не должны попадать в логи.
-
-## Команды
+## Проверки и обслуживание
 
 ```bash
-# checks
-uv run ruff check .
-uv run pytest -q
-uv run mypy .
+uv sync --locked --extra dev
+uv run --locked ruff check .
+uv run --locked python -m pytest -q -m "not postgres"
 
-# migrations
-uv run alembic upgrade head
+npm ci
+node --test tests/js/*.test.mjs
+npx playwright install chromium
+npm run test:browser
 
-# docker
-docker compose config
-docker compose up -d --build
-docker compose logs -f app
-docker compose logs -f nginx
+# Миграции (нужна доступная PostgreSQL)
+uv run --locked alembic upgrade head
 
-# backup
+# SQL-дамп PostgreSQL из работающего Compose-проекта
 ./scripts/backup.sh
 ```
 
-## Безопасность
+Для PostgreSQL-интеграционных тестов задайте `POSTGRES_TEST_URL` и запустите `uv run --locked python -m pytest -q -m postgres`. Приложение само применяет Alembic при старте контейнера, поэтому базу нужно резервировать до обновлений. `/healthz` проверяет PostgreSQL и доступность Telegram API, а не только HTTP-процесс; при проблемах возвращает 503.
 
-- backend проверяет Telegram Mini App initData;
-- каждый ID из `ADMIN_TELEGRAM_IDS` является равноправным владельцем (`owner`) независимо от наличия записи пользователя в БД;
-- роль `admin` выдаётся через `admin_grants` и отзывается без изменения `.env`; после отзыва API, `/admin` и SSE закрываются для этого ID;
-- `GET /api/admin/me` возвращает роль `owner` или `admin`; `GET /api/admin/admin-grants` и `DELETE /api/admin/admin-grants/{telegram_id}` разрешены только владельцам;
-- владелец находит пользователя через `GET /api/admin/admin-candidates?username=@nick` (только тот, кто уже открыл бота за последние 14 дней), подтверждает Telegram ID и ФИО и создаёт `POST /api/admin/admin-invitations` с `target_telegram_id` и `expected_username`; поиск по Telegram ID тоже поддерживается;
-- приглашённому приходит сообщение с кнопками «Принять» и «Отклонить»; только личное подтверждение создаёт роль admin, приглашение действует 48 часов; список приглашений — `GET /api/admin/admin-invitations`, отмена — `POST /api/admin/admin-invitations/{id}/cancel`;
-- доставку приглашений с повторами выполняет существующий worker, дополнительный Telegram poller не нужен; username не используется как ключ прав и не подтверждает права сам по себе;
-- в Mini App владелец открывает управление администраторами через иконку в шапке: список владельцев и администраторов, поиск по нику или Telegram ID, подтверждение приглашения, ожидающие приглашения, отзыв прав с подтверждением; четыре нижние вкладки не меняются;
-- `GET /api/admin/admin-directory` возвращает владельцу роли и доступные имена; устаревшие ники не показываются, отсутствие ника не заменяется Telegram ID; обычному администратору этот маршрут недоступен;
-- платежные данные хранятся без CVV, срока действия карты и фото карты;
-- audit log не должен содержать платежные реквизиты;
-- банковская оплата выполняется вне сервиса.
+## Данные и доступ
 
-## Автоматический production deploy
+Бот не запрашивает CVV, срок действия и фотографии карты. Однако поле `raw_payment_details` — **свободный текст**: технически туда можно ввести нежелательные конфиденциальные сведения. Не отправляйте и не сохраняйте такие данные. Реквизиты и снимки реквизитов хранятся в PostgreSQL; доступ к ним ограничивается административными маршрутами.
 
-После merge PR каждый push в `main` проходит workflow `CI`. Job `Deploy production` запускается только после успешных проверок, использует тот же SHA и подключается к VPS как `deploy` в `/home/deploy/apps/topsbottg`. В GitHub создайте Environment `production` и добавьте настройки именно в него:
+Не публикуйте PostgreSQL и Adminer в интернет. В Compose Adminer выключен по умолчанию, но профиль `adminer` при включении открывает порт `8080` на всех интерфейсах; используйте его только за ограниченным доступом.
 
-- Secret `DEPLOY_SSH_PRIVATE_KEY` — отдельный приватный OpenSSH ключ CI.
-- Variables `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER` — адрес VPS, SSH порт и пользователь `deploy`.
-- Variable `DEPLOY_KNOWN_HOSTS` — доверенная строка ключа хоста из `known_hosts`. Для нестандартного порта формат записи: `[host]:port ssh-ed25519 AAAA...`.
-
-Однократная настройка с Windows PowerShell (укажите реальный адрес VPS и порт):
-
-```powershell
-ssh-keygen -t ed25519 -C "topsbottg-github-actions-production" -f "$env:USERPROFILE\.ssh\topsbottg-production" -N ""
-Get-Content "$env:USERPROFILE\.ssh\topsbottg-production.pub" | ssh deploy@VPS "umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys; chmod 600 ~/.ssh/authorized_keys"
-ssh-keygen -lf "$env:USERPROFILE\.ssh\topsbottg-production.pub"
-ssh-keyscan -p 22 -t ed25519 VPS
-```
-
-Сверьте отпечаток `ssh-keyscan` с доверенным отпечатком VPS (на сервере: `sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`) и сохраните выданную строку в `DEPLOY_KNOWN_HOSTS`. Не добавляйте приватный файл `topsbottg-production` в репозиторий. В **Settings → Environments → New environment** создайте `production` и задайте Secret/Variables выше.
-
-Workflow не запускает параллельные deploy и откажется выкладывать SHA, если `origin/main` успел продвинуться. Deploy job checkout’ит ровно проверенный SHA и передаёт содержащийся в нём deploy-скрипт по SCP в уникальный файл в домашнем каталоге SSH-пользователя. Поэтому скрипт не нужно заранее устанавливать на VPS. SSH и SCP используют заданный `known_hosts` с `StrictHostKeyChecking=yes`. VPS должен иметь Git, Docker Compose plugin, `curl`, GNU `timeout`, доступ к GitHub по HTTPS и production `.env`.
-
-Deploy создаёт SQL backup до миграций и подготавливает точный SHA в изолированном Git worktree рядом с production checkout. App строится и проходит health/Alembic проверки из worktree, пока Nginx продолжает отдавать прежний frontend. Только после успешной проверки app основной checkout fast-forward’ится, и Compose пересоздаёт только `nginx` с новым frontend. В `up` передаются `--no-deps --force-recreate`, PostgreSQL и внешние сервисы не перезапускаются. Скрипт проверяет `/healthz`, Mini App и JavaScript MIME/`nosniff`; успешный SHA хранится в `.deployed-sha`. Release worktrees хранятся в `/home/deploy/apps/.topsbottg-deploy/releases` и используются как источник bind mount Nginx.
-
-On failure, Actions shows only the failed phase and a safe diagnostic. Detailed Compose output and recent app/nginx logs stay on the VPS in `/home/deploy/apps/topsbottg/.deploy-failures.log` (mode 0600). A VPS-side `flock` prevents a retry from mutating the same Compose project while an earlier SSH process is still running.
-The `app` service is replaced in place and runs Telegram polling in the same process as the API. A second app cannot safely run with the same bot token. If the replacement fails its health check, the backend may remain unavailable even though Nginx still serves the previous frontend; this is not an application rollback. Deployment stops before switching Nginx and never downgrades the database. An operator must inspect `.deployed-sha`, the app state, the VPS diagnostic log, and `backups/topsbottg-*.sql`, then recover with a forward release compatible with the current schema. Database restore is a separate operator decision.
-
-## Operational notes
-
-- app делает миграции на старте контейнера;
-- worker работает внутри app process;
-- `app:8000` не публикуется наружу;
-- PostgreSQL и Adminer не должны быть публичными;
-- `/healthz` - readiness endpoint; он проверяет PostgreSQL и Telegram Bot API и может вернуть `503` при outage;
-- startup приложения падает, если PostgreSQL или Telegram Bot API недоступны;
-- подробный контракт переходов покрыт тестами в `tests/`.
-
-## Структура проекта
-
-```text
-src/topsbottg/      bot, API, worker, services, models
-frontend/           static Mini App
-migrations/         Alembic migrations
-nginx/              reverse proxy config and template
-scripts/            cert bootstrap, renew and backup scripts
-tests/              contract and regression tests
-```
-
-## License
+## Лицензия
 
 MIT

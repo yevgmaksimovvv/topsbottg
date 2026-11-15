@@ -1,4 +1,4 @@
-"""Study group registration, normalization, and legacy user compatibility."""
+"""Регистрация с учебной группой и совместимость старых пользователей."""
 
 from __future__ import annotations
 

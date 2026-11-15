@@ -1,4 +1,4 @@
-"""Owner/admin ACL regression tests across API, SSE, bot and the persistent grant store."""
+"""Проверки административных ролей, грантов и SSE."""
 
 from __future__ import annotations
 

@@ -279,7 +279,6 @@ test("regular admin cannot access owner controls or owner-only endpoints", async
     assert.equal(await page.locator("#admins-open").isVisible(), false);
     assert.equal(await page.locator("#admins-dialog").isVisible(), false);
     assert.equal(state.requests.some((s) => s.includes("/api/admin/admin-directory")), false);
-    // Direct calls are still guarded by the backend.
     const status = await page.evaluate(async () => {
       const response = await fetch("/api/admin/admin-directory", {
         headers: { "X-Telegram-Init-Data": "test-admin-init-data" },

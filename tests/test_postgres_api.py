@@ -1,4 +1,4 @@
-"""Real PostgreSQL API regression for payment snapshot optimistic locking."""
+"""Конфликты изменения реквизитов при работе с PostgreSQL."""
 from __future__ import annotations
 
 import os

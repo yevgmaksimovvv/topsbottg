@@ -284,8 +284,7 @@ async def _admin_events_stream(
                 frame = _sse_frame(message["event"], message["payload"])
             except TimeoutError:
                 frame = _sse_frame(ADMIN_EVENT_PING, {})
-            # Re-check the actual database role before every frame. This closes
-            # an existing stream after revocation, even without an SSE reconnect.
+            # Перепроверяем роль перед каждым SSE-событием, чтобы отзыв прав закрывал активный поток.
             if not await _sse_permission_valid(telegram_id, settings, session_factory):
                 return
             yield frame
@@ -353,8 +352,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         if bot_task is None:
             checks = await get_readiness_checks(settings, session_factory)
         else:
-            # Keep the original real Telegram readiness check, but cache it
-            # for 60 seconds instead of making getMe on every health probe.
+            # Кэшируем Telegram getMe на 60 секунд, чтобы не вызывать Bot API на каждом healthcheck.
             async with app.state.telegram_health_lock:
                 now = asyncio.get_running_loop().time()
                 if now >= app.state.telegram_health_checked_until:
@@ -397,7 +395,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         consumed = consume_admin_events_token(token)
         if consumed is None:
             raise HTTPException(status_code=403, detail="invalid token")
-        # A token proves the identity at issue time, not perpetual authorization.
+        # Токен одноразовый, но права могли измениться после его выдачи.
         async with session_factory() as session:
             try:
                 await require_admin(session, consumed.telegram_id, settings.admin_ids_set)
@@ -1114,7 +1112,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             payout_id=payout_id,
             recipients_count=len(payload.user_ids),
         )
-        # TODO: add persistence-backed Idempotency-Key handling if safe retry support is required.
+        # Idempotency-Key сейчас не дедуплицирует повторные запросы отправки.
         payout = await get_payout(session, payout_id)
         if payout is None:
             raise HTTPException(status_code=404, detail="payout not found")

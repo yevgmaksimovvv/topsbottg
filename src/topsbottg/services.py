@@ -460,7 +460,7 @@ async def get_or_create_user(session: AsyncSession, telegram_id: int, full_name:
     user = User(
         telegram_id=telegram_id,
         full_name=full_name or "Без ФИО",
-        # Explicitly provisioned named users are already registered; bot /start creates unnamed drafts.
+        # Запись с ФИО считается зарегистрированной; /start создаёт черновик без ФИО.
         registration_completed_at=datetime.now(UTC)
         if full_name and full_name.strip() and full_name.strip() != "Без ФИО"
         else None,
@@ -483,7 +483,7 @@ async def start_user(session: AsyncSession, telegram_id: int) -> tuple[User, boo
 async def set_user_study_group(
     session: AsyncSession, user: User, raw_code: str, *, complete_registration: bool = False
 ) -> StudyGroup:
-    """Assign a canonical study group, safely sharing one row across concurrent registrations."""
+    """Находит или создаёт группу по нормализованному коду без дублей."""
     code = normalize_study_group_code(raw_code)
     dialect = session.get_bind().dialect.name
     if dialect == "postgresql":
