@@ -4,7 +4,7 @@ import logging
 from contextlib import suppress
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -22,14 +22,17 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from topsbottg.access import AccessDenied, get_principal
+from topsbottg.conversations import get_or_create_conversation, record_incoming_message
+from topsbottg.fsm_storage import DatabaseFSMStorage
 from topsbottg.invitations import decide_invitation
 from topsbottg.logging_utils import log_event
-from topsbottg.models import PayoutRecipient, RecipientStatus
+from topsbottg.models import BotSensitiveMessage, PayoutRecipient, RecipientStatus
 from topsbottg.services import (
     confirm_saved_profile,
     get_latest_active_recipient,
     get_or_create_user,
     get_payment_profile,
+    get_user_by_telegram_id,
     get_user_study_group,
     save_profile_and_snapshot,
     set_user_study_group,
@@ -63,6 +66,7 @@ PAYMENT_DETAILS_CONFIRM_TEXT = "Данные подтверждены."
 PAYMENT_DETAILS_ALREADY_CONFIRMED_TEXT = "Данные уже подтверждены."
 ADMIN_ENTRYPOINT_TEXT = "Админка"
 ADMIN_INLINE_BUTTON_TEXT = "Открыть админку"
+CHAT_ENTRYPOINT_TEXT = "Написать администратору"
 
 
 async def _is_admin(settings, telegram_id: int, session_factory) -> bool:
@@ -80,17 +84,24 @@ async def _is_admin(settings, telegram_id: int, session_factory) -> bool:
         return False
 
 
-def main_keyboard(*, is_admin: bool = False, mini_app_url: str | None = None) -> ReplyKeyboardMarkup:
+def main_keyboard(
+    *, is_admin: bool = False, mini_app_url: str | None = None, chat_entrypoint_enabled: bool = False
+) -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(text=MY_DATA_BUTTON_TEXT), KeyboardButton(text=CHANGE_NAME_BUTTON_TEXT)],
         [KeyboardButton(text=CHANGE_PAYMENT_DETAILS_BUTTON_TEXT)],
         [KeyboardButton(text=CHANGE_GROUP_BUTTON_TEXT)],
     ]
+    if chat_entrypoint_enabled:
+        keyboard.append([KeyboardButton(text=CHAT_ENTRYPOINT_TEXT)])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
 def _main_keyboard_for(message: Message, settings) -> ReplyKeyboardMarkup:
-    return main_keyboard(mini_app_url=settings.mini_app_url)
+    return main_keyboard(
+        mini_app_url=settings.mini_app_url,
+        chat_entrypoint_enabled=settings.chat_entrypoint_enabled and settings.chat_inbox_enabled,
+    )
 
 
 def admin_keyboard(mini_app_url: str) -> InlineKeyboardMarkup:
@@ -244,11 +255,17 @@ async def _start_payment_details_flow(
                 user_id=user.id,
                 active_recipient_id=active_recipient_id,
             )
-    await state.clear()
-    await state.set_state(RegistrationFSM.payment_details)
-    await state.update_data(active_recipient_id=active_recipient_id)
+    payment_state_data = {"active_recipient_id": active_recipient_id}
     if not confirm_active_recipient:
-        await state.update_data(confirm_active_recipient=False)
+        payment_state_data["confirm_active_recipient"] = False
+    if isinstance(state.storage, DatabaseFSMStorage):
+        await state.storage.set_state_and_data(
+            state.key, RegistrationFSM.payment_details, payment_state_data
+        )
+    else:
+        await state.clear()
+        await state.set_state(RegistrationFSM.payment_details)
+        await state.set_data(payment_state_data)
     text = prompt_text or payment_details_message()
     if edit_message:
         if message is None:
@@ -270,6 +287,18 @@ async def _start_payment_details_flow(
     if message is None:
         return
     await _safe_message_answer(message, actor_telegram_id, text, reply_markup=ReplyKeyboardRemove())
+
+
+def _insert_sensitive_message(session):
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+    dialect = session.get_bind().dialect.name
+    if dialect == "postgresql":
+        return pg_insert(BotSensitiveMessage)
+    if dialect == "sqlite":
+        return sqlite_insert(BotSensitiveMessage)
+    raise NotImplementedError(f"Unsupported dialect for sensitive messages: {dialect}")
 
 
 async def _save_payment_details(
@@ -304,6 +333,18 @@ async def _save_payment_details(
             user=user,
             payload=raw_text,
             active_recipient=active_recipient,
+        )
+        # Keep only Telegram identifiers to reject replays after FSM has been cleared.
+        statement = _insert_sensitive_message(session).values(
+            telegram_chat_id=message.chat.id, telegram_message_id=message.message_id
+        )
+        await session.execute(
+            statement.on_conflict_do_nothing(
+                index_elements=[
+                    BotSensitiveMessage.telegram_chat_id,
+                    BotSensitiveMessage.telegram_message_id,
+                ]
+            )
         )
         await session.commit()
     await state.clear()
@@ -759,5 +800,55 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
             PAYMENT_DETAILS_CONFIRM_TEXT,
             show_alert=False,
         )
+
+
+    if _settings.chat_entrypoint_enabled and _settings.chat_inbox_enabled:
+        @router.message(StateFilter(None), F.chat.type == "private", F.text == CHAT_ENTRYPOINT_TEXT)
+        async def chat_entrypoint(message: Message):
+            if message.from_user is None or message.from_user.is_bot:
+                return
+            async with session_factory() as session:
+                user = await get_user_by_telegram_id(session, message.from_user.id)
+                if user is None or user.registration_completed_at is None:
+                    return
+            await _safe_message_answer(message, message.from_user.id, "Напишите сообщение администратору.")
+
+    if _settings.chat_inbox_enabled:
+        @router.message(
+            StateFilter(None),
+            F.chat.type == "private",
+            F.text,
+            ~F.text.startswith("/"),
+        )
+        async def incoming_chat_text(message: Message, state: FSMContext):
+            if message.from_user is None or message.from_user.is_bot:
+                return
+            # The first migration cannot recover pending payment input from MemoryStorage.
+            # Require a context created by the new bot before accepting free-form text.
+            if isinstance(state.storage, DatabaseFSMStorage) and not await state.storage.has_context(state.key):
+                return
+            async with session_factory() as session:
+                user = await get_user_by_telegram_id(session, message.from_user.id)
+                if user is None or user.registration_completed_at is None:
+                    return
+                consumed = await session.get(
+                    BotSensitiveMessage,
+                    (message.chat.id, message.message_id),
+                )
+                if consumed is not None:
+                    return
+                conversation = await get_or_create_conversation(session, user_id=user.id)
+                await record_incoming_message(
+                    session,
+                    conversation_id=conversation.id,
+                    telegram_chat_id=message.chat.id,
+                    telegram_message_id=message.message_id,
+                    text=message.text,
+                    reply_to_telegram_message_id=(
+                        message.reply_to_message.message_id if message.reply_to_message is not None else None
+                    ),
+                    source="telegram_reply" if message.reply_to_message is not None else "telegram",
+                )
+                await session.commit()
 
     return router

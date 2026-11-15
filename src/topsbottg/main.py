@@ -7,12 +7,14 @@ import signal
 
 import uvicorn
 from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import SimpleEventIsolation
 from fastapi import FastAPI
 
 from topsbottg.api import create_app, get_readiness_checks
 from topsbottg.bot import build_router
 from topsbottg.config import Settings, get_settings
 from topsbottg.db import make_engine, make_session_factory
+from topsbottg.fsm_storage import DatabaseFSMStorage
 from topsbottg.logging_utils import log_event
 from topsbottg.worker import run_worker
 
@@ -63,6 +65,15 @@ async def run_startup_preflight(settings: Settings, session_factory) -> None:
     )
 
 
+def create_bot_dispatcher(session_factory, settings: Settings) -> Dispatcher:
+    dispatcher = Dispatcher(
+        storage=DatabaseFSMStorage(session_factory),
+        events_isolation=SimpleEventIsolation(),
+    )
+    dispatcher.include_router(build_router(session_factory, settings))
+    return dispatcher
+
+
 def create_runtime(settings: Settings) -> FastAPI:
     engine = make_engine(settings)
     session_factory = make_session_factory(engine)
@@ -82,9 +93,7 @@ def create_runtime(settings: Settings) -> FastAPI:
         await run_startup_preflight(settings, session_factory)
         app.state.stop_event = asyncio.Event()
         bot = Bot(token=settings.bot_token)
-        dp = Dispatcher()
-        router = build_router(session_factory, settings)
-        dp.include_router(router)
+        dp = create_bot_dispatcher(session_factory, settings)
         app.state.bot = bot
         app.state.dispatcher = dp
         app.state.bot_task = asyncio.create_task(dp.start_polling(bot))

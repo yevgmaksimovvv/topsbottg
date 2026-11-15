@@ -181,3 +181,39 @@ def test_empty_mini_app_url_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
 def test_empty_broadcast_rate_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.chdir(tmp_path)
     _assert_invalid(monkeypatch, "BROADCAST_RATE_PER_SECOND")
+
+
+def test_chat_entrypoint_defaults_off_and_accepts_explicit_boolean(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_valid_env(monkeypatch)
+    monkeypatch.delenv("CHAT_ENTRYPOINT_ENABLED", raising=False)
+    assert Settings().chat_entrypoint_enabled is False
+    monkeypatch.setenv("CHAT_ENTRYPOINT_ENABLED", "true")
+    assert Settings().chat_entrypoint_enabled is True
+    monkeypatch.setenv("CHAT_ENTRYPOINT_ENABLED", "false")
+    assert Settings().chat_entrypoint_enabled is False
+
+
+def test_compose_and_env_expose_disabled_chat_entrypoint() -> None:
+    assert "CHAT_ENTRYPOINT_ENABLED: ${CHAT_ENTRYPOINT_ENABLED:-false}" in _read_text("docker-compose.yml")
+    assert "CHAT_ENTRYPOINT_ENABLED=false" in _read_text(".env.example")
+
+
+def test_inbox_capture_requires_explicit_opt_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _set_valid_env(monkeypatch)
+    monkeypatch.delenv("CHAT_INBOX_ENABLED", raising=False)
+    assert Settings().chat_inbox_enabled is False
+    monkeypatch.setenv("CHAT_INBOX_ENABLED", "true")
+    assert Settings().chat_inbox_enabled is True
+    monkeypatch.setenv("CHAT_INBOX_ENABLED", "false")
+    assert Settings().chat_inbox_enabled is False
+
+
+def test_compose_and_env_disable_inbox_capture_by_default() -> None:
+    assert "CHAT_INBOX_ENABLED: ${CHAT_INBOX_ENABLED:-false}" in _read_text("docker-compose.yml")
+    assert "CHAT_INBOX_ENABLED=false" in _read_text(".env.example")
