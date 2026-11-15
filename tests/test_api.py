@@ -16,7 +16,7 @@ import topsbottg.api as api_module
 import topsbottg.security as security_module
 from topsbottg.constants import MAX_PAYOUT_MESSAGE_LENGTH
 from topsbottg.logging_utils import log_event
-from topsbottg.models import AuditLog, PayoutStatus, RecipientStatus
+from topsbottg.models import AuditLog, PayoutStatus, RecipientStatus, User
 from topsbottg.services import add_recipients, create_payout, get_or_create_user, upsert_payment_profile
 
 
@@ -420,6 +420,37 @@ async def test_admin_users_search_keeps_same_full_names_separate(client, session
     assert detail.json()["user"]["full_name"] == "Иван Иванов"
     assert detail.json()["user"]["telegram_id"] == 111
     assert "is_active" not in detail.json()["user"]
+
+
+@pytest.mark.asyncio
+async def test_admin_users_registered_only_keeps_legacy_list_unchanged(
+    client, session_factory, admin_init_data
+):
+    async with session_factory() as session:
+        await get_or_create_user(session, 111, "Анна Петрова")
+        session.add(User(telegram_id=222, full_name="Не завершил регистрацию"))
+        await get_or_create_user(session, 333, "Иван Иванов")
+        await session.commit()
+
+    headers = {"X-Telegram-Init-Data": admin_init_data}
+    all_users = await client.get("/api/admin/users", headers=headers)
+    assert all_users.status_code == 200
+    assert {row["telegram_id"] for row in all_users.json()["items"]} == {111, 222, 333}
+
+    filtered = await client.get(
+        "/api/admin/users", headers=headers,
+        params={"registered_only": "true", "limit": 1, "offset": 0},
+    )
+    assert filtered.status_code == 200
+    assert filtered.json()["has_more"] is True
+    assert [row["telegram_id"] for row in filtered.json()["items"]] == [111]
+
+    second = await client.get(
+        "/api/admin/users", headers=headers,
+        params={"registered_only": "true", "limit": 1, "offset": 1},
+    )
+    assert [row["telegram_id"] for row in second.json()["items"]] == [333]
+    assert second.json()["has_more"] is False
 
 
 @pytest.mark.asyncio
