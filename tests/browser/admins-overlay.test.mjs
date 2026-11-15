@@ -33,7 +33,7 @@ async function browserFixture(role, run) {
     page.setDefaultTimeout(9000);
     const state = {
       members: [
-        { telegram_id: 123, role: "owner", username: "owner_name", display_name: "Евгений" },
+        { telegram_id: 123, role: "owner", username: "owner_name", display_name: "Евгений", full_name: "Евгений Дмитриевич" },
         { telegram_id: 456, role: "owner", username: null, display_name: "Второй владелец" },
         { telegram_id: 555, role: "admin", username: "admin_name", display_name: "Администратор" },
       ],
@@ -237,10 +237,10 @@ test("owner can invite, cancel, revoke; modal retains payout state and supports 
     assert.equal(await page.locator("#admins-members [data-admin-action='revoke']").count(), 0);
 
     state.members.push({
-      telegram_id: 777, role: "admin", username: "valid_name", display_name: "Анна",
+      telegram_id: 777, role: "admin", username: "valid_name", display_name: "Анна", full_name: "Анна Петрова",
     });
     await page.locator("#admins-refresh").click();
-    await page.locator("#admins-members").getByText("@valid_name").waitFor();
+    await page.locator("#admins-members").getByText("Анна Петрова").waitFor();
 
     await mkdir(evidence, { recursive: true });
     for (const theme of ["light", "dark"]) {
