@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from topsbottg.access import AccessDenied, get_principal, require_admin, require_owner, revoke_admin
+from topsbottg.access import AccessDenied, require_admin, require_owner, revoke_admin
 from topsbottg.config import Settings
 from topsbottg.db import get_session
 from topsbottg.invitations import (
