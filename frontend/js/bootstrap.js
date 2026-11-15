@@ -28,6 +28,7 @@ import {
 } from "./api.js";
 import { createPayout, sendPayout } from "./render-payouts.js";
 import { bindMessageEditors } from "./message-editor.js";
+import { bindInbox } from "./inbox.js";
 import { renderRecipients } from "./render-recipients.js";
 import { renderUsers } from "./render-users.js";
 import { parsePeriodInput, plural } from "./utils.js";
@@ -438,6 +439,7 @@ export async function bootstrap() {
     state.composer.messageBefore;
   document.getElementById("message-after").value = state.composer.messageAfter;
   bindMessageEditors();
+  bindInbox();
   bindEvents();
   bindAdminControls();
   renderApp();
