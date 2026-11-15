@@ -30,6 +30,8 @@ const FORBIDDEN_ERROR = "Недостаточно прав администра�
 let adminEventsSource = null;
 let adminEventsStartPromise = null;
 let adminEventsRecoveryUsed = false;
+let adminEventsLastOpenedAt = 0;
+let adminEventsHadOpen = false;
 let adminEventsWarningShown = false;
 const selectedRefreshPromises = new Map();
 let payoutsRefreshPromise = null;
@@ -517,6 +519,7 @@ export function handleAdminEvent(type, payload = {}) {
 
 function handleAdminEventsError(source, retryTokenRefresh) {
   if (source !== adminEventsSource) return;
+  if (Date.now() - adminEventsLastOpenedAt > 15000) adminEventsRecoveryUsed = false;
   if (!adminEventsRecoveryUsed) {
     adminEventsRecoveryUsed = true;
     stopAdminEvents({ resetRecovery: false });
@@ -549,8 +552,10 @@ export async function startAdminEvents(retryTokenRefresh = false) {
       adminEventsSource = source;
       adminEventsWarningShown = false;
       source.addEventListener("open", () => {
-        adminEventsRecoveryUsed = false;
-        void refreshInboxFromEvent(null, { reconnect: true });
+        const reconnected = adminEventsHadOpen;
+        adminEventsHadOpen = true;
+        adminEventsLastOpenedAt = Date.now();
+        if (reconnected) void refreshInboxFromEvent(null, { reconnect: true });
       });
       source.addEventListener("ping", () => handleAdminEvent("ping", {}));
       source.addEventListener("chat.changed", (event) =>
