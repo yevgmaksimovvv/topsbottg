@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from conftest import make_init_data
 from sqlalchemy import select
 
+import topsbottg.api as api_module
 from topsbottg.access import grant_admin
 from topsbottg.invitations import create_invitation, find_candidate, observe_telegram_profile
 from topsbottg.models import User
@@ -35,6 +37,45 @@ async def test_admin_me_observes_signed_telegram_profile(client, settings, sessi
     )
     assert candidate.status_code == 200
     assert candidate.json()[0]["role"] == "owner"
+
+
+@pytest.mark.asyncio
+async def test_owner_username_lookup_refreshes_missing_cached_profile(
+    client, settings, session_factory, monkeypatch,
+):
+    settings.admin_telegram_ids = "123,456"
+    async with session_factory() as session:
+        await get_or_create_user(session, 123, "Первый владелец")
+        await get_or_create_user(session, 456, "Второй владелец")
+        await session.commit()
+
+    class FakeBot:
+        def __init__(self, token):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get_chat(self, telegram_id):
+            return SimpleNamespace(
+                username="shem2001" if telegram_id == 456 else "first_owner",
+                first_name="Владимир", last_name="Шемяков",
+            )
+
+    monkeypatch.setattr(api_module, "Bot", FakeBot)
+    response = await client.get(
+        "/api/admin/admin-candidates",
+        params={"username": "@shem2001"},
+        headers={"X-Telegram-Init-Data": make_init_data(settings.bot_token, 123)},
+    )
+    assert response.status_code == 200
+    assert response.json()[0]["telegram_id"] == 456
+    assert response.json()[0]["role"] == "owner"
+    async with session_factory() as session:
+        assert (await find_candidate(session, username="shem2001")).telegram_id == 456
 
 
 @pytest.mark.asyncio
