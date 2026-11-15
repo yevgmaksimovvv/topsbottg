@@ -188,16 +188,25 @@ async def _list_conversations(
     if study_group_id is not None:
         statement = statement.where(User.study_group_id == study_group_id)
 
+    activity = latest.created_at
+    cursor_time = last_time
+    if session.get_bind().dialect.name == "sqlite":
+        # SQLite CURRENT_TIMESTAMP omits fractional seconds, so normalize both
+        # sides before keyset comparison instead of comparing different text formats.
+        activity = func.strftime("%Y-%m-%dT%H:%M:%f", latest.created_at)
+        if last_time is not None:
+            cursor_time = last_time.strftime("%Y-%m-%dT%H:%M:%S.%f")[:23]
+
     if last_id is not None:
         if last_time is None:
             statement = statement.where(latest.id.is_(None), Conversation.id < last_id)
         else:
             statement = statement.where(or_(
-                latest.created_at < last_time,
-                and_(latest.created_at == last_time, Conversation.id < last_id),
+                activity < cursor_time,
+                and_(activity == cursor_time, Conversation.id < last_id),
                 latest.id.is_(None),
             ))
-    statement = statement.order_by(latest.created_at.desc().nulls_last(), Conversation.id.desc()).limit(limit + 1)
+    statement = statement.order_by(activity.desc().nulls_last(), Conversation.id.desc()).limit(limit + 1)
     rows = (await session.execute(statement)).all()
     page = rows[:limit]
 
