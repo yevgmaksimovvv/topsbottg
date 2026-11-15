@@ -22,6 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from topsbottg.access import AccessDenied, get_principal
+from topsbottg.attachments import record_incoming_attachment
 from topsbottg.conversations import get_or_create_conversation, record_incoming_message
 from topsbottg.fsm_storage import DatabaseFSMStorage
 from topsbottg.invitations import decide_invitation
@@ -849,6 +850,29 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
                     ),
                     source="telegram_reply" if message.reply_to_message is not None else "telegram",
                 )
+                await session.commit()
+
+        @router.message(
+            StateFilter(None),
+            F.chat.type == "private",
+            F.photo | F.document | F.voice,
+        )
+        async def incoming_chat_attachment(message: Message, state: FSMContext):
+            if message.from_user is None or message.from_user.is_bot:
+                return
+            if message.caption and message.caption.lstrip().startswith("/"):
+                return
+            if isinstance(state.storage, DatabaseFSMStorage) and not await state.storage.has_context(state.key):
+                return
+            async with session_factory() as session:
+                user = await get_user_by_telegram_id(session, message.from_user.id)
+                if user is None or user.registration_completed_at is None:
+                    return
+                consumed = await session.get(BotSensitiveMessage, (message.chat.id, message.message_id))
+                if consumed is not None:
+                    return
+                conversation = await get_or_create_conversation(session, user_id=user.id)
+                await record_incoming_attachment(session, conversation_id=conversation.id, message=message)
                 await session.commit()
 
     return router

@@ -14,6 +14,7 @@ from sqlalchemy import and_, delete, func, insert, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from topsbottg.attachments import attachment_public_data
 from topsbottg.chat_outbox import IdempotencyConflict, create_outgoing_message
 from topsbottg.config import Settings
 from topsbottg.conversations import (
@@ -67,7 +68,7 @@ def _message_out(message: ChatMessage) -> ChatMessageOut:
         reply_to_telegram_message_id=message.reply_to_telegram_message_id,
         delivery_status=outbox.status if outbox else None,
         delivery_error_code=outbox.error_code if outbox else None,
-        attachment=getattr(message, "attachment", None),
+        attachment=attachment_public_data(message.attachment) if message.kind != "text" else None,
     )
 
 
