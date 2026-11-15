@@ -183,8 +183,18 @@ async def _list_conversations(
         .where(Conversation.id <= conversation_ceiling)
     )
     if query:
-        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        statement = statement.where(User.full_name.ilike(f"%{escaped}%", escape="\\"))
+        if session.get_bind().dialect.name == "sqlite":
+            # SQLite's built-in lower() does not case-fold Cyrillic, unlike PostgreSQL ILIKE.
+            names = await session.execute(
+                select(User.id, User.full_name)
+                .join(Conversation, Conversation.user_id == User.id)
+                .where(Conversation.id <= conversation_ceiling)
+            )
+            matching_ids = [user_id for user_id, name in names if query.casefold() in name.casefold()]
+            statement = statement.where(User.id.in_(matching_ids))
+        else:
+            escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            statement = statement.where(User.full_name.ilike(f"%{escaped}%", escape="\\"))
     if study_group_id is not None:
         statement = statement.where(User.study_group_id == study_group_id)
 
