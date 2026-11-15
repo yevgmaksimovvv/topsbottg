@@ -136,9 +136,19 @@ async function withBackend(run) {
           : json(route, { detail: "admin only" }, 403);
       }
       if (path === "/api/admin/events-token") return json(route, { expires_in: 60 });
-      if (path === "/api/admin/users") return json(route, {
-        items: db.users, has_more: false, offset: 0,
-      });
+      if (path === "/api/admin/users") {
+        const search = (url.searchParams.get("search") || "").toLowerCase();
+        const group = url.searchParams.get("study_group_id");
+        const offset = Number(url.searchParams.get("offset") || 0);
+        const limit = Number(url.searchParams.get("limit") || 50);
+        const matches = db.users.filter((user) =>
+          user.full_name.toLowerCase().includes(search) &&
+          (!group || String(user.study_group?.id) === group));
+        return json(route, {
+          items: matches.slice(offset, offset + limit), offset,
+          has_more: offset + limit < matches.length,
+        });
+      }
       if (path === "/api/admin/study-groups") return json(route, [{ id: 9, code: "Г-9" }]);
       if (path === "/api/admin/payouts" ||
           path === "/api/admin/admin-directory" ||
@@ -403,9 +413,12 @@ test("Late conversation creation cannot replace a manually selected chat and dra
     const { page, errors } = await createPage(123);
     db.delayedOpenUserId = 3;
     await page.locator('[data-mobile-view="users"]').click();
-    await page.locator('[data-inbox-write="3"]').click();
-    await page.waitForFunction(() => document.querySelector("#inbox-conversations .inbox-conversation") &&
-      document.querySelector("#inbox-dialog").open);
+    assert.equal(await page.locator("[data-inbox-write]").count(), 0);
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-new").click();
+    await page.locator("#inbox-new-users [data-inbox-new-user='3']").click();
+    await page.waitForFunction(() => window.document.querySelector("#inbox-new-screen:not([hidden])"));
+    await page.locator("#inbox-back").click();
     await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
     await page.locator("#inbox-history [data-inbox-message='202']").waitFor();
     await page.locator("#inbox-text").fill("Черновик выбранного диалога");
