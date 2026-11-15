@@ -194,7 +194,7 @@ function scheduleCandidateSearch(immediate = false) {
 
   const value = $("admins-search-input")?.value.trim() || "";
   const groupId = $("admins-search-group")?.value || "";
-  if ((!value && !groupId) || (value && !/^\\d+$/.test(value) && value.length < 2)) return;
+  if ((!value && !groupId) || (value && !/^[0-9]+$/.test(value) && value.length < 2)) return;
   if (immediate) {
     void searchCandidate();
   } else {
