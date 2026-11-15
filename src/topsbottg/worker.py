@@ -231,10 +231,6 @@ async def deliver_admin_invitations(bot: MessageSender, session_factory: async_s
                     AdminInvitation.status == "pending",
                     AdminInvitation.delivery_state == "queued",
                     AdminInvitation.expires_at > now,
-                    or_(
-                        AdminInvitation.next_delivery_at.is_(None),
-                        AdminInvitation.next_delivery_at <= now,
-                    ),
                 )
                 .order_by(AdminInvitation.id)
                 .limit(1)
@@ -243,7 +239,6 @@ async def deliver_admin_invitations(bot: MessageSender, session_factory: async_s
             if invitation is None:
                 break
             invitation.delivery_state = "sending"
-            invitation.delivery_attempts += 1
             invitation_id = invitation.id
             target_id = invitation.target_telegram_id
             await session.commit()
@@ -270,12 +265,10 @@ async def deliver_admin_invitations(bot: MessageSender, session_factory: async_s
                 invitation.delivery_state = "delivered"
                 invitation.delivered_at = datetime.now(UTC)
                 invitation.last_delivery_error = None
-                invitation.next_delivery_at = None
             else:
                 # Ошибка сети не доказывает, что Telegram не доставил сообщение.
                 invitation.delivery_state = "unknown"
                 invitation.last_delivery_error = type(error).__name__[:80]
-                invitation.next_delivery_at = None
             await session.commit()
 
 
