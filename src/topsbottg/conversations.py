@@ -41,7 +41,7 @@ async def lock_conversation_for_message(session: AsyncSession, *, conversation_i
     if conversation_id <= 0:
         raise ValueError("conversation_id must be positive")
     locked_id = await session.scalar(
-        select(Conversation.id).where(Conversation.id == conversation_id).with_for_update()
+        select(Conversation.id).where(Conversation.id == conversation_id).with_for_update(key_share=True)
     )
     if locked_id is None:
         raise ValueError("Conversation does not exist")
