@@ -179,7 +179,12 @@ def publish_admin_event(event_type: str, payload: dict[str, object] | None = Non
 
 def queue_admin_event(session: AsyncSession, event_type: str, payload: dict[str, object] | None = None) -> None:
     queued = session.info.setdefault(_ADMIN_EVENT_QUEUE_KEY, [])
-    queued.append({"event_type": event_type, "payload": payload or {}})
+    item = {"event_type": event_type, "payload": payload or {}}
+    # Incoming handlers in older deployments may enqueue the same chat event
+    # after the storage layer; one refetch per conversation/commit is enough.
+    if event_type == "chat.changed" and item in queued:
+        return
+    queued.append(item)
 
 
 def queue_admin_events(session: AsyncSession, events: Sequence[tuple[str, dict[str, object] | None]]) -> None:
