@@ -223,8 +223,7 @@ async function withBackend(run) {
             return json(route, { detail: "multipart/form-data required" }, 415);
           const raw = req.postDataBuffer().toString("latin1");
           const field = (name) => {
-            const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\        if (action === "messages" && method === "POST") {");
-            const found = new RegExp('name="' + escaped + '"\\r\\n\\r\\n([^\\r]*)\\r\\n').exec(raw);
+            const found = new RegExp('name="' + name + '"\\r\\n\\r\\n([^\\r]*)\\r\\n').exec(raw);
             return found?.[1] ?? null;
           };
           const kind = field("kind");
