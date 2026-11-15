@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Callable, Protocol
 
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -264,7 +264,10 @@ async def deliver_admin_invitations(bot: MessageSender, session_factory: async_s
             await session.commit()
 
 
-async def run_worker(bot: Bot, session_factory: async_sessionmaker, settings, stop_event: asyncio.Event) -> None:
+async def run_worker(
+    bot: Bot, session_factory: async_sessionmaker, settings, stop_event: asyncio.Event,
+    heartbeat: Callable[[float], None] | None = None,
+) -> None:
     loop = asyncio.get_running_loop()
     next_recovery = 0.0
     next_notification = 0.0
@@ -286,6 +289,8 @@ async def run_worker(bot: Bot, session_factory: async_sessionmaker, settings, st
             rows = await claim_pending_recipients(session, limit=max(1, int(settings.broadcast_rate_per_second)))
             await session.commit()
         if not rows:
+            if heartbeat is not None:
+                heartbeat(loop.time())
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop_event.wait(), timeout=1)
             continue
@@ -308,3 +313,5 @@ async def run_worker(bot: Bot, session_factory: async_sessionmaker, settings, st
             for payout in payouts:
                 await finalize_payout_after_worker(session, payout)
             await session.commit()
+        if heartbeat is not None:
+            heartbeat(loop.time())
