@@ -21,7 +21,7 @@ from topsbottg.conversations import (
     record_incoming_message,
 )
 from topsbottg.fsm_storage import DatabaseFSMStorage
-from topsbottg.models import Base, ChatMessage, Conversation, ConversationRead, User
+from topsbottg.models import Base, ChatAttachment, ChatMessage, Conversation, ConversationRead, User
 
 
 @pytest.fixture
@@ -276,3 +276,40 @@ async def test_postgres_fsm_state_and_data_survive_new_storage(postgres_conversa
     await restarted.set_data(key, {})
     assert await first.get_state(key) is None
     assert await first.get_data(key) == {}
+
+
+@pytest.mark.postgres
+async def test_attachment_constraint_is_one_to_one_and_cascades(postgres_conversations):
+    from sqlalchemy.exc import IntegrityError
+
+    factory = postgres_conversations
+    async with factory() as session:
+        user = User(telegram_id=9111, full_name="Вложение")
+        session.add(user)
+        await session.flush()
+        conversation = Conversation(user_id=user.id)
+        session.add(conversation)
+        await session.flush()
+        row = ChatMessage(conversation_id=conversation.id, direction="incoming", kind="photo")
+        session.add(row)
+        await session.flush()
+        session.add(ChatAttachment(
+            chat_message_id=row.id, kind="photo", telegram_file_id="id",
+            telegram_file_unique_id="unique", mime_type="image/jpeg",
+        ))
+        await session.commit()
+        message_id = row.id
+    async with factory() as session:
+        session.add(ChatAttachment(
+            chat_message_id=message_id, kind="photo", telegram_file_id="duplicate",
+            telegram_file_unique_id="unique2", mime_type="image/jpeg",
+        ))
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
+    async with factory() as session:
+        row = await session.get(ChatMessage, message_id)
+        await session.delete(row)
+        await session.commit()
+    async with factory() as session:
+        assert await session.get(ChatAttachment, message_id) is None
