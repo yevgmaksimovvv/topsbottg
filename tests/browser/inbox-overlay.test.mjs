@@ -69,6 +69,7 @@ async function withPage(run) {
         data = [{ id: 9, code: "Г-9" }];
       else if (path === "/api/admin/payouts" || path === "/api/admin/admin-directory" || path === "/api/admin/admin-invitations")
         data = [];
+      else if (path === "/api/admin/conversations/summary") data = { unread_count: 0 };
       else if (path === "/api/admin/events-token")
         data = { token: "fixture", expires_in: 60 };
       else if (path === "/api/admin/events")
@@ -204,7 +205,7 @@ test("Inbox appears after admin authorization and preserves four payout tabs", a
       assert.equal(await page.locator('[data-screen="' + tab + '"]').isVisible(), true);
     }
     assert.equal(requests.some((req) => req.includes("/conversations/summary")), true);
-    await page.locator('[data-inbox-write="1"]').waitFor();
+    await page.waitForFunction(() => document.querySelectorAll("[data-inbox-write]").length === 3);
     assert.equal(await page.locator("[data-inbox-write]").count(), 3);
   });
 });
