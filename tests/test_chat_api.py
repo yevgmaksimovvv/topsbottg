@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from topsbottg.conversations import get_or_create_conversation, record_incoming_message
 from topsbottg.models import AdminGrant, ChatMessage, Conversation, ConversationRead, StudyGroup, User
-from topsbottg.services import get_admin_events_broadcaster
+from topsbottg.services import get_admin_events_broadcaster, queue_admin_event
 
 
 async def _users(session_factory):
@@ -94,6 +94,9 @@ async def test_conversations_list_search_group_pagination_and_null_activity(
     page1 = first.json()
     assert [item["id"] for item in page1["items"]] == [ids[1]]
     assert page1["next_cursor"] is not None
+    blocked = await client.get(path, params={"cursor": page1["next_cursor"], "limit": 1},
+                               headers={"X-Telegram-Init-Data": dynamic_admin_init_data})
+    assert blocked.status_code == 422
     assert page1["items"][0]["unread_count"] == 1
     assert page1["items"][0]["user"]["study_group_name"] is None
     assert page1["items"][0]["last_message_at"].endswith(("Z", "+00:00"))
@@ -274,6 +277,7 @@ async def test_chat_changed_event_only_after_commit_and_without_message_body(
             )
             assert inserted and queue.empty()
             conv_id = conv.id
+            queue_admin_event(session, "chat.changed", {"conversation_id": conv.id})
             await session.commit()
         event = await asyncio.wait_for(queue.get(), timeout=1)
         assert event == {"event": "chat.changed", "payload": {"conversation_id": conv_id}}
