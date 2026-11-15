@@ -137,6 +137,16 @@ async function installFixture(page, unread = 3) {
         if (cursor === "page2") return { items: [state.conversations[1]], next_cursor: null };
         return { items: [state.conversations[0]], next_cursor: "page2" };
       },
+      async users({ search = "", study_group_id = "", offset = 0, limit = 50 } = {}) {
+        const users = [
+          { id: 1, full_name: "Анна Петрова", study_group: { id: 9, code: "Г-9" } },
+          { id: 2, full_name: "Иван Иванов", study_group: null },
+          { id: 3, full_name: "Новый Пользователь", study_group: null },
+        ].filter((user) => user.full_name.toLowerCase().includes(search.toLowerCase()) &&
+          (!study_group_id || String(user.study_group?.id) === String(study_group_id)));
+        return { items: users.slice(offset, offset + limit), offset,
+          has_more: offset + limit < users.length };
+      },
       async open(userId) {
         state.opened.push(userId);
         let item = state.conversations.find((entry) => entry.user.id === userId);
@@ -205,8 +215,9 @@ test("Inbox appears after admin authorization and preserves four payout tabs", a
       assert.equal(await page.locator('[data-screen="' + tab + '"]').isVisible(), true);
     }
     assert.equal(requests.some((req) => req.includes("/conversations/summary")), true);
-    await page.waitForFunction(() => document.querySelectorAll("[data-inbox-write]").length === 3);
-    assert.equal(await page.locator("[data-inbox-write]").count(), 3);
+    await page.locator("[data-user-id='1']").waitFor({ state: "attached" });
+    assert.equal(await page.locator("[data-inbox-write]").count(), 0);
+    assert.equal(await page.locator("#users-list label.user-row").count(), 3);
   });
 });
 
@@ -284,6 +295,7 @@ test("Inbox: empty list, per-admin unread, cursor, group filter and stale search
       configureInboxClient({
         summary: async () => ({ unread_count: 2 }),
         conversations: async () => ({ items: [], next_cursor: null }),
+        users: async () => ({ items: [], offset: 0, has_more: false }),
         open: async () => ({ conversation_id: 1 }),
         messages: async () => ({ items: [], next_cursor: null }),
         send: async () => ({}),
@@ -303,10 +315,17 @@ test("Inbox: history, read marker, older messages, incoming refresh, send/retry 
     assert.match(await page.locator("#inbox-history").innerText(), /В очереди/);
     assert.match(await page.locator("#inbox-history").innerText(), /Отправляется/);
     assert.match(await page.locator("#inbox-history").innerText(), /Ошибка отправки/);
-    assert.match(await page.locator("#inbox-history").innerText(), /Администратор · ID 456/);
-    assert.match(await page.locator("#inbox-history").innerText(), /Ответ на Telegram #880/);
+    assert.match(await page.locator("#inbox-history").innerText(), /Администратор 2/);
+    assert.doesNotMatch(await page.locator("#inbox-history").innerText(), /Админ · 456/);
+    assert.match(await page.locator("#inbox-history .inbox-message-reply").first().innerText(), /Длинное сообщение/);
+    assert.equal(await page.locator(".inbox-read-marker").count(), 0);
+    assert.equal(await page.locator("#inbox-refresh").count(), 0);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-    await page.locator("#inbox-older").click();
+    await page.evaluate(() => {
+      const list = document.getElementById("inbox-history");
+      list.scrollTop = 0;
+      list.dispatchEvent(new Event("scroll"));
+    });
     await page.locator("#inbox-history").getByText("Раннее сообщение").waitFor();
     assert.equal(await page.locator("#inbox-history [data-inbox-message]").count(), 5);
 
@@ -344,7 +363,7 @@ test("Inbox: history, read marker, older messages, incoming refresh, send/retry 
       const list = document.getElementById("inbox-history");
       list.scrollTop = 90;
     });
-    await page.locator("#inbox-refresh").click();
+    await page.evaluate(async () => (await import("/miniapp/js/inbox.js")).refreshInboxFromEvent(11));
     await page.locator("#inbox-history").getByText("Новое входящее").waitFor();
     assert.equal(await page.locator("#inbox-history [data-inbox-message='51']").count(), 1,
       "Refresh must de-duplicate existing messages");
@@ -366,10 +385,11 @@ test("Inbox: history, read marker, older messages, incoming refresh, send/retry 
   });
 });
 
-test("Write action opens existing or empty conversation without changing payout selection", async () => {
+test("New conversation starts inside inbox without changing payout selection", async () => {
   await withPage(async ({ page }) => {
     await installFixture(page);
     await page.locator('[data-mobile-view="users"]').click();
+    assert.equal(await page.locator("[data-inbox-write]").count(), 0);
     await page.evaluate(async () => {
       const { state } = await import("/miniapp/js/store.js");
       state.selectedPayoutId = 44;
@@ -378,7 +398,13 @@ test("Write action opens existing or empty conversation without changing payout 
       const { renderUsers } = await import("/miniapp/js/render-users.js");
       renderUsers();
     });
-    await page.locator('[data-inbox-write="3"]').click();
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-new").click();
+    await page.locator("#inbox-new-users [data-inbox-new-user='3']").waitFor();
+    await page.locator("#inbox-new-search").fill("Новый");
+    await page.waitForFunction(() => document.querySelectorAll("#inbox-new-users .inbox-new-user").length === 1);
+    assert.equal(await page.locator("#inbox-new-users .inbox-new-user").count(), 1);
+    await page.locator("#inbox-new-users [data-inbox-new-user='3']").click();
     await page.locator("#inbox-title").getByText("Новый Пользователь").waitFor();
     assert.equal(await page.locator("#inbox-history-status").innerText(), "Сообщений пока нет.");
     assert.deepEqual(await page.evaluate(() => window.__inboxFixture.opened), [3]);
@@ -396,7 +422,11 @@ test("Unread stays unread when history is scrolled up during refresh", async () 
     await page.locator("#inbox-open").click();
     await page.locator("#inbox-conversations .inbox-conversation").first().click();
     await page.locator("#inbox-history [data-inbox-message='54']").waitFor();
-    await page.locator("#inbox-older").click();
+    await page.evaluate(() => {
+      const list = document.getElementById("inbox-history");
+      list.scrollTop = 0;
+      list.dispatchEvent(new Event("scroll"));
+    });
     await page.locator("#inbox-history [data-inbox-message='2']").waitFor();
     await page.locator("#inbox-history [data-inbox-message='51']").scrollIntoViewIfNeeded();
     await page.evaluate(() => document.getElementById("inbox-history").dispatchEvent(new Event("scroll")));
@@ -418,7 +448,7 @@ test("Unread stays unread when history is scrolled up during refresh", async () 
       });
       return fixture.read.length;
     });
-    await page.locator("#inbox-refresh").click();
+    await page.evaluate(async () => (await import("/miniapp/js/inbox.js")).refreshInboxFromEvent(11));
     await page.locator("#inbox-history [data-inbox-message='55']").waitFor();
     await page.waitForTimeout(100);
     const beforeScroll = await page.evaluate(() => ({
@@ -468,5 +498,103 @@ test("Failed retry remains one bubble after a second timeout and keeps its origi
       .filter((node) => node.textContent.includes("Три попытки — одно сообщение")).length === 1);
     assert.equal(await bubble.count(), 1);
     assert.equal(await bubble.locator("[data-inbox-retry]").count(), 0);
+  });
+});
+
+
+test("Telegram-style bubbles and composer remain readable across mobile and desktop", async () => {
+  await withPage(async ({ page }) => {
+    await installFixture(page);
+    await page.locator("#inbox-open").click();
+    assert.equal(await page.locator("#inbox-new").isVisible(), true);
+    assert.equal(await page.locator("#inbox-back").isVisible(), false);
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    assert.equal(await page.locator("#inbox-new").isVisible(), false);
+    assert.equal(await page.locator("#inbox-back").isVisible(), true);
+    await page.locator("#inbox-history [data-inbox-message='54']").waitFor();
+
+    assert.equal(await page.locator("#inbox-refresh").count(), 0);
+    assert.equal(await page.locator(".inbox-history-tools, .inbox-read-marker").count(), 0);
+    assert.equal(await page.locator(".inbox-message-reply").count(), 1);
+    assert.deepEqual(await page.locator(".inbox-message-author").allTextContents(), [
+      "Администратор 1", "Администратор 2", "Администратор 1",
+    ]);
+    assert.deepEqual(await page.locator(".inbox-message-author").evaluateAll((nodes) =>
+      nodes.map((node) => node.title)), [
+      "Telegram ID: 123", "Telegram ID: 456", "Telegram ID: 123",
+    ]);
+    assert.doesNotMatch(await page.locator("#inbox-messages").innerText(), /Админ · (123|456)/);
+    assert.equal(await page.locator('[data-inbox-reply="51"]').getAttribute("aria-label"), "Ответить на сообщение");
+    assert.equal(await page.locator('[data-inbox-retry="54"]').innerText(), "Отправить заново");
+
+    await mkdir(evidence, { recursive: true });
+    for (const theme of ["light", "dark"]) {
+      await page.evaluate((scheme) => {
+        window.Telegram.WebApp.colorScheme = scheme;
+        for (const listener of window.Telegram.WebApp.__callbacks.themeChanged || []) listener();
+      }, theme);
+      for (const width of [320, 390, 768, 1280]) {
+        await page.setViewportSize({ width, height: 844 });
+        await page.evaluate(() => {
+          window.Telegram.WebApp.viewportHeight = 844;
+          for (const listener of window.Telegram.WebApp.__callbacks.viewportChanged || []) listener();
+        });
+        const layout = await page.evaluate(() => {
+          const incoming = document.querySelector(".inbox-message.is-incoming").getBoundingClientRect();
+          const outgoing = document.querySelector(".inbox-message.is-outgoing").getBoundingClientRect();
+          const field = document.getElementById("inbox-text").getBoundingClientRect();
+          const send = document.getElementById("inbox-send").getBoundingClientRect();
+          return {
+            incomingX: incoming.x, outgoingX: outgoing.x,
+            incomingWidth: incoming.width, outgoingWidth: outgoing.width,
+            fieldHeight: field.height, sendHeight: send.height,
+            fieldBottom: field.bottom, sendBottom: send.bottom,
+            scrollWidth: document.documentElement.scrollWidth,
+          };
+        });
+        assert.ok(layout.incomingX < layout.outgoingX,
+          "Incoming bubbles left, outgoing right: " + JSON.stringify(layout));
+        assert.ok(layout.fieldHeight >= 44 && layout.sendHeight >= 44);
+        assert.ok(Math.abs(layout.fieldBottom - layout.sendBottom) <= 2,
+          "Composer controls align at baseline");
+        assert.ok(layout.scrollWidth <= width + 1, "Chat must not overflow horizontally");
+        await page.screenshot({ path: resolve(evidence, "inbox-chat-" + theme + "-" + width + ".png") });
+      }
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.locator("#inbox-text").fill("Строка\n".repeat(8));
+    const composer = await page.evaluate(() => {
+      const field = document.getElementById("inbox-text").getBoundingClientRect();
+      const button = document.getElementById("inbox-send").getBoundingClientRect();
+      return { fieldHeight: field.height, sendHeight: button.height,
+        aligned: Math.abs(field.bottom - button.bottom) <= 2 };
+    });
+    assert.ok(composer.fieldHeight > 44 && composer.fieldHeight <= 140);
+    assert.equal(composer.sendHeight, 44);
+    assert.equal(composer.aligned, true);
+    await page.locator("#inbox-history [data-inbox-reply='51']").click();
+    assert.match(await page.locator("#inbox-reply").innerText(), /Длинное сообщение/);
+    await page.screenshot({ path: resolve(evidence, "inbox-chat-reply-390.png") });
+
+    await page.locator("#inbox-back").click();
+    await page.locator("#inbox-new").click();
+    await page.locator("#inbox-new-users [data-inbox-new-user='3']").waitFor();
+    await page.screenshot({ path: resolve(evidence, "inbox-new-dialog-390.png") });
+    await page.locator("#inbox-new-users [data-inbox-new-user='3']").click();
+    await page.locator("#inbox-history-status").getByText("Сообщений пока нет.").waitFor();
+    assert.equal(await page.locator("#inbox-text").inputValue(), "");
+    assert.equal(await page.locator("#inbox-text").evaluate((node) =>
+      node.getBoundingClientRect().height), 44,
+      "An empty chat must reset the previous conversation's expanded composer");
+    assert.equal(await page.locator("#inbox-send").evaluate((node) =>
+      node.getBoundingClientRect().height), 44);
+    await page.screenshot({ path: resolve(evidence, "inbox-empty-dialog-390.png") });
+
+    await page.locator("#inbox-back").click();
+    await page.locator("#inbox-search").fill("Анна");
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.locator("#inbox-history [data-inbox-message='54']").waitFor();
+    assert.equal(await page.locator("#inbox-text").evaluate((node) =>
+      node.getBoundingClientRect().height), 44);
   });
 });

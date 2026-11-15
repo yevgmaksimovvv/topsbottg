@@ -136,9 +136,19 @@ async function withBackend(run) {
           : json(route, { detail: "admin only" }, 403);
       }
       if (path === "/api/admin/events-token") return json(route, { expires_in: 60 });
-      if (path === "/api/admin/users") return json(route, {
-        items: db.users, has_more: false, offset: 0,
-      });
+      if (path === "/api/admin/users") {
+        const search = (url.searchParams.get("search") || "").toLowerCase();
+        const group = url.searchParams.get("study_group_id");
+        const offset = Number(url.searchParams.get("offset") || 0);
+        const limit = Number(url.searchParams.get("limit") || 50);
+        const matches = db.users.filter((user) =>
+          user.full_name.toLowerCase().includes(search) &&
+          (!group || String(user.study_group?.id) === group));
+        return json(route, {
+          items: matches.slice(offset, offset + limit), offset,
+          has_more: offset + limit < matches.length,
+        });
+      }
       if (path === "/api/admin/study-groups") return json(route, [{ id: 9, code: "Г-9" }]);
       if (path === "/api/admin/payouts" ||
           path === "/api/admin/admin-directory" ||
@@ -403,9 +413,12 @@ test("Late conversation creation cannot replace a manually selected chat and dra
     const { page, errors } = await createPage(123);
     db.delayedOpenUserId = 3;
     await page.locator('[data-mobile-view="users"]').click();
-    await page.locator('[data-inbox-write="3"]').click();
-    await page.waitForFunction(() => document.querySelector("#inbox-conversations .inbox-conversation") &&
-      document.querySelector("#inbox-dialog").open);
+    assert.equal(await page.locator("[data-inbox-write]").count(), 0);
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-new").click();
+    await page.locator("#inbox-new-users [data-inbox-new-user='3']").click();
+    await page.waitForFunction(() => window.document.querySelector("#inbox-new-screen:not([hidden])"));
+    await page.locator("#inbox-back").click();
     await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
     await page.locator("#inbox-history [data-inbox-message='202']").waitFor();
     await page.locator("#inbox-text").fill("Черновик выбранного диалога");
@@ -433,6 +446,83 @@ test("SSE keeps reconnecting after multiple short failures and refetches missed 
     await page.locator("#inbox-history [data-inbox-message='203']").waitFor();
     assert.equal(await page.evaluate(() => window.__sse.at(-1).readyState), 1);
     assert.equal(db.requests.filter((r) => r.path === "/api/admin/events-token").length, 3);
+    assert.deepEqual(errors, []);
+  });
+});
+
+
+test("New dialog search is paginated and isolated from payout selection", async () => {
+  await withBackend(async ({ db, createPage }) => {
+    db.users.push(...Array.from({ length: 120 }, (_, index) => ({
+      id: index + 10, full_name: "Участник " + String(index + 1).padStart(3, "0"),
+      study_group: index % 2 === 0 ? { id: 9, code: "Г-9" } : null,
+    })));
+    const { page, errors } = await createPage(123, 390);
+    await page.evaluate(async () => {
+      const { state } = await import("/miniapp/js/store.js");
+      state.selectedPayoutId = 71;
+      state.selectedUsers = new Set([1, 2]);
+      state.selectedUsersByPayout.set(71, new Set([1, 2]));
+    });
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-new").click();
+    await page.waitForFunction(() => document.querySelectorAll(".inbox-new-user").length === 50);
+    await page.locator("#inbox-new-more").click();
+    await page.waitForFunction(() => document.querySelectorAll(".inbox-new-user").length === 100);
+    await page.locator("#inbox-new-more").click();
+    await page.waitForFunction(() => document.querySelectorAll(".inbox-new-user").length === 123);
+    assert.equal(await page.locator("#inbox-new-more").isVisible(), false);
+    assert.ok(db.requests.some((request) => request.path === "/api/admin/users" &&
+      request.query.includes("registered_only=true") &&
+      request.query.includes("offset=100")));
+
+    await page.locator("#inbox-new-group").selectOption("9");
+    await page.waitForFunction(() => document.querySelectorAll(".inbox-new-user").length === 50);
+    assert.ok(await page.locator("#inbox-new-users").getByText("Анна Петрова").count() === 1);
+    await page.locator("#inbox-new-group").selectOption("");
+    await page.locator("#inbox-new-search").fill("Новый Пользователь");
+    await page.waitForFunction(() => document.querySelectorAll("#inbox-new-users .inbox-new-user").length === 1);
+    assert.equal(await page.locator(".inbox-new-user").count(), 1);
+    await page.locator("[data-inbox-new-user='3']").click();
+    await page.locator("#inbox-title").getByText("Новый Пользователь").waitFor();
+    await page.locator("#inbox-history-status").getByText("Сообщений пока нет.").waitFor();
+
+    assert.deepEqual(await page.evaluate(async () => {
+      const { state } = await import("/miniapp/js/store.js");
+      return [state.selectedPayoutId, [...state.selectedUsers], [...state.selectedUsersByPayout.get(71)]];
+    }), [71, [1, 2], [1, 2]]);
+    assert.equal(await page.locator("[data-inbox-write]").count(), 0);
+    assert.equal(await page.locator("[data-mobile-view]").count(), 4);
+    assert.deepEqual(errors, []);
+  });
+});
+
+
+test("Upward scrolling loads older messages without jumping to the newest", async () => {
+  await withBackend(async ({ db, createPage }) => {
+    db.messages = Array.from({ length: 130 }, (_, index) => incoming(index + 1));
+    const { page, errors } = await createPage(123, 390);
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.locator("#inbox-history [data-inbox-message='130']").waitFor();
+    assert.equal(await page.locator("#inbox-history .is-incoming").count(), 50);
+    await page.evaluate(() => {
+      const list = document.getElementById("inbox-history");
+      list.scrollTop = 0;
+      list.dispatchEvent(new Event("scroll"));
+    });
+    await page.locator("#inbox-history [data-inbox-message='31']").waitFor();
+    assert.equal(await page.locator("#inbox-history .is-incoming").count(), 100);
+    const restored = await page.locator("#inbox-history").evaluate((list) => list.scrollTop);
+    assert.ok(restored > 0, "Earlier page should not reset scroll position to the start");
+    await page.evaluate(() => {
+      const list = document.getElementById("inbox-history");
+      list.scrollTop = 0;
+      list.dispatchEvent(new Event("scroll"));
+    });
+    await page.locator("#inbox-history [data-inbox-message='1']").waitFor();
+    assert.equal(await page.locator("#inbox-history .is-incoming").count(), 130);
+    assert.equal(await page.locator("#inbox-older").isVisible(), false);
     assert.deepEqual(errors, []);
   });
 });

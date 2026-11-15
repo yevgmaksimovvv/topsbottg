@@ -680,6 +680,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
     async def admin_users(
         search: str | None = Query(default=None),
         has_payment_profile: bool | None = Query(default=None),
+        registered_only: bool = Query(default=False),
         study_group_id: int | None = Query(default=None, ge=1),
         limit: int = Query(default=50, ge=1, le=100),
         offset: int = Query(default=0, ge=0),
@@ -701,6 +702,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             search=search,
             has_payment_profile=has_payment_profile,
             study_group_id=study_group_id,
+            registered_only=registered_only,
             limit=limit + 1,
             offset=offset,
         )
@@ -711,6 +713,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
                 search=search,
                 has_payment_profile=has_payment_profile,
                 study_group_id=study_group_id,
+                registered_only=registered_only,
                 limit=1,
                 offset=offset + limit,
             )
