@@ -19,11 +19,11 @@ let loadingSearch = false;
 let memberError = "";
 let searchError = "";
 
-const nameFor = (user) => user?.username
-  ? `@${user.username.replace(/^@/, "")}`
+const nameFor = (user) => (user?.full_name && user.full_name !== "Без ФИО")
+  ? user.full_name
   : (user?.display_name && user.display_name !== "Без ФИО"
       ? user.display_name
-      : "Имя не указано");
+      : user?.username ? `@${user.username.replace(/^@/, "")}` : "Имя не указано");
 
 function renderMembers() {
   const status = $("admins-status");
@@ -100,7 +100,7 @@ function renderCandidate() {
   const group = candidate.study_group ? ` · ${candidate.study_group}` : "";
   target.innerHTML = `<article class="admins-candidate-card">
     <div class="admins-member-identity">
-      <strong>${escapeHtml(nameFor(candidate))}</strong>
+      <strong>${escapeHtml(candidate.username ? `@${candidate.username.replace(/^@/, "")}` : nameFor(candidate))}</strong>
       <span>${escapeHtml(display + group)}</span>
     </div>
     ${candidate.role

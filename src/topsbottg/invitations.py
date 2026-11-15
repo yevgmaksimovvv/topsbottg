@@ -63,11 +63,9 @@ async def find_candidate(
 ) -> User | None:
     if (username is None) == (telegram_id is None):
         raise ValueError("Specify exactly one of username or telegram_id.")
-    cutoff = datetime.now(UTC) - PROFILE_MAX_AGE
     query = select(User)
     if username is not None:
         query = query.where(
-            User.telegram_profile_seen_at >= cutoff,
             func.lower(User.telegram_username) == normalize_username(username),
         )
     else:
@@ -95,9 +93,7 @@ async def create_invitation(
     if target is None:
         raise InvitationConflict("Пользователь не найден. Попросите его отправить /start.")
     if expected_username is not None and (
-        target.telegram_profile_seen_at is None
-        or now - _utc(target.telegram_profile_seen_at) > PROFILE_MAX_AGE
-        or not target.telegram_username
+        not target.telegram_username
         or target.telegram_username.lower() != normalize_username(expected_username)
     ):
         raise InvitationConflict("Telegram username изменился. Повторите поиск.")
