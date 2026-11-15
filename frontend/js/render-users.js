@@ -1,5 +1,6 @@
 ﻿import { state, canUseApi, $ } from "./store.js";
 import { escapeHtml, plural } from "./utils.js";
+import { isInboxEnabled } from "./inbox.js";
 function userGroupLabel(user) {
   return user.study_group?.code ? `Группа: ${user.study_group.code}` : "Группа не указана";
 }
@@ -7,7 +8,10 @@ function userGroupLabel(user) {
 function userMarkup(user, locked) {
   const id = Number(user.id),
     selected = state.selectedUsers.has(id);
-  return `<label class="user-row${selected ? " selected" : ""}${locked ? " is-locked" : ""}" data-user-row="${id}"><span class="user-identity"><span class="user-name">${escapeHtml(user.full_name || "")}</span><span class="user-group">${escapeHtml(userGroupLabel(user))}</span></span><input type="checkbox" data-user-id="${id}" aria-label="Выбрать ${escapeHtml(user.full_name || "")}" ${selected ? "checked" : ""} ${locked ? "disabled" : ""}></label>`;
+  const row = `<label class="user-row${selected ? " selected" : ""}${locked ? " is-locked" : ""}" data-user-row="${id}"><span class="user-identity"><span class="user-name">${escapeHtml(user.full_name || "")}</span><span class="user-group">${escapeHtml(userGroupLabel(user))}</span></span><input type="checkbox" data-user-id="${id}" aria-label="Выбрать ${escapeHtml(user.full_name || "")}" ${selected ? "checked" : ""} ${locked ? "disabled" : ""}></label>`;
+  return isInboxEnabled()
+    ? `<div class="inbox-user-entry">${row}<button type="button" class="inbox-write" data-inbox-write="${id}" aria-label="Написать пользователю ${escapeHtml(user.full_name || "")}">Написать</button></div>`
+    : row;
 }
 
 function renderStudyGroupFilter() {

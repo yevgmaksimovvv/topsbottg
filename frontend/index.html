@@ -8,13 +8,21 @@
     />
     <meta name="color-scheme" content="light dark" />
     <title>topsbottg</title>
-    <link rel="stylesheet" href="/miniapp/styles.css?v=20261115-admins-live" />
+    <link rel="stylesheet" href="/miniapp/styles.css?v=20261115-inbox-shell" />
   </head>
   <body>
     <main class="app-shell">
       <header class="app-header">
         <h1 id="screen-title">Новая выплата</h1>
         <div class="header-actions">
+          <button type="button" id="inbox-open" class="header-icon-button inbox-opener hidden"
+            aria-label="Сообщения" title="Сообщения">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 11.5a8.4 8.4 0 0 1-9 8.5 9 9 0 0 1-4-.9L3 21l1.6-4.8A8.4 8.4 0 0 1 3 11.5a9 9 0 0 1 18 0Z"></path>
+            </svg>
+            <span id="inbox-unread" class="inbox-header-badge hidden" aria-live="polite"></span>
+          </button>
           <button type="button" id="admins-open" class="header-icon-button hidden"
             aria-label="Управление администраторами" title="Администраторы">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -320,6 +328,44 @@
       </aside>
     </main>
 
+    <dialog id="inbox-dialog" class="inbox-dialog" aria-labelledby="inbox-title">
+      <div class="inbox-panel">
+        <header class="inbox-panel-header">
+          <button type="button" id="inbox-back" class="header-icon-button" aria-label="К списку диалогов" hidden>‹</button>
+          <h2 id="inbox-title">Сообщения</h2>
+          <button type="button" id="inbox-close" class="header-icon-button" aria-label="Закрыть сообщения">×</button>
+        </header>
+        <section id="inbox-list-screen" class="inbox-screen" aria-label="Список диалогов">
+          <div class="inbox-filters">
+            <label class="sr-only" for="inbox-search">Поиск диалога по ФИО</label>
+            <input id="inbox-search" type="search" autocomplete="off" placeholder="Поиск по ФИО" />
+            <label class="sr-only" for="inbox-group">Фильтр группы</label>
+            <select id="inbox-group" aria-label="Фильтр группы"><option value="">Все группы</option></select>
+          </div>
+          <p id="inbox-list-status" class="inbox-feedback" role="status"></p>
+          <div id="inbox-conversations" class="inbox-scroll" aria-label="Диалоги"></div>
+          <button type="button" id="inbox-more" class="button button-quiet inbox-page-button hidden">Загрузить ещё</button>
+        </section>
+        <section id="inbox-history-screen" class="inbox-screen" aria-label="История диалога" hidden>
+          <div class="inbox-history-tools">
+            <button type="button" id="inbox-older" class="button button-quiet hidden">Ранние сообщения</button>
+            <button type="button" id="inbox-refresh" class="button button-quiet">Обновить</button>
+          </div>
+          <p id="inbox-history-status" class="inbox-feedback" role="status"></p>
+          <div id="inbox-history" class="inbox-scroll inbox-messages" tabindex="0" aria-label="Сообщения диалога"></div>
+          <form id="inbox-composer" class="inbox-composer">
+            <div id="inbox-reply" class="inbox-reply-preview"></div>
+            <label class="sr-only" for="inbox-text">Написать сообщение</label>
+            <div class="inbox-send-row">
+              <textarea id="inbox-text" rows="2" maxlength="4096" placeholder="Сообщение" aria-label="Написать сообщение"></textarea>
+              <button type="submit" id="inbox-send" class="button button-primary">Отправить</button>
+            </div>
+            <p id="inbox-compose-status" class="inbox-feedback" role="status"></p>
+          </form>
+        </section>
+      </div>
+    </dialog>
+
     <dialog id="admins-dialog" class="admins-dialog" aria-labelledby="admins-title">
       <div class="admins-panel">
         <header class="admins-panel-header">
@@ -394,6 +440,6 @@
       <pre id="preview" class="preview-root"></pre>
     </dialog>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script type="module" src="/miniapp/app.js?v=20261115-admins-live"></script>
+    <script type="module" src="/miniapp/app.js?v=20261115-inbox-shell"></script>
   </body>
 </html>
