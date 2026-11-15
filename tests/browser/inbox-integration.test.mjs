@@ -43,6 +43,10 @@ async function withBackend(run) {
     seen: new Map([[123, new Map()], [555, new Map()]]),
     granted: new Set([123, 555]),
     sendByKey: new Map(),
+    uploadByKey: new Map(),
+    media: new Map(),
+    mediaFaults: new Map(),
+    failUpload: false,
     requests: [],
     failSend: false,
     failList: false,
@@ -127,6 +131,7 @@ async function withBackend(run) {
       const identity = req.headers()["x-telegram-init-data"] || "";
       const actor = Number(identity.replace("admin:", ""));
       db.requests.push({ method, path, query: url.search, actor,
+        contentType: req.headers()["content-type"] || "",
         key: req.headers()["idempotency-key"] || null });
       if (path === "/api/admin/events") return json(route, { detail: "SSE mocked separately" }, 501);
       if (!db.granted.has(actor) && path !== "/api/admin/me") return json(route, { detail: "admin only" }, 403);
@@ -136,6 +141,22 @@ async function withBackend(run) {
           : json(route, { detail: "admin only" }, 403);
       }
       if (path === "/api/admin/events-token") return json(route, { expires_in: 60 });
+      const mediaMatch = /^\/api\/admin\/chat-messages\/(\d+)\/attachment$/.exec(path);
+      if (mediaMatch && method === "GET") {
+        const id = Number(mediaMatch[1]);
+        const fault = db.mediaFaults.get(id);
+        if (fault) return json(route, { detail: fault === 502 ? "attachment unavailable" :
+          fault === 415 ? "unsupported attachment type" : "attachment too large" }, fault);
+        const blob = db.media.get(id);
+        if (!blob) return json(route, { detail: "not found" }, 404);
+        return route.fulfill({
+          status: 200,
+          headers: { "Content-Type": blob.type || "application/octet-stream",
+            "Content-Disposition": "attachment; filename*=UTF-8''file",
+            "Cache-Control": "private, no-store" },
+          body: blob.content,
+        });
+      }
       if (path === "/api/admin/users") {
         const search = (url.searchParams.get("search") || "").toLowerCase();
         const group = url.searchParams.get("study_group_id");
@@ -183,7 +204,7 @@ async function withBackend(run) {
         if (!conv) { conv = { id: db.nextConversationId++, user_id }; db.conversations.push(conv); }
         return json(route, { conversation_id: conv.id });
       }
-      const match = /^\/api\/admin\/conversations\/(\d+)\/(messages|read)$/.exec(path);
+      const match = /^\/api\/admin\/conversations\/(\d+)\/(messages|read|attachments)$/.exec(path);
       if (match) {
         const cid = Number(match[1]), action = match[2];
         if (!db.conversations.some((conv) => conv.id === cid)) return json(route, { detail: "not found" }, 404);
@@ -195,6 +216,46 @@ async function withBackend(run) {
           const page = all.slice(-limit);
           return json(route, { items: page,
             next_cursor: all.length > page.length ? String(page[0].id) : null });
+        }
+        if (action === "attachments" && method === "POST") {
+          const rawType = req.headers()["content-type"] || "";
+          if (!/^multipart\/form-data;\s*boundary=/.test(rawType))
+            return json(route, { detail: "multipart/form-data required" }, 415);
+          const raw = req.postDataBuffer().toString("latin1");
+          const field = (name) => {
+            const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\        if (action === "messages" && method === "POST") {");
+            const found = new RegExp('name="' + escaped + '"\\r\\n\\r\\n([^\\r]*)\\r\\n').exec(raw);
+            return found?.[1] ?? null;
+          };
+          const kind = field("kind");
+          const caption = field("caption") || "";
+          const reply = field("reply_to_message_id");
+          const filename = /name="file"; filename="([^"]+)"/.exec(raw)?.[1];
+          if (!filename || !kind) return json(route, { detail: "file and kind required" }, 422);
+          const key = req.headers()["idempotency-key"];
+          const existing = db.uploadByKey.get(key);
+          if (existing && (existing.caption !== caption || existing.kind !== kind ||
+            existing.filename !== filename || existing.reply !== reply))
+            return json(route, { detail: "key conflict" }, 409);
+          const fault = db.uploadFault || null;
+          if (fault) return json(route, { detail: fault === 413 ? "file_too_large" :
+            fault === 415 ? "file_signature_mismatch" : "telegram temporarily unavailable" }, fault);
+          const message = existing?.message || {
+            id: db.nextMessageId++, conversation_id: cid, direction: "outgoing",
+            kind, text: null, caption, created_at: "2026-11-15T13:01:00Z",
+            author_admin_telegram_id: actor, telegram_message_id: null,
+            reply_to_telegram_message_id: null, delivery_status: "queued",
+            delivery_error_code: null,
+            attachment: { kind, filename, size: req.postDataBuffer().length,
+              mime_type: kind === "photo" ? "image/jpeg" : kind === "voice" ?
+                "audio/ogg" : "application/pdf", available: false },
+          };
+          if (!existing) {
+            db.uploadByKey.set(key, { kind, caption, reply, filename, message, raw });
+            db.messages.push(message);
+          }
+          if (db.failUpload) { db.failUpload = false; return route.abort("failed"); }
+          return json(route, { message }, 202);
         }
         if (action === "messages" && method === "POST") {
           const body = JSON.parse(req.postData());
