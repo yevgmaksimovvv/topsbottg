@@ -46,6 +46,7 @@ async function withBackend(run) {
     uploadByKey: new Map(),
     media: new Map(),
     mediaFaults: new Map(),
+    revokeOnMediaGet: new Set(),
     failUpload: false,
     requests: [],
     failSend: false,
@@ -143,6 +144,10 @@ async function withBackend(run) {
       if (path === "/api/admin/events-token") return json(route, { expires_in: 60 });
       const mediaMatch = /^\/api\/admin\/chat-messages\/(\d+)\/attachment$/.exec(path);
       if (mediaMatch && method === "GET") {
+        if (db.revokeOnMediaGet.delete(actor)) {
+          db.granted.delete(actor);
+          return json(route, { detail: "admin only" }, 403);
+        }
         const id = Number(mediaMatch[1]);
         const fault = db.mediaFaults.get(id);
         if (fault) return json(route, { detail: fault === 502 ? "attachment unavailable" :
@@ -683,7 +688,8 @@ test("Authorized photo, document and voice stay in history after reload, faults 
     const other = await createPage(555, 390);
     await other.page.locator("#inbox-open").click();
     await other.page.locator("#inbox-conversations").getByText("Анна Петрова").click();
-    db.granted.delete(555);
+    await other.page.locator('[data-inbox-download="204"]').waitFor();
+    db.revokeOnMediaGet.add(555);
     await other.page.locator('[data-inbox-download="204"]').click();
     await other.page.locator("#inbox-dialog").waitFor({ state: "hidden" });
     assert.equal(await other.page.locator("#inbox-open").isVisible(), false);
