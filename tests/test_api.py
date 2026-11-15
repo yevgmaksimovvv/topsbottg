@@ -429,13 +429,17 @@ async def test_admin_users_registered_only_keeps_legacy_list_unchanged(
     async with session_factory() as session:
         await get_or_create_user(session, 111, "Анна Петрова")
         session.add(User(telegram_id=222, full_name="Не завершил регистрацию"))
+        session.add(User(
+            telegram_id=444, full_name="Без ФИО",
+            registration_completed_at=datetime.now(UTC),
+        ))
         await get_or_create_user(session, 333, "Иван Иванов")
         await session.commit()
 
     headers = {"X-Telegram-Init-Data": admin_init_data}
     all_users = await client.get("/api/admin/users", headers=headers)
     assert all_users.status_code == 200
-    assert {row["telegram_id"] for row in all_users.json()["items"]} == {111, 222, 333}
+    assert {row["telegram_id"] for row in all_users.json()["items"]} == {111, 222, 333, 444}
 
     filtered = await client.get(
         "/api/admin/users", headers=headers,
