@@ -137,6 +137,16 @@ async function installFixture(page, unread = 3) {
         if (cursor === "page2") return { items: [state.conversations[1]], next_cursor: null };
         return { items: [state.conversations[0]], next_cursor: "page2" };
       },
+      async users({ search = "", study_group_id = "", offset = 0, limit = 50 } = {}) {
+        const users = [
+          { id: 1, full_name: "Анна Петрова", study_group: { id: 9, code: "Г-9" } },
+          { id: 2, full_name: "Иван Иванов", study_group: null },
+          { id: 3, full_name: "Новый Пользователь", study_group: null },
+        ].filter((user) => user.full_name.toLowerCase().includes(search.toLowerCase()) &&
+          (!study_group_id || String(user.study_group?.id) === String(study_group_id)));
+        return { items: users.slice(offset, offset + limit), offset,
+          has_more: offset + limit < users.length };
+      },
       async open(userId) {
         state.opened.push(userId);
         let item = state.conversations.find((entry) => entry.user.id === userId);
@@ -205,8 +215,9 @@ test("Inbox appears after admin authorization and preserves four payout tabs", a
       assert.equal(await page.locator('[data-screen="' + tab + '"]').isVisible(), true);
     }
     assert.equal(requests.some((req) => req.includes("/conversations/summary")), true);
-    await page.waitForFunction(() => document.querySelectorAll("[data-inbox-write]").length === 3);
-    assert.equal(await page.locator("[data-inbox-write]").count(), 3);
+    await page.locator("[data-user-id='1']").waitFor();
+    assert.equal(await page.locator("[data-inbox-write]").count(), 0);
+    assert.equal(await page.locator("#users-list label.user-row").count(), 3);
   });
 });
 
@@ -284,6 +295,7 @@ test("Inbox: empty list, per-admin unread, cursor, group filter and stale search
       configureInboxClient({
         summary: async () => ({ unread_count: 2 }),
         conversations: async () => ({ items: [], next_cursor: null }),
+        users: async () => ({ items: [], offset: 0, has_more: false }),
         open: async () => ({ conversation_id: 1 }),
         messages: async () => ({ items: [], next_cursor: null }),
         send: async () => ({}),
@@ -303,8 +315,10 @@ test("Inbox: history, read marker, older messages, incoming refresh, send/retry 
     assert.match(await page.locator("#inbox-history").innerText(), /В очереди/);
     assert.match(await page.locator("#inbox-history").innerText(), /Отправляется/);
     assert.match(await page.locator("#inbox-history").innerText(), /Ошибка отправки/);
-    assert.match(await page.locator("#inbox-history").innerText(), /Администратор · ID 456/);
-    assert.match(await page.locator("#inbox-history").innerText(), /Ответ на Telegram #880/);
+    assert.match(await page.locator("#inbox-history").innerText(), /Админ · 456/);
+    assert.match(await page.locator("#inbox-history .inbox-message-reply").first().innerText(), /Длинное сообщение/);
+    assert.equal(await page.locator(".inbox-read-marker").count(), 0);
+    assert.equal(await page.locator("#inbox-refresh").count(), 0);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await page.locator("#inbox-older").click();
     await page.locator("#inbox-history").getByText("Раннее сообщение").waitFor();
@@ -344,7 +358,7 @@ test("Inbox: history, read marker, older messages, incoming refresh, send/retry 
       const list = document.getElementById("inbox-history");
       list.scrollTop = 90;
     });
-    await page.locator("#inbox-refresh").click();
+    await page.evaluate(async () => (await import("/miniapp/js/inbox.js")).refreshInboxFromEvent(11));
     await page.locator("#inbox-history").getByText("Новое входящее").waitFor();
     assert.equal(await page.locator("#inbox-history [data-inbox-message='51']").count(), 1,
       "Refresh must de-duplicate existing messages");
@@ -366,10 +380,11 @@ test("Inbox: history, read marker, older messages, incoming refresh, send/retry 
   });
 });
 
-test("Write action opens existing or empty conversation without changing payout selection", async () => {
+test("New conversation starts inside inbox without changing payout selection", async () => {
   await withPage(async ({ page }) => {
     await installFixture(page);
     await page.locator('[data-mobile-view="users"]').click();
+    assert.equal(await page.locator("[data-inbox-write]").count(), 0);
     await page.evaluate(async () => {
       const { state } = await import("/miniapp/js/store.js");
       state.selectedPayoutId = 44;
@@ -378,7 +393,13 @@ test("Write action opens existing or empty conversation without changing payout 
       const { renderUsers } = await import("/miniapp/js/render-users.js");
       renderUsers();
     });
-    await page.locator('[data-inbox-write="3"]').click();
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-new").click();
+    await page.locator("#inbox-new-users [data-inbox-new-user='3']").waitFor();
+    await page.locator("#inbox-new-search").fill("Новый");
+    await page.locator("#inbox-new-users [data-inbox-new-user='3']").waitFor();
+    assert.equal(await page.locator("#inbox-new-users .inbox-new-user").count(), 1);
+    await page.locator("#inbox-new-users [data-inbox-new-user='3']").click();
     await page.locator("#inbox-title").getByText("Новый Пользователь").waitFor();
     assert.equal(await page.locator("#inbox-history-status").innerText(), "Сообщений пока нет.");
     assert.deepEqual(await page.evaluate(() => window.__inboxFixture.opened), [3]);
@@ -418,7 +439,7 @@ test("Unread stays unread when history is scrolled up during refresh", async () 
       });
       return fixture.read.length;
     });
-    await page.locator("#inbox-refresh").click();
+    await page.evaluate(async () => (await import("/miniapp/js/inbox.js")).refreshInboxFromEvent(11));
     await page.locator("#inbox-history [data-inbox-message='55']").waitFor();
     await page.waitForTimeout(100);
     const beforeScroll = await page.evaluate(() => ({
