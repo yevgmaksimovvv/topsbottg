@@ -339,10 +339,14 @@
           <section aria-labelledby="admins-invite-title" class="admins-section">
             <h3 id="admins-invite-title">Пригласить</h3>
             <form id="admins-search-form" class="admins-search-form">
-              <label for="admins-search-input" class="sr-only">Username или Telegram ID</label>
-              <input id="admins-search-input" name="search" type="text" maxlength="33"
-                autocomplete="off" placeholder="@username или Telegram ID" required />
+              <label for="admins-search-input" class="sr-only">ФИО или Telegram ID</label>
+              <input id="admins-search-input" name="search" type="text" maxlength="128"
+                autocomplete="off" placeholder="ФИО или Telegram ID" required />
               <button type="submit" class="button button-primary">Найти</button>
+              <label for="admins-search-group" class="sr-only">Учебная группа — необязательно</label>
+              <select id="admins-search-group" aria-label="Учебная группа — необязательно">
+                <option value="">Все группы</option>
+              </select>
             </form>
             <p id="admins-search-error" class="admins-feedback" role="status"></p>
             <div id="admins-candidate" aria-live="polite"></div>
