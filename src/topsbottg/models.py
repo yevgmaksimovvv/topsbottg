@@ -83,9 +83,7 @@ class AdminInvitation(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    delivery_attempts: Mapped[int] = mapped_column(nullable=False, default=0, server_default="0")
     delivery_state: Mapped[str] = mapped_column(String(16), nullable=False, default="queued", server_default="queued")
-    next_delivery_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_delivery_error: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
 
