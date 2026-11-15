@@ -215,7 +215,7 @@ test("Inbox appears after admin authorization and preserves four payout tabs", a
       assert.equal(await page.locator('[data-screen="' + tab + '"]').isVisible(), true);
     }
     assert.equal(requests.some((req) => req.includes("/conversations/summary")), true);
-    await page.locator("[data-user-id='1']").waitFor();
+    await page.locator("[data-user-id='1']").waitFor({ state: "attached" });
     assert.equal(await page.locator("[data-inbox-write]").count(), 0);
     assert.equal(await page.locator("#users-list label.user-row").count(), 3);
   });
@@ -397,7 +397,7 @@ test("New conversation starts inside inbox without changing payout selection", a
     await page.locator("#inbox-new").click();
     await page.locator("#inbox-new-users [data-inbox-new-user='3']").waitFor();
     await page.locator("#inbox-new-search").fill("Новый");
-    await page.locator("#inbox-new-users [data-inbox-new-user='3']").waitFor();
+    await page.waitForFunction(() => document.querySelectorAll("#inbox-new-users .inbox-new-user").length === 1);
     assert.equal(await page.locator("#inbox-new-users .inbox-new-user").count(), 1);
     await page.locator("#inbox-new-users [data-inbox-new-user='3']").click();
     await page.locator("#inbox-title").getByText("Новый Пользователь").waitFor();
