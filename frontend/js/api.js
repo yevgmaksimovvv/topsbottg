@@ -29,9 +29,10 @@ const FORBIDDEN_ERROR = "Недостаточно прав администра�
 
 let adminEventsSource = null;
 let adminEventsStartPromise = null;
-let adminEventsRecoveryUsed = false;
-let adminEventsLastOpenedAt = 0;
-let adminEventsHadOpen = false;
+let adminEventsRetryTimer = null;
+let adminEventsReconnectAttempts = 0;
+let adminEventsGeneration = 0;
+let adminEventsDesired = false;
 let adminEventsWarningShown = false;
 const selectedRefreshPromises = new Map();
 let payoutsRefreshPromise = null;
@@ -472,12 +473,29 @@ export async function createEventsToken() {
 }
 
 export function stopAdminEvents({ resetRecovery = true } = {}) {
+  ++adminEventsGeneration;
+  if (adminEventsRetryTimer !== null) {
+    clearTimeout(adminEventsRetryTimer);
+    adminEventsRetryTimer = null;
+  }
   if (adminEventsSource) {
     adminEventsSource.close();
     adminEventsSource = null;
   }
-  if (resetRecovery) adminEventsRecoveryUsed = false;
+  if (resetRecovery) {
+    adminEventsDesired = false;
+    adminEventsReconnectAttempts = 0;
+  }
   adminEventsStartPromise = null;
+}
+
+function scheduleAdminEventsRetry() {
+  if (!adminEventsDesired || !canUseApi() || adminEventsRetryTimer !== null) return;
+  const delay = Math.min(30000, 500 * 2 ** Math.min(adminEventsReconnectAttempts++, 6));
+  adminEventsRetryTimer = window.setTimeout(() => {
+    adminEventsRetryTimer = null;
+    if (adminEventsDesired) void startAdminEvents(true);
+  }, delay);
 }
 
 export function handleAdminEvent(type, payload = {}) {
@@ -517,45 +535,43 @@ export function handleAdminEvent(type, payload = {}) {
   }
 }
 
-function handleAdminEventsError(source, retryTokenRefresh) {
+function handleAdminEventsError(source, openedAt) {
   if (source !== adminEventsSource) return;
-  if (Date.now() - adminEventsLastOpenedAt > 15000) adminEventsRecoveryUsed = false;
-  if (!adminEventsRecoveryUsed) {
-    adminEventsRecoveryUsed = true;
-    stopAdminEvents({ resetRecovery: false });
-    void startAdminEvents(retryTokenRefresh);
-    return;
-  }
-  stopAdminEvents();
+  if (openedAt && Date.now() - openedAt > 15000) adminEventsReconnectAttempts = 0;
+  stopAdminEvents({ resetRecovery: false });
   if (!adminEventsWarningShown) {
     adminEventsWarningShown = true;
     setToast("Realtime обновление временно недоступно.", "warning");
     renderApp();
   }
+  scheduleAdminEventsRetry();
 }
 
 export async function startAdminEvents(retryTokenRefresh = false) {
   if (!state.initData || !canUseApi()) return null;
+  adminEventsDesired = true;
   if (adminEventsSource && adminEventsSource.readyState !== EventSource.CLOSED)
     return adminEventsSource;
   if (adminEventsStartPromise) return adminEventsStartPromise;
+  if (adminEventsRetryTimer !== null) {
+    clearTimeout(adminEventsRetryTimer);
+    adminEventsRetryTimer = null;
+  }
+  const generation = adminEventsGeneration;
   adminEventsStartPromise = (async () => {
     try {
       await createEventsToken();
-      if (
-        adminEventsSource &&
-        adminEventsSource.readyState !== EventSource.CLOSED
-      ) {
+      if (generation !== adminEventsGeneration || !adminEventsDesired) return null;
+      if (adminEventsSource && adminEventsSource.readyState !== EventSource.CLOSED)
         return adminEventsSource;
-      }
       const source = new EventSource("/api/admin/events");
       adminEventsSource = source;
-      adminEventsWarningShown = false;
+      let openedAt = null;
       source.addEventListener("open", () => {
-        const reconnected = adminEventsHadOpen;
-        adminEventsHadOpen = true;
-        adminEventsLastOpenedAt = Date.now();
-        if (reconnected) void refreshInboxFromEvent(null, { reconnect: true });
+        if (source !== adminEventsSource) return;
+        openedAt = Date.now();
+        adminEventsWarningShown = false;
+        void refreshInboxFromEvent(null, { reconnect: true });
       });
       source.addEventListener("ping", () => handleAdminEvent("ping", {}));
       source.addEventListener("chat.changed", (event) =>
@@ -571,26 +587,27 @@ export async function startAdminEvents(retryTokenRefresh = false) {
         handleAdminEvent("payout_changed", parseEventPayload(event.data)),
       );
       source.addEventListener("payout_recipients_changed", (event) =>
-        handleAdminEvent(
-          "payout_recipients_changed",
-          parseEventPayload(event.data),
-        ),
+        handleAdminEvent("payout_recipients_changed", parseEventPayload(event.data)),
       );
-      source.onerror = () => {
-        handleAdminEventsError(source, true);
-      };
+      source.onerror = () => handleAdminEventsError(source, openedAt);
       return source;
     } catch (error) {
-      if (error?.status === 401 || error?.status === 403) disableInboxAccess();
+      if (generation !== adminEventsGeneration || !adminEventsDesired) return null;
+      if (error?.status === 401 || error?.status === 403) {
+        disableInboxAccess();
+        stopAdminEvents();
+        return null;
+      }
+      stopAdminEvents({ resetRecovery: false });
       if (retryTokenRefresh && !adminEventsWarningShown) {
         adminEventsWarningShown = true;
         setToast("Realtime обновление временно недоступно.", "warning");
         renderApp();
       }
-      stopAdminEvents();
+      scheduleAdminEventsRetry();
       return null;
     } finally {
-      adminEventsStartPromise = null;
+      if (generation === adminEventsGeneration) adminEventsStartPromise = null;
     }
   })();
   return adminEventsStartPromise;
