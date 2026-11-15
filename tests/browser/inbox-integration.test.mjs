@@ -50,6 +50,8 @@ async function withBackend(run) {
     nextConversationId: 13,
     lastKey: null,
     delayedQuery: null,
+    delayedOpenUserId: null,
+    releaseOpen: null,
   };
 
   const json = (route, payload, status = 200) => route.fulfill({
@@ -164,6 +166,8 @@ async function withBackend(run) {
       }
       if (path === "/api/admin/conversations" && method === "POST") {
         const { user_id } = JSON.parse(req.postData() || "{}");
+        if (db.delayedOpenUserId === user_id)
+          await new Promise((resolve) => { db.releaseOpen = resolve; });
         if (!db.users.find((u) => u.id === user_id)) return json(route, { detail: "not found" }, 404);
         let conv = db.conversations.find((c) => c.user_id === user_id);
         if (!conv) { conv = { id: db.nextConversationId++, user_id }; db.conversations.push(conv); }
@@ -174,10 +178,13 @@ async function withBackend(run) {
         const cid = Number(match[1]), action = match[2];
         if (!db.conversations.some((conv) => conv.id === cid)) return json(route, { detail: "not found" }, 404);
         if (action === "messages" && method === "GET") {
-          const all = messagesFor(cid);
           const before = url.searchParams.get("before");
-          const page = before ? all.filter((message) => message.id < Number(before)) : all;
-          return json(route, { items: page, next_cursor: null });
+          const limit = Number(url.searchParams.get("limit") || 50);
+          const all = messagesFor(cid).filter((message) => before === null ||
+            message.id < Number(before)).sort((a, b) => a.id - b.id);
+          const page = all.slice(-limit);
+          return json(route, { items: page,
+            next_cursor: all.length > page.length ? String(page[0].id) : null });
         }
         if (action === "messages" && method === "POST") {
           const body = JSON.parse(req.postData());
@@ -331,6 +338,101 @@ test("HTTP inbox: stale search, cursor, retry after lost 202, authorization revo
     assert.equal(await page.locator("#inbox-history .inbox-message").count(), 0);
     assert.ok(db.requests.some((req) =>
       req.actor === 555 && req.path.includes("/conversations") && req.method === "GET"));
+    assert.deepEqual(errors, []);
+  });
+});
+
+
+test("More than 50 unread messages require continuous actual viewing; other admin is independent", async () => {
+  await withBackend(async ({ db, createPage, unreadFor }) => {
+    db.messages = Array.from({ length: 120 }, (_, index) => incoming(index + 1));
+    const owner = await createPage(123, 390);
+    const second = await createPage(555, 1280);
+    const a = owner.page;
+    await a.locator("#inbox-open").click();
+    await a.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await a.locator("#inbox-history [data-inbox-message='120']").waitFor();
+    assert.equal(await a.locator("#inbox-history .is-incoming").count(), 50);
+    assert.equal(unreadFor(123, 11), 120);
+    assert.equal(unreadFor(555, 11), 120);
+    assert.equal(db.requests.filter((r) => r.path === "/api/admin/conversations/11/read").length, 0);
+
+    await a.locator("#inbox-older").click();
+    await a.locator("#inbox-history [data-inbox-message='21']").waitFor();
+    assert.equal(unreadFor(123, 11), 120);
+    await a.locator("#inbox-older").click();
+    await a.locator("#inbox-history [data-inbox-message='1']").waitFor();
+    assert.equal(await a.locator("#inbox-history .is-incoming").count(), 120);
+    assert.equal(unreadFor(123, 11), 120,
+      "Loading a page is not equivalent to viewing its messages");
+
+    await a.locator("#inbox-history [data-inbox-message='1']").scrollIntoViewIfNeeded();
+    await a.waitForFunction(() => document.querySelector("#inbox-history").scrollTop < 60);
+    await a.waitForTimeout(150);
+    assert.ok(unreadFor(123, 11) > 0, "Reading only the first page must leave later messages unread");
+    assert.equal(unreadFor(555, 11), 120);
+
+    await a.locator("#inbox-history [data-inbox-message='120']").scrollIntoViewIfNeeded();
+    await a.waitForTimeout(150);
+    assert.ok(unreadFor(123, 11) > 0,
+      "Jumping to the newest message cannot skip the unviewed middle");
+    assert.equal(unreadFor(555, 11), 120);
+
+    await a.evaluate(async () => {
+      const list = document.getElementById("inbox-history");
+      const step = Math.max(40, list.clientHeight / 3);
+      for (let top = 0; top <= list.scrollHeight + step; top += step) {
+        list.scrollTop = top;
+        list.dispatchEvent(new Event("scroll"));
+        await new Promise((resolve) => setTimeout(resolve, 12));
+      }
+      list.scrollTop = list.scrollHeight;
+      list.dispatchEvent(new Event("scroll"));
+    });
+    await a.waitForFunction(() => document.querySelector("#inbox-unread").textContent === "0");
+    assert.equal(unreadFor(123, 11), 0);
+    assert.equal(unreadFor(555, 11), 120);
+    assert.equal(await second.page.locator("#inbox-unread").innerText(), "120");
+    assert.deepEqual(owner.errors, []);
+    assert.deepEqual(second.errors, []);
+  });
+});
+
+test("Late conversation creation cannot replace a manually selected chat and draft", async () => {
+  await withBackend(async ({ db, createPage }) => {
+    const { page, errors } = await createPage(123);
+    db.delayedOpenUserId = 3;
+    await page.locator('[data-mobile-view="users"]').click();
+    await page.locator('[data-inbox-write="3"]').click();
+    await page.waitForFunction(() => document.querySelector("#inbox-conversations .inbox-conversation") &&
+      document.querySelector("#inbox-dialog").open);
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.locator("#inbox-history [data-inbox-message='202']").waitFor();
+    await page.locator("#inbox-text").fill("Черновик выбранного диалога");
+    db.releaseOpen?.();
+    await page.waitForTimeout(350);
+    assert.equal(await page.locator("#inbox-title").innerText(), "Анна Петрова");
+    assert.equal(await page.locator("#inbox-text").inputValue(), "Черновик выбранного диалога");
+    assert.equal(await page.locator("#inbox-dialog").isVisible(), true);
+    assert.deepEqual(errors, []);
+  });
+});
+
+test("SSE keeps reconnecting after multiple short failures and refetches missed messages", async () => {
+  await withBackend(async ({ db, createPage }) => {
+    const { page, errors } = await createPage(123);
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.waitForFunction(() => window.__sse?.length === 1);
+    await page.evaluate(() => window.__sse.at(-1).onerror());
+    await page.waitForFunction(() => window.__sse?.length === 2, null, { timeout: 5000 });
+    await page.evaluate(() => window.__sse.at(-1).onerror());
+    await page.waitForFunction(() => window.__sse?.length === 3, null, { timeout: 8000 });
+    db.messages.push(incoming(203));
+    await page.evaluate(() => window.__sse.at(-1).emit("open", {}));
+    await page.locator("#inbox-history [data-inbox-message='203']").waitFor();
+    assert.equal(await page.evaluate(() => window.__sse.at(-1).readyState), 1);
+    assert.equal(db.requests.filter((r) => r.path === "/api/admin/events-token").length, 3);
     assert.deepEqual(errors, []);
   });
 });
