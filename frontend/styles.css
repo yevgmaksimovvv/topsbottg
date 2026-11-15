@@ -863,7 +863,7 @@ textarea::placeholder {
 }
 .admins-search-form {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
   gap: 8px;
 }
@@ -878,15 +878,9 @@ textarea::placeholder {
   background: var(--field);
   color: var(--text);
 }
-.admins-search-form select {
-  grid-column: 1 / -1;
-}
 .admins-load-more {
   width: 100%;
   margin-top: 12px;
-}
-.admins-search-form button {
-  min-height: 44px;
 }
 .admins-candidate-card {
   display: flex;
