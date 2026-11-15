@@ -13,6 +13,7 @@ from topsbottg.access import grant_admin, revoke_admin
 ADMIN_ROUTES = [
     ("GET", "/api/admin/me", None),
     ("POST", "/api/admin/events-token", None),
+    ("GET", "/api/admin/admin-directory", None),
     ("GET", "/api/admin/admin-grants", None),
     ("DELETE", "/api/admin/admin-grants/10", None),
     ("GET", "/api/admin/admin-candidates", None),
@@ -90,6 +91,7 @@ async def test_admin_route_rejects_unauthorized_user(
 
 
 OWNER_ONLY_ROUTES = {
+    ("GET", "/api/admin/admin-directory"),
     ("GET", "/api/admin/admin-grants"),
     ("DELETE", "/api/admin/admin-grants/10"),
     ("GET", "/api/admin/admin-candidates"),

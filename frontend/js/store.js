@@ -11,6 +11,7 @@ export const state = {
     ? "telegram_missing_init_data"
     : "browser",
   activeMobileView: "composer",
+  adminRole: null,
   users: [],
   payouts: [],
   payoutsHasMore: false,

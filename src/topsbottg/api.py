@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import urllib.request
+from datetime import UTC, datetime, timedelta
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -419,6 +420,54 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         response.headers["Connection"] = "keep-alive"
         return response
 
+    @app.get("/api/admin/admin-directory")
+    async def admin_directory(
+        session: AsyncSession = Depends(get_session),
+        x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
+    ) -> list[dict[str, object]]:
+        actor_id = await _require_admin(x_telegram_init_data, settings, session)
+        try:
+            require_owner(actor_id, settings.admin_ids_set)
+        except AccessDenied as exc:
+            raise HTTPException(status_code=403, detail="owner only") from exc
+
+        active = list(
+            await session.scalars(
+                select(AdminGrant).where(AdminGrant.revoked_at.is_(None))
+                .order_by(AdminGrant.telegram_id)
+            )
+        )
+        owner_ids = settings.admin_ids_set
+        all_ids = owner_ids | {grant.telegram_id for grant in active}
+        users = list(
+            await session.scalars(select(User).where(User.telegram_id.in_(all_ids)))
+        ) if all_ids else []
+        known = {user.telegram_id: user for user in users}
+        fresh_since = datetime.now(UTC) - timedelta(days=14)
+
+        def card(telegram_id: int, role: str) -> dict[str, object]:
+            user = known.get(telegram_id)
+            seen = user.telegram_profile_seen_at if user else None
+            is_fresh = seen is not None and (
+                seen if seen.tzinfo is not None else seen.replace(tzinfo=UTC)
+            ) >= fresh_since
+            username = user.telegram_username if is_fresh and user else None
+            display_name = (
+                (user.telegram_display_name if is_fresh else None)
+                or (user.full_name if user and user.full_name != "Без ФИО" else None)
+            )
+            return {
+                "telegram_id": telegram_id,
+                "role": role,
+                "username": username,
+                "display_name": display_name,
+            }
+
+        return [
+            *(card(telegram_id, "owner") for telegram_id in sorted(owner_ids)),
+            *(card(grant.telegram_id, "admin") for grant in active if grant.telegram_id not in owner_ids),
+        ]
+
     @app.get("/api/admin/admin-grants")
     async def admin_grants(
         session: AsyncSession = Depends(get_session),
@@ -498,15 +547,30 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             invitations = await list_invitations(session, actor_id=actor_id, owner_ids=settings.admin_ids_set)
         except AccessDenied as exc:
             raise HTTPException(status_code=403, detail="owner only") from exc
+        user_ids = {item.target_telegram_id for item in invitations}
+        users = list(
+            await session.scalars(select(User).where(User.telegram_id.in_(user_ids)))
+        ) if user_ids else []
+        known = {user.telegram_id: user for user in users}
         return [
             {
                 "id": item.id,
                 "target_telegram_id": item.target_telegram_id,
-                "created_by_owner_id": item.created_by_owner_id,
                 "status": item.status,
                 "expires_at": item.expires_at,
                 "delivered_at": item.delivered_at,
                 "created_at": item.created_at,
+                "username": (
+                    known[item.target_telegram_id].telegram_username
+                    if item.target_telegram_id in known
+                    else None
+                ),
+                "display_name": (
+                    (known[item.target_telegram_id].telegram_display_name
+                     or known[item.target_telegram_id].full_name)
+                    if item.target_telegram_id in known
+                    else None
+                ),
             }
             for item in invitations
         ]

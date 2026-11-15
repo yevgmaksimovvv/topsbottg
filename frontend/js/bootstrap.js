@@ -1,5 +1,6 @@
 import { SEARCH_DEBOUNCE_MS } from "./constants.js";
 import { renderApp, renderNavigation } from "./render-app.js";
+import { bindAdminControls, initAdminControls } from "./admins.js";
 import {
   bindTelegramViewportEvents,
   setThemeVariables,
@@ -438,11 +439,14 @@ export async function bootstrap() {
   document.getElementById("message-after").value = state.composer.messageAfter;
   bindMessageEditors();
   bindEvents();
+  bindAdminControls();
   renderApp();
   bindTelegramViewportEvents(syncViewportVariables);
   window.addEventListener("pagehide", stopAdminEvents);
   window.addEventListener("beforeunload", stopAdminEvents);
   if (!canUseApi()) return;
   void startAdminEvents();
-  await Promise.allSettled([loadStudyGroups(), loadUsers({ reset: true }), loadPayouts()]);
+  await Promise.allSettled([
+    initAdminControls(), loadStudyGroups(), loadUsers({ reset: true }), loadPayouts(),
+  ]);
 }
