@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from topsbottg.access import AccessDenied, get_principal, grant_admin, require_owner
+from topsbottg.access import AccessDenied, get_principal, grant_admin_from_invitation, require_owner
 from topsbottg.models import AdminInvitation, AuditLog, User
 
 PROFILE_MAX_AGE = timedelta(days=14)
@@ -167,12 +167,12 @@ async def decide_invitation(
     now = datetime.now(UTC)
     if _utc(invitation.expires_at) <= now:
         invitation.status = "expired"
-    elif actor_id in owner_ids or invitation.created_by_owner_id not in owner_ids:
+    elif actor_id in owner_ids:
         invitation.status = "cancelled"
     elif accept:
-        await grant_admin(
-            session, actor_telegram_id=invitation.created_by_owner_id,
-            target_telegram_id=actor_id, owner_ids=owner_ids,
+        await grant_admin_from_invitation(
+            session, invitation=invitation, target_telegram_id=actor_id,
+            owner_ids=owner_ids,
         )
         invitation.status = "accepted"
     else:
