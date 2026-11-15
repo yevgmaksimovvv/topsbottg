@@ -10,7 +10,7 @@ from topsbottg.constants import MAX_PAYOUT_MESSAGE_LENGTH
 
 class AdminInvitationCreateIn(BaseModel):
     target_telegram_id: int = Field(gt=0, strict=True)
-    expected_username: str | None = Field(default=None, max_length=33)
+    model_config = ConfigDict(extra="forbid")
 
 
 class StudyGroupOut(BaseModel):
