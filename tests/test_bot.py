@@ -1196,7 +1196,7 @@ async def test_private_chat_persists_in_order_and_deduplicates_across_dispatcher
                 ),
             )
         for _ in range(5):
-            assert (await events.get())["event"] == "chat.changed"
+            assert events.get_nowait()["event"] == "chat.changed"
         assert events.empty()
 
         restarted = _make_dispatcher(session_factory, settings)
