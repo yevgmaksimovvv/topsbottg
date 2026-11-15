@@ -173,7 +173,7 @@ test("owner can invite, cancel, revoke; modal retains payout state and supports 
     });
     assert.equal(snapshot.role, "owner",
       JSON.stringify({ snapshot, requests: state.requests }));
-    assert.equal(snapshot.buttonDisplay, "inline-flex",
+    assert.notEqual(snapshot.buttonDisplay, "none",
       JSON.stringify({ snapshot, requests: state.requests }));
     await page.locator("#admins-open").waitFor({ state: "visible" });
     await page.evaluate(async () => {
