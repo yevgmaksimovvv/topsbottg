@@ -46,6 +46,12 @@ const inbox = {
   backHandler: null,
   sending: false,
   openingUser: false,
+  draftFile: null,
+  draftPending: null,
+  mediaUrls: new Map(),
+  mediaRequests: new Map(),
+  mediaErrors: new Map(),
+  mediaObserver: null,
 };
 let bound = false;
 
@@ -68,6 +74,35 @@ const statusText = {
   failed: "Ошибка отправки",
 };
 const key = () => window.crypto?.randomUUID?.() || String(Date.now()) + "-" + Math.random().toString(36).slice(2);
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+const PHOTO_TYPES = new Set(["image/jpeg", "image/png"]);
+const FILE_TYPES = new Set([
+  "application/pdf", "application/zip", "text/plain",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ...PHOTO_TYPES, "audio/ogg",
+]);
+const fileSize = (size) => size == null ? "" :
+  (size < 1024 ? size + " Б" :
+    size < 1024 * 1024 ? (size / 1024).toFixed(1) + " КБ" :
+      (size / (1024 * 1024)).toFixed(1) + " МБ");
+const fileKind = (file) => PHOTO_TYPES.has(file.type) ? "photo" :
+  file.type === "audio/ogg" ? "voice" : "document";
+
+function clearMedia() {
+  inbox.mediaObserver?.disconnect();
+  inbox.mediaObserver = null;
+  for (const controller of inbox.mediaRequests.values()) controller.abort();
+  inbox.mediaRequests.clear();
+  for (const url of inbox.mediaUrls.values()) URL.revokeObjectURL(url);
+  inbox.mediaUrls.clear();
+  inbox.mediaErrors.clear();
+  const viewer = el("inbox-photo-viewer");
+  if (viewer?.open) viewer.close();
+  const image = el("inbox-photo-full");
+  if (image) image.removeAttribute("src");
+}
 
 export function isInboxEnabled() {
   return Boolean(inbox.client);
@@ -91,6 +126,7 @@ function handleRequestError(error) {
 }
 
 function cancelRequests() {
+  clearMedia();
   for (const prop of ["listController", "summaryController", "historyController", "openController", "readController", "newController"]) {
     inbox[prop]?.abort();
     inbox[prop] = null;
@@ -530,9 +566,14 @@ async function openConversation(conversation) {
   inbox.historyController?.abort();
   inbox.readController?.abort();
   inbox.current = conversation;
+  clearMedia();
   inbox.messages = [];
   inbox.seenIncoming.clear();
   inbox.authorLabels.clear();
+  inbox.draftFile = null;
+  inbox.draftPending = null;
+  el("inbox-file").value = "";
+  renderFilePreview();
   inbox.historyCursor = null;
   inbox.readThrough = null;
   inbox.readingId = null;
@@ -693,10 +734,11 @@ function cleanup() {
     inbox.opener.focus();
   inbox.opener = null;
   inbox.readingId = null;
+  clearMedia();
 }
 
 export function configureInboxClient(client) {
-  if (client !== null && (!client || ["summary", "conversations", "users", "open", "messages", "send", "read"].some((method) => typeof client[method] !== "function")))
+  if (client !== null && (!client || ["summary", "conversations", "users", "open", "messages", "send", "upload", "download", "read"].some((method) => typeof client[method] !== "function")))
     throw new TypeError("Inbox client does not implement contract #24");
   if (isOpen()) closeInbox();
   inbox.client = client;
@@ -706,6 +748,8 @@ export function configureInboxClient(client) {
     ++inbox.summaryRequest;
     inbox.conversations = [];
     inbox.messages = [];
+    inbox.draftFile = null;
+    inbox.draftPending = null;
     inbox.newUsers = [];
     inbox.seenIncoming.clear();
     inbox.authorLabels.clear();
