@@ -88,7 +88,13 @@ def create_runtime(settings: Settings) -> FastAPI:
         app.state.bot = bot
         app.state.dispatcher = dp
         app.state.bot_task = asyncio.create_task(dp.start_polling(bot))
-        app.state.worker_task = asyncio.create_task(run_worker(bot, session_factory, settings, app.state.stop_event))
+        app.state.worker_heartbeat = asyncio.get_running_loop().time()
+        app.state.worker_task = asyncio.create_task(
+            run_worker(
+                bot, session_factory, settings, app.state.stop_event,
+                heartbeat=lambda stamp: setattr(app.state, "worker_heartbeat", stamp),
+            )
+        )
 
         def restart_if_background_task_stops(task: asyncio.Task) -> None:
             if app.state.stop_event.is_set() or task.cancelled():
