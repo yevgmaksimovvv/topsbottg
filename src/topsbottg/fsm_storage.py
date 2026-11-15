@@ -49,6 +49,23 @@ class DatabaseFSMStorage(BaseStorage):
             )
             await session.commit()
 
+    async def set_state_and_data(
+        self, key: StorageKey, state: StateType, data: Mapping[str, Any]
+    ) -> None:
+        value = state.state if isinstance(state, State) else state
+        values = dict(data)
+        async with self._session_factory() as session:
+            statement = self._insert(session).values(
+                storage_key=self._storage_key(key), state=value, data=values
+            )
+            await session.execute(
+                statement.on_conflict_do_update(
+                    index_elements=[BotFSMState.storage_key],
+                    set_={"state": value, "data": values},
+                )
+            )
+            await session.commit()
+
     async def get_state(self, key: StorageKey) -> str | None:
         async with self._session_factory() as session:
             return await session.scalar(

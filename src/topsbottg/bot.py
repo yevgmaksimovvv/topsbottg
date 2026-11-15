@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from topsbottg.access import AccessDenied, get_principal
 from topsbottg.conversations import get_or_create_conversation, record_incoming_message
+from topsbottg.fsm_storage import DatabaseFSMStorage
 from topsbottg.invitations import decide_invitation
 from topsbottg.logging_utils import log_event
 from topsbottg.models import BotSensitiveMessage, PayoutRecipient, RecipientStatus
@@ -254,11 +255,18 @@ async def _start_payment_details_flow(
                 user_id=user.id,
                 active_recipient_id=active_recipient_id,
             )
-    await state.clear()
-    await state.set_state(RegistrationFSM.payment_details)
-    await state.update_data(active_recipient_id=active_recipient_id)
-    if not confirm_active_recipient:
-        await state.update_data(confirm_active_recipient=False)
+    payment_state_data = {
+        "active_recipient_id": active_recipient_id,
+        "confirm_active_recipient": confirm_active_recipient,
+    }
+    if isinstance(state.storage, DatabaseFSMStorage):
+        await state.storage.set_state_and_data(
+            state.key, RegistrationFSM.payment_details, payment_state_data
+        )
+    else:
+        await state.clear()
+        await state.set_state(RegistrationFSM.payment_details)
+        await state.set_data(payment_state_data)
     text = prompt_text or payment_details_message()
     if edit_message:
         if message is None:
@@ -311,7 +319,7 @@ async def _save_payment_details(
         return
     data = await state.get_data()
     active_recipient_id = data.get("active_recipient_id")
-    confirm_active_recipient = data.get("confirm_active_recipient", True)
+    confirm_active_recipient = data.get("confirm_active_recipient", False)
     async with session_factory() as session:
         user = await get_or_create_user(session, message.from_user.id)
         active_recipient = None
