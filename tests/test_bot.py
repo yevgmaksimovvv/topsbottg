@@ -1432,7 +1432,7 @@ async def test_first_rollout_drops_old_memory_storage_payment_input(
     bot, _ = _make_bot()
     old_bot = _make_dispatcher(session_factory, settings)
     await old_bot.feed_update(bot, _make_update(bot, 715, CHANGE_PAYMENT_DETAILS_BUTTON_TEXT, 1000))
-    old_context = await old_bot.fsm.get_context(bot=bot, chat_id=715, user_id=715)
+    old_context = old_bot.fsm.get_context(bot=bot, chat_id=715, user_id=715)
     assert await old_context.get_state() == "RegistrationFSM:payment_details"
 
     async with session_factory() as session:
