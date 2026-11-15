@@ -26,9 +26,13 @@ from topsbottg.models import (
     ChatMessageOutbox,
     Conversation,
     Payout,
+    PayoutRecipient,
+    PayoutStatus,
+    RecipientStatus,
     User,
 )
-from topsbottg.worker import deliver_chat_outbox
+from topsbottg.services import add_recipients, create_payout, get_or_create_user
+from topsbottg.worker import deliver_chat_outbox, run_worker
 
 PDF = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
 JPEG = b"\xff\xd8\xff\xe0" + b"0" * 32 + b"\xff\xd9"
@@ -461,3 +465,105 @@ async def test_media_send_exceeds_text_timeout_without_reclaim(
     async with session_factory() as session:
         job = await session.scalar(select(ChatMessageOutbox))
         assert job.status == "sent" and job.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_slow_media_does_not_stall_healthcheck_or_payout(
+    app, client, session_factory, settings, admin_init_data
+):
+    conversation_id, _ = await _conversation(session_factory, telegram_id=84901)
+    uploaded = await client.post(
+        f"/api/admin/conversations/{conversation_id}/attachments",
+        headers={"X-Telegram-Init-Data": admin_init_data, "Idempotency-Key": "slow-worker-media"},
+        data={"kind": "document"}, files={"file": ("report.pdf", PDF, "application/pdf")},
+    )
+    assert uploaded.status_code == 202
+    attachment_id = uploaded.json()["message"]["id"]
+    media_started = asyncio.Event()
+    media_cancelled = asyncio.Event()
+    payout_sent = asyncio.Event()
+
+    class PausedMediaBot:
+        async def send_document(self, chat_id, document, **kwargs):
+            media_started.set()
+            try:
+                # Simulate a Telegram upload lasting beyond the healthcheck TTL.
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                media_cancelled.set()
+                raise
+
+        async def send_message(self, chat_id, text, reply_markup=None):
+            payout_sent.set()
+            return SimpleNamespace(message_id=774)
+
+    stop_event = asyncio.Event()
+    heartbeat_times = []
+    bot = PausedMediaBot()
+    worker_task = asyncio.create_task(
+        run_worker(bot, session_factory, settings, stop_event, heartbeat=heartbeat_times.append)
+    )
+    # The HTTP health route uses this same worker heartbeat in production.
+    fake_polling = asyncio.create_task(asyncio.Event().wait())
+    loop = asyncio.get_running_loop()
+    app.state.bot_task = fake_polling
+    app.state.worker_task = worker_task
+    app.state.telegram_health_lock = asyncio.Lock()
+    app.state.telegram_health_ok = True
+    app.state.telegram_health_checked_until = loop.time() + 3600
+    app.state.worker_heartbeat = loop.time() - 31
+
+    try:
+        await asyncio.wait_for(media_started.wait(), timeout=5)
+        async with session_factory() as session:
+            recipient_user = await get_or_create_user(session, 84902, "Получатель выплаты")
+            payout = await create_payout(
+                session,
+                actor_telegram_id=123,
+                payload={
+                    "period_start_day": 1, "period_start_month": 2,
+                    "period_end_day": 28, "period_end_month": 2,
+                    "message_template": None,
+                },
+            )
+            payout.status = PayoutStatus.sending.value
+            [recipient] = await add_recipients(session, payout, [recipient_user.id])
+            recipient_id = recipient.id
+            await session.commit()
+
+        # Reset the heartbeat as though the media send had already taken >30s.
+        # The worker must refresh it and process the payout while media is pending.
+        app.state.worker_heartbeat = loop.time() - 31
+        await asyncio.wait_for(payout_sent.wait(), timeout=5)
+        async with session_factory() as session:
+            result = await session.get(PayoutRecipient, recipient_id)
+            assert result.status == RecipientStatus.payment_required.value
+            assert result.sent_at is not None
+        assert heartbeat_times and loop.time() - heartbeat_times[-1] < 30
+        app.state.worker_heartbeat = heartbeat_times[-1]
+        assert (await client.get("/healthz")).status_code == 200
+        assert not media_cancelled.is_set()
+        async with session_factory() as session:
+            job = await session.scalar(
+                select(ChatMessageOutbox).where(ChatMessageOutbox.message_id == attachment_id)
+            )
+            assert job.status == "sending" and job.attempts == 1
+    finally:
+        stop_event.set()
+        try:
+            await asyncio.wait_for(worker_task, timeout=5)
+        except TimeoutError:
+            worker_task.cancel()
+            await asyncio.gather(worker_task, return_exceptions=True)
+        fake_polling.cancel()
+        await asyncio.gather(fake_polling, return_exceptions=True)
+
+    assert media_cancelled.is_set()
+    async with session_factory() as session:
+        job = await session.scalar(
+            select(ChatMessageOutbox).where(ChatMessageOutbox.message_id == attachment_id)
+        )
+        # Cancelled Telegram calls are recovered by the existing lease mechanism.
+        assert job.status == "sending" and job.claim_token is not None
+        attachment = await session.get(ChatAttachment, attachment_id)
+        assert staging_path(settings.chat_staging_dir, attachment.staging_key).is_file()
