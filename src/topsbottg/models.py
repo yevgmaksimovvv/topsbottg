@@ -202,7 +202,6 @@ class AuditLog(Base, TimestampMixin):
 
 
 Index("ix_users_full_name_lower", func.lower(User.full_name))
-Index("ix_users_telegram_username_lower", func.lower(User.telegram_username))
 Index(
     "uq_admin_invitations_one_pending",
     AdminInvitation.target_telegram_id,
@@ -210,7 +209,6 @@ Index(
     postgresql_where=AdminInvitation.status == "pending",
     sqlite_where=AdminInvitation.status == "pending",
 )
-Index("ix_admin_invitations_delivery", AdminInvitation.status, AdminInvitation.next_delivery_at)
 Index("ix_users_study_group_id", User.study_group_id)
 Index("ix_payout_recipients_payout_status", PayoutRecipient.payout_id, PayoutRecipient.status)
 Index("ix_payout_recipients_user_status", PayoutRecipient.user_id, PayoutRecipient.status)
