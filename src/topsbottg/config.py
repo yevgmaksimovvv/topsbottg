@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     mini_app_init_data_max_age_seconds: int = Field(default=86400, ge=1)
     chat_entrypoint_enabled: bool = False
     chat_inbox_enabled: bool = False
+    chat_staging_dir: str = "/var/lib/topsbottg/chat-staging"
     postgresql_max_connections: int = Field(default=5, ge=1, le=20)
     app_host: str = Field(default="0.0.0.0")
     app_port: int = Field(default=8000, ge=1, le=65535)

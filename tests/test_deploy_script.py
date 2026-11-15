@@ -343,7 +343,11 @@ def test_deploy_happy_path_records_sha_and_recreates_only_nginx(tmp_path: Path) 
     assert f"--file {project}/docker-compose.yml config --format json" in docker_calls
     assert "--force-recreate" in docker_calls
     assert "--no-deps --force-recreate" in docker_calls
+    app_up_calls = [line for line in docker_calls.splitlines() if "up -d" in line and line.endswith("app")]
+    assert len(app_up_calls) == 1
+    assert "--wait-timeout 180 app" in app_up_calls[0]
     nginx_up_calls = [line for line in docker_calls.splitlines() if "up -d" in line and line.endswith("nginx")]
+    assert "--wait-timeout 180 nginx" in nginx_up_calls[0]
     assert len(nginx_up_calls) == 1
     assert "--no-deps --force-recreate" in nginx_up_calls[0]
     assert " postgres" not in nginx_up_calls[0]

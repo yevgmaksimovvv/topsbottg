@@ -26,6 +26,7 @@ ADMIN_ROUTES = [
     ("GET", "/api/admin/conversations/10/messages", None),
     ("GET", "/api/admin/chat-messages/10/attachment", None),
     ("POST", "/api/admin/conversations/10/messages", {"text": "Привет"}),
+    ("POST", "/api/admin/conversations/10/attachments", None),
     ("POST", "/api/admin/conversations/10/read", {"last_read_message_id": 1}),
     ("GET", "/api/admin/study-groups", None),
     ("GET", "/api/admin/users", None),

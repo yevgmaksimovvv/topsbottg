@@ -11,12 +11,15 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from topsbottg.attachment_staging import StagedUpload
 from topsbottg.conversations import lock_conversation_for_message
-from topsbottg.models import ChatMessage, ChatMessageOutbox, Conversation, User
+from topsbottg.models import ChatAttachment, ChatMessage, ChatMessageOutbox, Conversation, User
 from topsbottg.services import queue_admin_event
 
 MAX_CHAT_ATTEMPTS = 5
 CHAT_CLAIM_LEASE = timedelta(minutes=2)
+CHAT_MEDIA_SEND_TIMEOUT_SECONDS = 300
+CHAT_MEDIA_CLAIM_LEASE = timedelta(minutes=6)
 CHAT_RETRY_BASE_SECONDS = 3
 CHAT_RETRY_MAX_SECONDS = 300
 
@@ -36,6 +39,10 @@ class ChatOutboxClaim:
     claim_token: str
     reply_to_message_id: int | None
     reply_to_telegram_message_id: int | None
+    kind: str = "text"
+    staging_key: str | None = None
+    caption: str | None = None
+    filename: str | None = None
 
 
 def _fingerprint(text: str, reply_to_message_id: int | None) -> str:
@@ -125,6 +132,87 @@ async def create_outgoing_message(
     return message, True
 
 
+def _attachment_fingerprint(
+    staged: StagedUpload, caption: str | None, reply_to_message_id: int | None
+) -> str:
+    payload = json.dumps(
+        {
+            "kind": staged.kind, "sha256": staged.digest, "size": staged.size,
+            "mime": staged.mime_type, "filename": staged.filename,
+            "caption": caption, "reply_to_message_id": reply_to_message_id,
+        },
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+async def create_outgoing_attachment(
+    session: AsyncSession, *, conversation_id: int, admin_telegram_id: int,
+    idempotency_key: str, staged: StagedUpload, caption: str | None,
+    reply_to_message_id: int | None,
+) -> tuple[ChatMessage, bool]:
+    if conversation_id <= 0 or admin_telegram_id <= 0 or not idempotency_key:
+        raise ValueError("invalid outgoing attachment identity")
+    fingerprint = _attachment_fingerprint(staged, caption, reply_to_message_id)
+    await lock_conversation_for_message(session, conversation_id=conversation_id)
+    existing = await session.scalar(
+        select(ChatMessageOutbox).where(
+            ChatMessageOutbox.conversation_id == conversation_id,
+            ChatMessageOutbox.admin_telegram_id == admin_telegram_id,
+            ChatMessageOutbox.idempotency_key == idempotency_key,
+        )
+    )
+    if existing is not None:
+        if existing.payload_fingerprint != fingerprint:
+            raise IdempotencyConflict("idempotency key belongs to a different payload")
+        original = await session.get(ChatMessage, existing.message_id)
+        if original is None:
+            raise RuntimeError("outbox references missing attachment")
+        return original, False
+
+    if reply_to_message_id is not None:
+        target = await session.scalar(
+            select(ChatMessage.id).where(
+                ChatMessage.id == reply_to_message_id,
+                ChatMessage.conversation_id == conversation_id,
+            )
+        )
+        if target is None:
+            raise ValueError("reply target is not in this conversation")
+
+    message = ChatMessage(
+        conversation_id=conversation_id, direction="outgoing",
+        kind=staged.kind, text=None, caption=caption,
+        author_admin_telegram_id=admin_telegram_id, source="admin",
+    )
+    message.attachment = ChatAttachment(
+        telegram_file_id=None, telegram_file_unique_id=None,
+        staging_key=staged.key, kind=staged.kind,
+        filename=staged.filename, size=staged.size,
+        mime_type=staged.mime_type, available=False,
+    )
+    message.outbox = ChatMessageOutbox(
+        conversation_id=conversation_id, admin_telegram_id=admin_telegram_id,
+        idempotency_key=idempotency_key, payload_fingerprint=fingerprint,
+        reply_to_message_id=reply_to_message_id, status="queued",
+    )
+    session.add(message)
+    await session.flush()
+    now = func.now()
+    await session.execute(
+        update(Conversation).where(Conversation.id == conversation_id).values(
+            last_message_at=case(
+                (Conversation.last_message_at.is_(None), now),
+                (Conversation.last_message_at < now, now),
+                else_=Conversation.last_message_at,
+            ),
+            updated_at=now,
+        )
+    )
+    queue_admin_event(session, "chat.changed", {"conversation_id": conversation_id})
+    return message, True
+
+
 async def claim_chat_outbox(
     session: AsyncSession, *, limit: int = 1, now: datetime | None = None
 ) -> list[ChatOutboxClaim]:
@@ -160,8 +248,19 @@ async def claim_chat_outbox(
             queue_admin_event(session, "chat.changed", {"conversation_id": row.conversation_id})
             continue
         message = await session.get(ChatMessage, row.message_id)
-        if message is None or message.text is None:
+        if message is None or (message.kind == "text" and message.text is None):
             raise RuntimeError("outbox references missing outgoing message")
+        attachment = message.attachment if message.kind != "text" else None
+        if message.kind != "text" and (
+            attachment is None or attachment.staging_key is None
+        ):
+            row.status = "failed"
+            row.error_code = "staging_file_missing"
+            row.claimed_until = None
+            row.claim_token = None
+            row.retry_at = None
+            queue_admin_event(session, "chat.changed", {"conversation_id": row.conversation_id})
+            continue
         destination = await session.scalar(
             select(User.telegram_id)
             .join(Conversation, Conversation.user_id == User.id)
@@ -203,7 +302,9 @@ async def claim_chat_outbox(
         row.status = "sending"
         row.attempts += 1
         row.claim_token = token
-        row.claimed_until = now + CHAT_CLAIM_LEASE
+        row.claimed_until = now + (
+            CHAT_MEDIA_CLAIM_LEASE if message.kind != "text" else CHAT_CLAIM_LEASE
+        )
         row.retry_at = None
         queue_admin_event(session, "chat.changed", {"conversation_id": row.conversation_id})
         claims.append(ChatOutboxClaim(
@@ -211,11 +312,15 @@ async def claim_chat_outbox(
             message_id=message.id,
             conversation_id=row.conversation_id,
             chat_id=destination,
-            text=message.text,
+            text=message.text or "",
             attempts=row.attempts,
             claim_token=token,
             reply_to_message_id=row.reply_to_message_id,
             reply_to_telegram_message_id=target_telegram_id,
+            kind=message.kind,
+            staging_key=attachment.staging_key if attachment else None,
+            caption=message.caption,
+            filename=attachment.filename if attachment else None,
         ))
     return claims
 
@@ -225,6 +330,8 @@ async def settle_chat_outbox(
     claim: ChatOutboxClaim,
     *,
     telegram_message_id: int | None = None,
+    telegram_file_id: str | None = None,
+    telegram_file_unique_id: str | None = None,
     error_code: str | None = None,
     retry_after: float | None = None,
     permanent: bool = False,
@@ -253,6 +360,13 @@ async def settle_chat_outbox(
         message.telegram_message_id = telegram_message_id
         message.telegram_chat_id = claim.chat_id
         message.reply_to_telegram_message_id = claim.reply_to_telegram_message_id
+        if claim.kind != "text":
+            attachment = message.attachment
+            if attachment is None or not telegram_file_id:
+                raise ValueError("sent media must have a Telegram file identifier")
+            attachment.telegram_file_id = telegram_file_id
+            attachment.telegram_file_unique_id = telegram_file_unique_id
+            attachment.available = True
     else:
         row.error_code = (error_code or "delivery_unknown")[:64]
         if permanent or row.attempts >= MAX_CHAT_ATTEMPTS:

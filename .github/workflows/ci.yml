@@ -263,6 +263,36 @@ jobs:
       - name: Install project and development dependencies
         run: uv sync --locked --extra dev
 
+      - name: Validate Compose staging volume
+        env:
+          APP_DOMAIN: localhost
+          BOT_TOKEN: test-token
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/topsbottg
+          MINI_APP_URL: https://localhost/miniapp/
+          BROADCAST_RATE_PER_SECOND: "5"
+          ADMIN_TELEGRAM_IDS: "123"
+          POSTGRES_DB: topsbottg
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test-password
+        run: |
+          docker compose config --format json > /tmp/topsbottg-compose.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          compose = json.loads(Path("/tmp/topsbottg-compose.json").read_text())
+          volumes = compose["services"]["app"]["volumes"]
+          assert len([volume for volume in volumes if volume["target"] == "/var/lib/topsbottg/chat-staging"]) == 1
+          mount = next(volume for volume in volumes if volume["target"] == "/var/lib/topsbottg/chat-staging")
+          assert mount["type"] == "volume"
+          assert "chat_staging" in mount["source"]
+          assert "chat_staging" in compose["volumes"]
+          assert compose["services"]["app"]["environment"]["CHAT_STAGING_DIR"] == (
+              "/var/lib/topsbottg/chat-staging"
+          )
+          assert "client_max_body_size 21m;" in Path("nginx/templates/default.conf.template").read_text()
+          PY
+
       - name: Check JavaScript modules through Nginx
         shell: bash
         run: |
