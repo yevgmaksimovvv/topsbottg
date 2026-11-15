@@ -410,7 +410,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
             "topsbottg_events", token.token, max_age=ADMIN_EVENTS_TOKEN_TTL_SECONDS,
             path="/api/admin/events", httponly=True, secure=True, samesite="strict",
         )
-        return AdminEventsTokenOut(token=token.token, expires_in=ADMIN_EVENTS_TOKEN_TTL_SECONDS)
+        return AdminEventsTokenOut(expires_in=ADMIN_EVENTS_TOKEN_TTL_SECONDS)
 
     @app.get("/api/admin/events")
     async def admin_events(
