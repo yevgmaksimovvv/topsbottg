@@ -486,6 +486,7 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
                 "role": role,
                 "username": username,
                 "display_name": display_name,
+                "full_name": user.full_name if user else None,
             }
 
         return [
