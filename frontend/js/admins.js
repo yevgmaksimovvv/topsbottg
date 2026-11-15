@@ -1,4 +1,5 @@
 import { api } from "./api.js";
+import { SEARCH_DEBOUNCE_MS } from "./constants.js";
 import { $, canUseApi, state } from "./store.js";
 import { telegramWebApp } from "./telegram.js";
 import { escapeHtml } from "./utils.js";
@@ -6,6 +7,7 @@ import { escapeHtml } from "./utils.js";
 const dialog = () => $("admins-dialog");
 let dialogRequestId = 0;
 let searchRequestId = 0;
+let searchTimer = null;
 let opener = null;
 let telegramBack = null;
 let busy = false;
@@ -174,27 +176,47 @@ function closeAdminDialog() {
   if (dialog()?.open) dialog().close();
 }
 
+function cancelScheduledSearch() {
+  if (searchTimer !== null) window.clearTimeout(searchTimer);
+  searchTimer = null;
+}
+
+function scheduleCandidateSearch(immediate = false) {
+  cancelScheduledSearch();
+  ++searchRequestId;
+  candidates = [];
+  candidate = null;
+  pendingInvite = false;
+  hasMoreCandidates = false;
+  searchError = "";
+  loadingSearch = false;
+  renderCandidate();
+
+  const value = $("admins-search-input")?.value.trim() || "";
+  const groupId = $("admins-search-group")?.value || "";
+  if ((!value && !groupId) || (value && !/^\\d+$/.test(value) && value.length < 2)) return;
+  if (immediate) {
+    void searchCandidate();
+  } else {
+    searchTimer = window.setTimeout(() => {
+      searchTimer = null;
+      void searchCandidate();
+    }, SEARCH_DEBOUNCE_MS);
+  }
+}
+
 async function searchCandidate(append = false) {
   if (!dialog()?.open || state.adminRole !== "owner" || busy || loadingSearch) return;
   const value = $("admins-search-input")?.value.trim() || "";
   const groupId = $("admins-search-group")?.value || "";
-  if (!append) {
-    candidates = [];
-    candidate = null;
-    pendingInvite = false;
-    hasMoreCandidates = false;
-  }
-  searchError = "";
-  if (!value) {
-    searchError = "Введите ФИО или Telegram ID.";
-    renderCandidate();
-    return;
-  }
+  if (!value && !groupId) return;
   const id = ++searchRequestId;
+  searchError = "";
   loadingSearch = true;
   renderCandidate();
   try {
-    const params = new URLSearchParams({ search: value, offset: String(candidates.length) });
+    const params = new URLSearchParams({ offset: String(candidates.length) });
+    if (value) params.set("search", value);
     if (groupId) params.set("study_group_id", groupId);
     const result = await api(`/admin/admin-candidates?${params}`);
     if (searchRequestId !== id || !dialog()?.open) return;
@@ -294,39 +316,19 @@ export function bindAdminControls() {
     telegramBack?.show?.();
     void refreshDirectory();
     void loadStudyGroups();
+    scheduleCandidateSearch(true);
   });
   $("admins-close")?.addEventListener("click", closeAdminDialog);
   $("admins-refresh")?.addEventListener("click", () => void refreshDirectory());
-  $("admins-search-form")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void searchCandidate();
-  });
-  $("admins-search-input")?.addEventListener("input", () => {
-    ++searchRequestId;
-    candidate = null;
-    candidates = [];
-    hasMoreCandidates = false;
-    pendingInvite = false;
-    searchError = "";
-    loadingSearch = false;
-    renderCandidate();
-  });
-  $("admins-search-group")?.addEventListener("change", () => {
-    ++searchRequestId;
-    candidate = null;
-    candidates = [];
-    hasMoreCandidates = false;
-    pendingInvite = false;
-    searchError = "";
-    loadingSearch = false;
-    renderCandidate();
-  });
+  $("admins-search-input")?.addEventListener("input", () => scheduleCandidateSearch());
+  $("admins-search-group")?.addEventListener("change", () => scheduleCandidateSearch(true));
   dialog()?.addEventListener("click", (event) => {
     const button = event.target.closest?.("[data-admin-action]");
     if (button && !button.disabled) handleAction(button);
   });
   dialog()?.addEventListener("cancel", releaseTelegramBackButton);
   dialog()?.addEventListener("close", () => {
+    cancelScheduledSearch();
     ++dialogRequestId;
     ++searchRequestId;
     releaseTelegramBackButton();
