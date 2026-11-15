@@ -35,7 +35,8 @@ async def find_candidate(session: AsyncSession, *, telegram_id: int) -> User | N
     """An invitation target must already exist in the registration database."""
     if telegram_id <= 0:
         raise ValueError("Telegram ID must be positive.")
-    return await session.scalar(select(User).options(selectinload(User.study_group)).where(User.telegram_id == telegram_id))
+    query = select(User).options(selectinload(User.study_group)).where(User.telegram_id == telegram_id)
+    return await session.scalar(query)
 
 
 async def search_candidates(
