@@ -377,15 +377,20 @@ def register_conversation_routes(
     async def admin_send_conversation_message(
         conversation_id: int,
         payload: ChatMessageCreateIn,
-        idempotency_key: str = Header(
-            ..., alias="Idempotency-Key", min_length=1, max_length=128,
+        idempotency_key: str | None = Header(
+            default=None, alias="Idempotency-Key",
         ),
         session: AsyncSession = Depends(get_session),
         x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
     ) -> ChatMessageAcceptedOut:
         actor_id = await require_admin(x_telegram_init_data, settings, session)
         await _conversation_or_404(session, conversation_id)
-        if not idempotency_key.isascii() or any(not 33 <= ord(ch) <= 126 for ch in idempotency_key):
+        if (
+            idempotency_key is None
+            or not 1 <= len(idempotency_key) <= 128
+            or not idempotency_key.isascii()
+            or any(not 33 <= ord(ch) <= 126 for ch in idempotency_key)
+        ):
             raise HTTPException(status_code=422, detail="invalid idempotency key")
         try:
             message, _ = await create_outgoing_message(
