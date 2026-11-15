@@ -13,7 +13,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from topsbottg.api import create_app
-from topsbottg.models import AdminInvitation, Base
+from topsbottg.models import AdminInvitation, Base, StudyGroup
 from topsbottg.services import get_or_create_user
 from topsbottg.worker import deliver_admin_invitations
 
@@ -103,3 +103,37 @@ async def test_two_workers_send_single_invitation_on_postgres(postgres_invitatio
     async with factory() as session:
         invitation = await session.get(AdminInvitation, created.json()["id"])
         assert invitation.delivered_at is not None
+
+
+@pytest.mark.postgres
+async def test_search_by_russian_name_and_optional_group_on_postgres(postgres_invitations):
+    client, factory, settings = postgres_invitations
+    async with factory() as session:
+        group = StudyGroup(display_code="М3О-207СВ-25", normalized_code="М3О-207СВ-25")
+        session.add(group)
+        await session.flush()
+        grouped = await get_or_create_user(session, 555, "Шемяков Владимир Олегович")
+        grouped.study_group_id = group.id
+        await get_or_create_user(session, 666, "Шемяков Алексей")
+        await session.commit()
+
+    headers = {"X-Telegram-Init-Data": make_init_data(settings.bot_token, 123)}
+    without_filter = await client.get(
+        "/api/admin/admin-candidates", params={"search": "шемяков"}, headers=headers,
+    )
+    assert without_filter.status_code == 200, without_filter.text
+    assert {item["telegram_id"] for item in without_filter.json()["items"]} == {555, 666}
+
+    with_filter = await client.get(
+        "/api/admin/admin-candidates",
+        params={"search": "ВЛАДИМИР", "study_group_id": group.id}, headers=headers,
+    )
+    assert with_filter.status_code == 200, with_filter.text
+    assert [item["telegram_id"] for item in with_filter.json()["items"]] == [555]
+
+    # Even though only the first person has a group, the second can still be invited.
+    invited = await client.post(
+        "/api/admin/admin-invitations",
+        json={"target_telegram_id": 666}, headers=headers,
+    )
+    assert invited.status_code == 201, invited.text
