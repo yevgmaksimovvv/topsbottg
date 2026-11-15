@@ -25,6 +25,7 @@ ADMIN_ROUTES = [
     ("GET", "/api/admin/conversations/summary", None),
     ("GET", "/api/admin/conversations/10/messages", None),
     ("GET", "/api/admin/chat-messages/10/attachment", None),
+    ("POST", "/api/admin/conversations/10/messages", {"text": "Привет"}),
     ("POST", "/api/admin/conversations/10/read", {"last_read_message_id": 1}),
     ("GET", "/api/admin/study-groups", None),
     ("GET", "/api/admin/users", None),
@@ -74,7 +75,6 @@ def _route_template(path: str) -> str:
                     else "{telegram_id}" if value == "10" and parts[index - 1] == "admin-grants"
                     else "{invitation_id}" if value == "10" and parts[index - 1] == "admin-invitations"
                     else "{conversation_id}" if value == "10" and parts[index - 1] == "conversations"
-                    else "{message_id}" if value == "10" and parts[index - 1] == "chat-messages"
                     else "{payout_id}" if value == "10" and parts[index - 1] == "payouts"
                     else "{recipient_id}" if value == "20" and parts[index - 1] == "recipients"
                     else value for index, value in enumerate(parts))

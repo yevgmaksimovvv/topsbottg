@@ -5,8 +5,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0019_incoming_attachments"
-down_revision = "0018_persistent_bot_fsm"
+revision = "0020_incoming_attachments"
+down_revision = "0019_chat_message_outbox"
 branch_labels = None
 depends_on = None
 

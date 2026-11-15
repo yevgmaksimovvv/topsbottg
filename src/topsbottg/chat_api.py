@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from topsbottg.attachments import attachment_public_data
+from topsbottg.chat_outbox import IdempotencyConflict, create_outgoing_message
 from topsbottg.config import Settings
 from topsbottg.conversations import (
     advance_read_marker,
@@ -33,6 +34,8 @@ from topsbottg.models import (
     User,
 )
 from topsbottg.schemas import (
+    ChatMessageAcceptedOut,
+    ChatMessageCreateIn,
     ChatMessageOut,
     ChatMessagePageOut,
     ConversationCreateIn,
@@ -51,6 +54,7 @@ def _utc(value: datetime) -> datetime:
 
 
 def _message_out(message: ChatMessage) -> ChatMessageOut:
+    outbox = message.outbox
     return ChatMessageOut(
         id=message.id,
         conversation_id=message.conversation_id,
@@ -62,8 +66,8 @@ def _message_out(message: ChatMessage) -> ChatMessageOut:
         author_admin_telegram_id=message.author_admin_telegram_id,
         telegram_message_id=message.telegram_message_id,
         reply_to_telegram_message_id=message.reply_to_telegram_message_id,
-        delivery_status=getattr(message, "delivery_status", None),
-        delivery_error_code=getattr(message, "delivery_error_code", None),
+        delivery_status=outbox.status if outbox else None,
+        delivery_error_code=outbox.error_code if outbox else None,
         attachment=attachment_public_data(message.attachment),
     )
 
@@ -365,6 +369,45 @@ def register_conversation_routes(
             "v": 1, "conversation_id": conversation_id, "before_id": next_id,
         }) if next_id is not None else None
         return ChatMessagePageOut(items=[_message_out(message) for message in messages], next_cursor=next_cursor)
+
+    @app.post(
+        "/api/admin/conversations/{conversation_id}/messages",
+        response_model=ChatMessageAcceptedOut,
+        status_code=202,
+    )
+    async def admin_send_conversation_message(
+        conversation_id: int,
+        payload: ChatMessageCreateIn,
+        idempotency_key: str | None = Header(
+            default=None, alias="Idempotency-Key",
+        ),
+        session: AsyncSession = Depends(get_session),
+        x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
+    ) -> ChatMessageAcceptedOut:
+        actor_id = await require_admin(x_telegram_init_data, settings, session)
+        await _conversation_or_404(session, conversation_id)
+        if (
+            idempotency_key is None
+            or not 1 <= len(idempotency_key) <= 128
+            or not idempotency_key.isascii()
+            or any(not 33 <= ord(ch) <= 126 for ch in idempotency_key)
+        ):
+            raise HTTPException(status_code=422, detail="invalid idempotency key")
+        try:
+            message, _ = await create_outgoing_message(
+                session,
+                conversation_id=conversation_id,
+                admin_telegram_id=actor_id,
+                idempotency_key=idempotency_key,
+                text=payload.text,
+                reply_to_message_id=payload.reply_to_message_id,
+            )
+        except IdempotencyConflict as exc:
+            raise HTTPException(status_code=409, detail="idempotency key reused with different payload") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="reply message not found in conversation") from exc
+        await session.commit()
+        return ChatMessageAcceptedOut(message=_message_out(message))
 
     @app.post("/api/admin/conversations/{conversation_id}/read", response_model=ConversationReadOut)
     async def admin_conversation_read(
