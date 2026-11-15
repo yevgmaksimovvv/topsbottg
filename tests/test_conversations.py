@@ -86,7 +86,10 @@ async def test_incoming_replay_does_not_insert_or_update_activity(session_factor
         assert created is False
         assert replay.id == original_id
         assert replay.text == "Первое"
-        assert (await session.scalar(select(Conversation.last_message_at).where(Conversation.id == conv.id))) == timestamp
+        replay_timestamp = await session.scalar(
+            select(Conversation.last_message_at).where(Conversation.id == conv.id)
+        )
+        assert replay_timestamp == timestamp
         await session.commit()
         assert (await session.scalar(select(func.count(ChatMessage.id)))) == 1
 
