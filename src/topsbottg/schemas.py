@@ -151,10 +151,12 @@ class CampaignRecipientsIn(BaseModel):
     user_ids: list[int] = Field(default_factory=list, max_length=5000)
     study_group_ids: list[int] = Field(default_factory=list, max_length=5000)
 
-    @field_validator("user_ids", "study_group_ids")
+    @field_validator("user_ids", "study_group_ids", mode="before")
     @classmethod
-    def _ids_must_be_positive(cls, values: list[int]) -> list[int]:
-        if any(type(item) is not int or item <= 0 for item in values):
+    def _ids_must_be_positive(cls, values: object) -> object:
+        if not isinstance(values, list) or any(
+            type(item) is not int or item <= 0 for item in values
+        ):
             raise ValueError("IDs must be positive integers")
         return values
 
