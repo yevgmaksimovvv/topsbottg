@@ -9,13 +9,18 @@ import secrets
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, UploadFile
 from sqlalchemy import and_, delete, func, insert, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from topsbottg.attachment_staging import UploadRejected, remove_staged_file, stage_upload
 from topsbottg.attachments import attachment_public_data
-from topsbottg.chat_outbox import IdempotencyConflict, create_outgoing_message
+from topsbottg.chat_outbox import (
+    IdempotencyConflict,
+    create_outgoing_attachment,
+    create_outgoing_message,
+)
 from topsbottg.config import Settings
 from topsbottg.conversations import (
     advance_read_marker,
@@ -408,6 +413,84 @@ def register_conversation_routes(
             raise HTTPException(status_code=404, detail="reply message not found in conversation") from exc
         await session.commit()
         return ChatMessageAcceptedOut(message=_message_out(message))
+
+    @app.post(
+        "/api/admin/conversations/{conversation_id}/attachments",
+        response_model=ChatMessageAcceptedOut,
+        status_code=202,
+    )
+    async def admin_send_conversation_attachment(
+        conversation_id: int,
+        request: Request,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        session: AsyncSession = Depends(get_session),
+        x_telegram_init_data: str | None = Header(default=None, alias="X-Telegram-Init-Data"),
+    ) -> ChatMessageAcceptedOut:
+        actor_id = await require_admin(x_telegram_init_data, settings, session)
+        await _conversation_or_404(session, conversation_id)
+        if (
+            idempotency_key is None
+            or not 1 <= len(idempotency_key) <= 128
+            or not idempotency_key.isascii()
+            or any(not 33 <= ord(ch) <= 126 for ch in idempotency_key)
+        ):
+            raise HTTPException(status_code=422, detail="invalid idempotency key")
+        if request.headers.get("content-type", "").split(";", 1)[0].lower() != "multipart/form-data":
+            raise HTTPException(status_code=415, detail="multipart/form-data required")
+
+        # Parse multipart only after re-checking administrator permissions.
+        form = await request.form(max_files=1, max_fields=4)
+        staged = None
+        keep_file = False
+        try:
+            allowed_fields = {"file", "kind", "caption", "reply_to_message_id"}
+            if (
+                set(form) - allowed_fields
+                or any(len(form.getlist(key)) != 1 for key in form)
+            ):
+                raise HTTPException(status_code=422, detail="invalid form fields")
+            upload = form.get("file")
+            kind = form.get("kind")
+            caption = form.get("caption")
+            reply_field = form.get("reply_to_message_id")
+            if not isinstance(upload, UploadFile) or not isinstance(kind, str):
+                raise HTTPException(status_code=422, detail="file and kind required")
+            if caption is not None and (not isinstance(caption, str) or len(caption) > 1024):
+                raise HTTPException(status_code=422, detail="invalid caption")
+            if reply_field is None or reply_field == "":
+                reply_id = None
+            elif (
+                isinstance(reply_field, str)
+                and reply_field.isascii() and reply_field.isdecimal()
+                and int(reply_field) > 0
+            ):
+                reply_id = int(reply_field)
+            else:
+                raise HTTPException(status_code=422, detail="invalid reply_to_message_id")
+            try:
+                staged = await stage_upload(upload, kind=kind, root=settings.chat_staging_dir)
+                message, created = await create_outgoing_attachment(
+                    session,
+                    conversation_id=conversation_id,
+                    admin_telegram_id=actor_id,
+                    idempotency_key=idempotency_key,
+                    staged=staged,
+                    caption=caption,
+                    reply_to_message_id=reply_id,
+                )
+            except UploadRejected as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.code) from exc
+            except IdempotencyConflict as exc:
+                raise HTTPException(status_code=409, detail="idempotency key reused with different payload") from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=404, detail="reply message not found in conversation") from exc
+            await session.commit()
+            keep_file = created
+            return ChatMessageAcceptedOut(message=_message_out(message))
+        finally:
+            await form.close()
+            if staged is not None and not keep_file:
+                remove_staged_file(settings.chat_staging_dir, staged.key)
 
     @app.post("/api/admin/conversations/{conversation_id}/read", response_model=ConversationReadOut)
     async def admin_conversation_read(
