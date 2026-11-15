@@ -19,11 +19,7 @@ let loadingSearch = false;
 let memberError = "";
 let searchError = "";
 
-const nameFor = (user) => (user?.full_name && user.full_name !== "Без ФИО")
-  ? user.full_name
-  : (user?.display_name && user.display_name !== "Без ФИО"
-      ? user.display_name
-      : user?.username ? `@${user.username.replace(/^@/, "")}` : "Имя не указано");
+const nameFor = (user) => user?.full_name || (user?.telegram_id ? `ID ${user.telegram_id}` : "Имя не указано");
 
 function renderMembers() {
   const status = $("admins-status");
@@ -94,14 +90,13 @@ function renderCandidate() {
     target.replaceChildren();
     return;
   }
-  const display = candidate.full_name && candidate.full_name !== "Без ФИО"
-    ? candidate.full_name
-    : candidate.display_name || "Имя не указано";
+  const name = nameFor(candidate);
   const group = candidate.study_group ? ` · ${candidate.study_group}` : "";
+  const detail = candidate.username ? name + group : `ID ${candidate.telegram_id}` + group;
   target.innerHTML = `<article class="admins-candidate-card">
     <div class="admins-member-identity">
       <strong>${escapeHtml(candidate.username ? `@${candidate.username.replace(/^@/, "")}` : nameFor(candidate))}</strong>
-      <span>${escapeHtml(display + group)}</span>
+      <span>${escapeHtml(detail)}</span>
     </div>
     ${candidate.role
       ? `<p class="admins-empty">${candidate.role === "owner"
