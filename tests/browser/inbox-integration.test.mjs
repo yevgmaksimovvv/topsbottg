@@ -392,7 +392,7 @@ test("More than 50 unread messages require continuous actual viewing; other admi
     await a.waitForFunction(() => document.querySelector("#inbox-unread").textContent === "0");
     assert.equal(unreadFor(123, 11), 0);
     assert.equal(unreadFor(555, 11), 120);
-    assert.equal(await second.page.locator("#inbox-unread").innerText(), "120");
+    assert.equal(await second.page.locator("#inbox-unread").innerText(), "99+");
     assert.deepEqual(owner.errors, []);
     assert.deepEqual(second.errors, []);
   });
