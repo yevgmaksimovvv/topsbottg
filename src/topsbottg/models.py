@@ -6,6 +6,7 @@ from enum import StrEnum
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -153,6 +154,7 @@ class ChatMessage(Base):
     direction: Mapped[str] = mapped_column(String(8), nullable=False)
     kind: Mapped[str] = mapped_column(String(16), nullable=False, default="text", server_default="text")
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    caption: Mapped[str | None] = mapped_column(Text, nullable=True)
     telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     reply_to_telegram_message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -161,6 +163,29 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
+    attachment: Mapped[ChatAttachment | None] = relationship(
+        back_populates="message", uselist=False, lazy="selectin", cascade="all, delete-orphan"
+    )
+
+
+class ChatAttachment(Base):
+    __tablename__ = "chat_attachments"
+
+    chat_message_id: Mapped[int] = mapped_column(
+        ForeignKey("chat_messages.id", ondelete="CASCADE"), primary_key=True
+    )
+    telegram_file_id: Mapped[str] = mapped_column(Text, nullable=False)
+    telegram_file_unique_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    filename: Mapped[str | None] = mapped_column(Text, nullable=True)
+    size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    width: Mapped[int | None] = mapped_column(nullable=True)
+    height: Mapped[int | None] = mapped_column(nullable=True)
+    duration: Mapped[int | None] = mapped_column(nullable=True)
+    available: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", nullable=False)
+
+    message: Mapped[ChatMessage] = relationship(back_populates="attachment")
 
 
 class ConversationRead(Base):
