@@ -414,52 +414,67 @@ async def run_worker(
     next_invitations = 0.0
     next_chat = 0.0
     next_stage_cleanup = 0.0
-    while not stop_event.is_set():
-        now = loop.time()
-        if now >= next_recovery:
+    chat_task: asyncio.Task[None] | None = None
+    try:
+        while not stop_event.is_set():
+            now = loop.time()
+            # Keep at most one in-flight Telegram upload. Its network timeout may
+            # be five minutes; payouts, invitations and heartbeat must continue.
+            if chat_task is not None and chat_task.done():
+                chat_task.result()  # Fail the worker if delivery crashes unexpectedly.
+                chat_task = None
+            if now >= next_recovery:
+                async with session_factory() as session:
+                    await recover_stale_sending(session)
+                    await session.commit()
+                next_recovery = loop.time() + 60
+            if now >= next_notification:
+                await deliver_ready_notifications(bot, session_factory, settings)
+                next_notification = loop.time() + 5
+            if now >= next_invitations:
+                await deliver_admin_invitations(bot, session_factory)
+                next_invitations = loop.time() + 5
+            if now >= next_chat and chat_task is None:
+                chat_task = asyncio.create_task(
+                    deliver_chat_outbox(bot, session_factory, settings.chat_staging_dir),
+                    name="chat-outbox-delivery",
+                )
+                next_chat = loop.time() + 1
+            if now >= next_stage_cleanup:
+                await cleanup_staging(settings.chat_staging_dir, session_factory)
+                next_stage_cleanup = loop.time() + 60
             async with session_factory() as session:
-                await recover_stale_sending(session)
+                rows = await claim_pending_recipients(session, limit=max(1, int(settings.broadcast_rate_per_second)))
                 await session.commit()
-            next_recovery = loop.time() + 60
-        if now >= next_notification:
-            await deliver_ready_notifications(bot, session_factory, settings)
-            next_notification = loop.time() + 5
-        if now >= next_invitations:
-            await deliver_admin_invitations(bot, session_factory)
-            next_invitations = loop.time() + 5
-        if now >= next_chat:
-            await deliver_chat_outbox(bot, session_factory, settings.chat_staging_dir)
-            next_chat = loop.time() + 1
-        if now >= next_stage_cleanup:
-            await cleanup_staging(settings.chat_staging_dir, session_factory)
-            next_stage_cleanup = loop.time() + 60
-        async with session_factory() as session:
-            rows = await claim_pending_recipients(session, limit=max(1, int(settings.broadcast_rate_per_second)))
-            await session.commit()
-        if not rows:
+            if not rows:
+                if heartbeat is not None:
+                    heartbeat(loop.time())
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(stop_event.wait(), timeout=1)
+                continue
+            payout_ids = {row.payout_id for row in rows}
+            for row in rows:
+                if stop_event.is_set():
+                    break
+                await process_recipient(bot, session_factory, settings, row.id)
+                await asyncio.sleep(1 / max(1, int(settings.broadcast_rate_per_second)))
+            async with session_factory() as session:
+                payouts = await session.scalars(
+                    select(Payout).where(
+                        Payout.id.in_(payout_ids),
+                        Payout.deleted_at.is_(None),
+                        Payout.status.in_(
+                            [PayoutStatus.sending.value, PayoutStatus.sent.value, PayoutStatus.partially_failed.value]
+                        ),
+                    )
+                )
+                for payout in payouts:
+                    await finalize_payout_after_worker(session, payout)
+                await session.commit()
             if heartbeat is not None:
                 heartbeat(loop.time())
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(stop_event.wait(), timeout=1)
-            continue
-        payout_ids = {row.payout_id for row in rows}
-        for row in rows:
-            if stop_event.is_set():
-                break
-            await process_recipient(bot, session_factory, settings, row.id)
-            await asyncio.sleep(1 / max(1, int(settings.broadcast_rate_per_second)))
-        async with session_factory() as session:
-            payouts = await session.scalars(
-                select(Payout).where(
-                    Payout.id.in_(payout_ids),
-                    Payout.deleted_at.is_(None),
-                    Payout.status.in_(
-                        [PayoutStatus.sending.value, PayoutStatus.sent.value, PayoutStatus.partially_failed.value]
-                    ),
-                )
-            )
-            for payout in payouts:
-                await finalize_payout_after_worker(session, payout)
-            await session.commit()
-        if heartbeat is not None:
-            heartbeat(loop.time())
+    finally:
+        if chat_task is not None:
+            if not chat_task.done():
+                chat_task.cancel()
+            await asyncio.gather(chat_task, return_exceptions=True)
