@@ -5,8 +5,8 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Awaitable, Callable
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from sqlalchemy import and_, func, or_, select
