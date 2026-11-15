@@ -1050,6 +1050,38 @@ export function bindInbox() {
   el("inbox-history")?.addEventListener("click", (event) => {
     const reply = event.target.closest("[data-inbox-reply]");
     const retry = event.target.closest("[data-inbox-retry]");
+    const jump = event.target.closest("[data-inbox-jump]");
+    if (jump) {
+      const target = el("inbox-messages")?.querySelector(
+        '[data-inbox-message="' + Number(jump.dataset.inboxJump) + '"]');
+      target?.scrollIntoView({ block: "center", behavior: "smooth" });
+      target?.focus({ preventScroll: true });
+    }
+    const photo = event.target.closest("[data-inbox-view-photo]");
+    const voice = event.target.closest("[data-inbox-load-voice]");
+    const download = event.target.closest("[data-inbox-download]");
+    const reload = event.target.closest("[data-inbox-reload-media]");
+    const mediaTarget = photo || voice || download || reload;
+    if (mediaTarget) {
+      const messageId = Number(photo?.dataset.inboxViewPhoto || voice?.dataset.inboxLoadVoice ||
+        download?.dataset.inboxDownload || reload?.dataset.inboxReloadMedia);
+      const message = inbox.messages.find((item) => Number(item.id) === messageId);
+      if (message) {
+        if (download) void loadMedia(message, { download: true });
+        else if (voice) void loadMedia(message);
+        else if (reload) void loadMedia(message, { download: message.kind === "document" });
+        else if (photo) {
+          const show = (url) => {
+            if (!url || inbox.current?.id !== message.conversation_id || !isOpen()) return;
+            el("inbox-photo-full").src = url;
+            el("inbox-photo-viewer").showModal();
+          };
+          const url = inbox.mediaUrls.get(messageId);
+          if (url) show(url);
+          else void loadMedia(message).then(show);
+        }
+      }
+    }
     if (reply) {
       const message = inbox.messages.find((item) => String(item.id) === reply.dataset.inboxReply);
       if (message && Number.isInteger(Number(message.id))) {
@@ -1084,6 +1116,10 @@ export function bindInbox() {
     el("inbox-text").focus();
   });
   el("inbox-text")?.addEventListener("input", resizeComposer);
+  el("inbox-photo-close")?.addEventListener("click", () => el("inbox-photo-viewer")?.close());
+  el("inbox-photo-viewer")?.addEventListener("click", (event) => {
+    if (event.target.id === "inbox-photo-viewer") event.target.close();
+  });
   el("inbox-file")?.addEventListener("change", (event) => {
     chooseAttachment(event.target.files?.[0] || null);
   });
