@@ -260,8 +260,11 @@ async def test_postgres_fsm_state_and_data_survive_new_storage(postgres_conversa
     factory = postgres_conversations
     key = StorageKey(bot_id=123, chat_id=20210, user_id=20210)
     first = DatabaseFSMStorage(factory)
-    await first.set_state(key, "RegistrationFSM:payment_details")
-    await first.set_data(key, {"active_recipient_id":14, "confirm_active_recipient": False})
+    await first.set_state_and_data(
+        key,
+        "RegistrationFSM:payment_details",
+        {"active_recipient_id": 14, "confirm_active_recipient": False},
+    )
 
     restarted = DatabaseFSMStorage(factory)
     assert await restarted.get_state(key) == "RegistrationFSM:payment_details"
