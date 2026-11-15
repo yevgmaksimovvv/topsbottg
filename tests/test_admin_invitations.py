@@ -9,7 +9,6 @@ import pytest
 from sqlalchemy import select
 
 import topsbottg.api as api_module
-
 from topsbottg.access import get_principal, revoke_admin
 from topsbottg.invitations import (
     InvitationConflict,
