@@ -11,8 +11,8 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from topsbottg.conversations import lock_conversation_for_message
 from topsbottg.attachment_staging import StagedUpload
+from topsbottg.conversations import lock_conversation_for_message
 from topsbottg.models import ChatAttachment, ChatMessage, ChatMessageOutbox, Conversation, User
 from topsbottg.services import queue_admin_event
 

@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import zipfile
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -63,10 +64,8 @@ def staging_path(root: str | Path, key: str) -> Path:
 
 
 def remove_staged_file(root: str | Path, key: str) -> None:
-    try:
+    with suppress(OSError):
         staging_path(root, key).unlink(missing_ok=True)
-    except OSError:
-        pass
 
 
 def _canonical_name(filename: str | None, kind: str) -> str:

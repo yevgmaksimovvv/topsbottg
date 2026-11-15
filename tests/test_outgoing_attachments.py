@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +15,6 @@ from topsbottg.attachment_staging import (
     cleanup_staging,
     staging_path,
 )
-from topsbottg.chat_outbox import claim_chat_outbox
 from topsbottg.conversations import record_incoming_message
 from topsbottg.models import (
     AdminGrant,

@@ -10,10 +10,10 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
-from starlette.datastructures import UploadFile
 from sqlalchemy import and_, delete, func, insert, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
+from starlette.datastructures import UploadFile
 
 from topsbottg.attachment_staging import UploadRejected, remove_staged_file, stage_upload
 from topsbottg.attachments import attachment_public_data
