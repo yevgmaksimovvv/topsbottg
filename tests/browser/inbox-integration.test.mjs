@@ -449,3 +449,50 @@ test("SSE keeps reconnecting after multiple short failures and refetches missed 
     assert.deepEqual(errors, []);
   });
 });
+
+
+test("New dialog search is paginated and isolated from payout selection", async () => {
+  await withBackend(async ({ db, createPage }) => {
+    db.users.push(...Array.from({ length: 120 }, (_, index) => ({
+      id: index + 10, full_name: "Участник " + String(index + 1).padStart(3, "0"),
+      study_group: index % 2 === 0 ? { id: 9, code: "Г-9" } : null,
+    })));
+    const { page, errors } = await createPage(123, 390);
+    await page.evaluate(async () => {
+      const { state } = await import("/miniapp/js/store.js");
+      state.selectedPayoutId = 71;
+      state.selectedUsers = new Set([1, 2]);
+      state.selectedUsersByPayout.set(71, new Set([1, 2]));
+    });
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-new").click();
+    await page.waitForFunction(() => document.querySelectorAll(".inbox-new-user").length === 50);
+    await page.locator("#inbox-new-more").click();
+    await page.waitForFunction(() => document.querySelectorAll(".inbox-new-user").length === 100);
+    await page.locator("#inbox-new-more").click();
+    await page.waitForFunction(() => document.querySelectorAll(".inbox-new-user").length === 123);
+    assert.equal(await page.locator("#inbox-new-more").isVisible(), false);
+    assert.ok(db.requests.some((request) => request.path === "/api/admin/users" &&
+      request.query.includes("registered_only=true") &&
+      request.query.includes("offset=100")));
+
+    await page.locator("#inbox-new-group").selectOption("9");
+    await page.waitForFunction(() => document.querySelectorAll(".inbox-new-user").length === 50);
+    assert.ok(await page.locator("#inbox-new-users").getByText("Анна Петрова").count() === 1);
+    await page.locator("#inbox-new-group").selectOption("");
+    await page.locator("#inbox-new-search").fill("Новый Пользователь");
+    await page.locator("#inbox-new-users").getByText("Новый Пользователь").waitFor();
+    assert.equal(await page.locator(".inbox-new-user").count(), 1);
+    await page.locator("[data-inbox-new-user='3']").click();
+    await page.locator("#inbox-title").getByText("Новый Пользователь").waitFor();
+    await page.locator("#inbox-history-status").getByText("Сообщений пока нет.").waitFor();
+
+    assert.deepEqual(await page.evaluate(async () => {
+      const { state } = await import("/miniapp/js/store.js");
+      return [state.selectedPayoutId, [...state.selectedUsers], [...state.selectedUsersByPayout.get(71)]];
+    }), [71, [1, 2], [1, 2]]);
+    assert.equal(await page.locator("[data-inbox-write]").count(), 0);
+    assert.equal(await page.locator("[data-mobile-view]").count(), 4);
+    assert.deepEqual(errors, []);
+  });
+});
