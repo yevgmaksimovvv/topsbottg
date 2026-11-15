@@ -1358,7 +1358,7 @@ async def test_payment_details_survive_dispatcher_restart_and_never_enter_chat(
     async with session_factory() as session:
         profile = await get_payment_profile(session, user.id)
         assert profile is not None and profile.raw_payment_details == secret
-        assert (await session.get(type(recipient), recipient_id)).status == RecipientStatus.payment_received.value
+        assert (await session.get(type(recipient), recipient_id)).status == RecipientStatus.sent.value
         assert (await session.scalars(select(ChatMessage))).all() == []
         assert (await session.scalars(select(Conversation))).all() == []
         assert (await session.scalars(select(BotSensitiveMessage))).all() != []
@@ -1385,14 +1385,15 @@ async def test_concurrent_payment_updates_wait_for_fsm_before_chat_filter(
 
     entered = asyncio.Event()
     allow_payment_flow = asyncio.Event()
-    original = bot_module.get_latest_active_recipient
+    original = bot_module.get_or_create_user
 
-    async def delayed_recipient(session, user_id):
-        entered.set()
-        await allow_payment_flow.wait()
-        return await original(session, user_id)
+    async def delayed_user(session, telegram_id, *args, **kwargs):
+        if telegram_id == 712 and not entered.is_set():
+            entered.set()
+            await allow_payment_flow.wait()
+        return await original(session, telegram_id, *args, **kwargs)
 
-    monkeypatch.setattr(bot_module, "get_latest_active_recipient", delayed_recipient)
+    monkeypatch.setattr(bot_module, "get_or_create_user", delayed_user)
     bot, _ = _make_bot()
     dispatcher = create_bot_dispatcher(session_factory, settings)
     first = asyncio.create_task(
