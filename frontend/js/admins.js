@@ -12,6 +12,8 @@ let busy = false;
 let members = [];
 let invitations = [];
 let candidate = null;
+let candidates = [];
+let hasMoreCandidates = false;
 let pendingInvite = false;
 let pendingRevoke = null;
 let loadingMembers = false;
@@ -86,32 +88,52 @@ function renderCandidate() {
   const status = $("admins-search-error");
   if (!target || !status) return;
   status.textContent = searchError || (loadingSearch ? "Ищем пользователя…" : "");
-  if (!candidate) {
-    target.replaceChildren();
-    return;
+  target.innerHTML = candidates.map((user) => {
+    const id = Number(user.telegram_id);
+    const selected = candidate?.telegram_id === id;
+    const alreadyInvited = invitations.some((item) =>
+      item.status === "pending" && Number(item.target_telegram_id) === id);
+    const group = user.study_group || "Группа не указана";
+    return `<article class="admins-candidate-card">
+      <div class="admins-member-identity">
+        <strong>${escapeHtml(nameFor(user))}</strong>
+        <span>${escapeHtml(group)} · ID ${id}</span>
+      </div>
+      ${user.role
+        ? `<p class="admins-empty">${user.role === "owner" ? "Уже владелец" : "Уже администратор"}</p>`
+        : alreadyInvited
+          ? '<p class="admins-empty">Приглашение уже отправлено</p>'
+          : selected && pendingInvite
+            ? `<p class="admins-revoke-warning">Отправить приглашение этому пользователю?</p>
+               <div class="admins-candidate-actions">
+                 <button type="button" class="button button-primary"
+                   data-admin-action="confirm-invite" ${busy ? "disabled" : ""}>Отправить</button>
+                 <button type="button" class="button button-quiet"
+                   data-admin-action="cancel-invite-confirm" ${busy ? "disabled" : ""}>Отмена</button>
+               </div>`
+            : `<button type="button" class="button button-primary"
+                 data-admin-action="invite" data-admin-id="${id}" ${busy ? "disabled" : ""}>Пригласить</button>`}
+    </article>`;
+  }).join("") + (hasMoreCandidates
+    ? `<button type="button" class="button button-quiet admins-load-more"
+         data-admin-action="more-candidates" ${loadingSearch || busy ? "disabled" : ""}>Показать ещё</button>`
+    : "");
+}
+
+async function loadStudyGroups() {
+  const select = $("admins-search-group");
+  if (!select) return;
+  try {
+    const groups = await api("/admin/study-groups");
+    if (!dialog()?.open) return;
+    const previous = select.value;
+    select.innerHTML = '<option value="">Все группы</option>' +
+      groups.map((group) => `<option value="${Number(group.id)}">${escapeHtml(group.code)}</option>`).join("");
+    if (Array.from(select.options).some((option) => option.value === previous))
+      select.value = previous;
+  } catch {
+    // Search without the group filter must remain available.
   }
-  const name = nameFor(candidate);
-  const group = candidate.study_group ? ` · ${candidate.study_group}` : "";
-  const detail = candidate.username ? name + group : `ID ${candidate.telegram_id}` + group;
-  target.innerHTML = `<article class="admins-candidate-card">
-    <div class="admins-member-identity">
-      <strong>${escapeHtml(candidate.username ? `@${candidate.username.replace(/^@/, "")}` : nameFor(candidate))}</strong>
-      <span>${escapeHtml(detail)}</span>
-    </div>
-    ${candidate.role
-      ? `<p class="admins-empty">${candidate.role === "owner"
-          ? "Уже владелец" : "Уже администратор"}</p>`
-      : pendingInvite
-      ? `<p class="admins-revoke-warning">Отправить приглашение этому пользователю?</p>
-         <div class="admins-candidate-actions">
-           <button type="button" class="button button-primary"
-             data-admin-action="confirm-invite" ${busy ? "disabled" : ""}>Отправить</button>
-           <button type="button" class="button button-quiet"
-             data-admin-action="cancel-invite-confirm" ${busy ? "disabled" : ""}>Отмена</button>
-         </div>`
-      : `<button type="button" class="button button-primary"
-           data-admin-action="invite" ${busy ? "disabled" : ""}>Пригласить</button>`}
-  </article>`;
 }
 
 async function refreshDirectory() {
@@ -152,28 +174,34 @@ function closeAdminDialog() {
   if (dialog()?.open) dialog().close();
 }
 
-async function searchCandidate() {
-  if (!dialog()?.open || state.adminRole !== "owner" || busy) return;
+async function searchCandidate(append = false) {
+  if (!dialog()?.open || state.adminRole !== "owner" || busy || loadingSearch) return;
   const value = $("admins-search-input")?.value.trim() || "";
-  const id = ++searchRequestId;
-  candidate = null;
-  pendingInvite = false;
+  const groupId = $("admins-search-group")?.value || "";
+  if (!append) {
+    candidates = [];
+    candidate = null;
+    pendingInvite = false;
+    hasMoreCandidates = false;
+  }
   searchError = "";
   if (!value) {
-    searchError = "Введите username или Telegram ID.";
+    searchError = "Введите ФИО или Telegram ID.";
     renderCandidate();
     return;
   }
+  const id = ++searchRequestId;
   loadingSearch = true;
   renderCandidate();
   try {
-    const params = /^\d+$/.test(value)
-      ? new URLSearchParams({ telegram_id: value })
-      : new URLSearchParams({ username: value });
-    const results = await api(`/admin/admin-candidates?${params}`);
+    const params = new URLSearchParams({ search: value, offset: String(candidates.length) });
+    if (groupId) params.set("study_group_id", groupId);
+    const result = await api(`/admin/admin-candidates?${params}`);
     if (searchRequestId !== id || !dialog()?.open) return;
-    candidate = Array.isArray(results) ? results[0] || null : null;
-    if (!candidate) searchError = "Не удалось найти Telegram username. Попробуйте поиск по Telegram ID.";
+    const found = Array.isArray(result?.items) ? result.items : [];
+    candidates = append ? [...candidates, ...found] : found;
+    hasMoreCandidates = result?.has_more === true;
+    if (!candidates.length) searchError = "Зарегистрированные пользователи не найдены.";
   } catch (error) {
     if (searchRequestId !== id || !dialog()?.open) return;
     searchError = error?.message || "Не удалось найти пользователя.";
@@ -229,7 +257,11 @@ function handleAction(button) {
       member.role === "admin" && Number(member.telegram_id) === id)) {
       void mutateAdmin(() => api(`/admin/admin-grants/${id}`, { method: "DELETE" }));
     }
-  } else if (action === "invite" && candidate) {
+  } else if (action === "invite") {
+    const id = Number(button.dataset.adminId);
+    const found = candidates.find((item) => Number(item.telegram_id) === id && !item.role);
+    if (!found || invitations.some((item) => item.status === "pending" && Number(item.target_telegram_id) === id)) return;
+    candidate = found;
     pendingInvite = true;
     renderCandidate();
   } else if (action === "cancel-invite-confirm") {
@@ -239,11 +271,10 @@ function handleAction(button) {
     const selected = candidate;
     void mutateAdmin(() => api("/admin/admin-invitations", {
       method: "POST",
-      body: JSON.stringify({
-        target_telegram_id: selected.telegram_id,
-        ...(selected.username ? { expected_username: selected.username } : {}),
-      }),
+      body: JSON.stringify({ target_telegram_id: selected.telegram_id }),
     }));
+  } else if (action === "more-candidates") {
+    void searchCandidate(true);
   } else if (action === "cancel-invite") {
     const id = Number(button.dataset.inviteId);
     if (invitations.some((invitation) => invitation.status === "pending" && Number(invitation.id) === id))
@@ -262,6 +293,7 @@ export function bindAdminControls() {
     telegramBack?.onClick?.(closeAdminDialog);
     telegramBack?.show?.();
     void refreshDirectory();
+    void loadStudyGroups();
   });
   $("admins-close")?.addEventListener("click", closeAdminDialog);
   $("admins-refresh")?.addEventListener("click", () => void refreshDirectory());
@@ -272,6 +304,18 @@ export function bindAdminControls() {
   $("admins-search-input")?.addEventListener("input", () => {
     ++searchRequestId;
     candidate = null;
+    candidates = [];
+    hasMoreCandidates = false;
+    pendingInvite = false;
+    searchError = "";
+    loadingSearch = false;
+    renderCandidate();
+  });
+  $("admins-search-group")?.addEventListener("change", () => {
+    ++searchRequestId;
+    candidate = null;
+    candidates = [];
+    hasMoreCandidates = false;
     pendingInvite = false;
     searchError = "";
     loadingSearch = false;
@@ -289,6 +333,8 @@ export function bindAdminControls() {
     pendingInvite = false;
     pendingRevoke = null;
     candidate = null;
+    candidates = [];
+    hasMoreCandidates = false;
     searchError = "";
     loadingSearch = false;
     if (opener?.isConnected && !opener.classList.contains("hidden")) opener.focus();
