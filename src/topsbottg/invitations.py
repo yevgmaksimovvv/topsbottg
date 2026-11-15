@@ -16,6 +16,21 @@ class InvitationConflict(ValueError):
     pass
 
 
+def _utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _audit(session: AsyncSession, actor_id: int, action: str, invitation_id: int) -> None:
+    session.add(
+        AuditLog(
+            actor_telegram_id=actor_id,
+            action=action,
+            entity_type="admin_invitation",
+            entity_id=str(invitation_id),
+        )
+    )
+
+
 async def find_candidate(session: AsyncSession, *, telegram_id: int) -> User | None:
     """An invitation target must already exist in the registration database."""
     if telegram_id <= 0:
