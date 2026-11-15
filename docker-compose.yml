@@ -35,6 +35,7 @@ services:
       MINI_APP_INIT_DATA_MAX_AGE_SECONDS: ${MINI_APP_INIT_DATA_MAX_AGE_SECONDS:-86400}
       CHAT_ENTRYPOINT_ENABLED: ${CHAT_ENTRYPOINT_ENABLED:-false}
       CHAT_INBOX_ENABLED: ${CHAT_INBOX_ENABLED:-false}
+      CHAT_STAGING_DIR: /var/lib/topsbottg/chat-staging
       ADMIN_TELEGRAM_IDS: ${ADMIN_TELEGRAM_IDS:?ADMIN_TELEGRAM_IDS is required}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
@@ -50,6 +51,8 @@ services:
       retries: 12
       start_period: 20s
     command: ["sh", "-c", "alembic upgrade head && python -m topsbottg"]
+    volumes:
+      - chat_staging:/var/lib/topsbottg/chat-staging
     mem_limit: 650m
     mem_reservation: 350m
     cpus: "0.90"
@@ -117,5 +120,6 @@ services:
 
 volumes:
   postgres_data:
+  chat_staging:
   certbot_www:
   certbot_etc:

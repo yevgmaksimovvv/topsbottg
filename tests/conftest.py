@@ -27,6 +27,7 @@ def settings(tmp_path: Path) -> Settings:
         mini_app_url="https://localhost/miniapp/",
         broadcast_rate_per_second=5,
         chat_inbox_enabled=True,
+        chat_staging_dir=str(tmp_path / "chat-staging"),
         environment="test",
     )
 

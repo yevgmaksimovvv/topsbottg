@@ -220,8 +220,9 @@ class ChatAttachment(Base):
     chat_message_id: Mapped[int] = mapped_column(
         ForeignKey("chat_messages.id", ondelete="CASCADE"), primary_key=True
     )
-    telegram_file_id: Mapped[str] = mapped_column(Text, nullable=False)
+    telegram_file_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     telegram_file_unique_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    staging_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
     filename: Mapped[str | None] = mapped_column(Text, nullable=True)
     size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
