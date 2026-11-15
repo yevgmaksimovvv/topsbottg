@@ -201,7 +201,7 @@ def _admin_invitation_keyboard(invitation_id: int) -> InlineKeyboardMarkup:
 
 
 async def deliver_admin_invitations(bot: MessageSender, session_factory: async_sessionmaker) -> None:
-    """Отправляет приглашения; блокировка строки исключает параллельную отправку worker-ами."""
+    """Резервируем отправку до Telegram API. Неопределённые результаты не повторяем."""
     now = datetime.now(UTC)
     async with session_factory() as session:
         await session.execute(
@@ -209,12 +209,26 @@ async def deliver_admin_invitations(bot: MessageSender, session_factory: async_s
             .where(AdminInvitation.status == "pending", AdminInvitation.expires_at <= now)
             .values(status="expired", decided_at=now)
         )
-        ids = list(
-            await session.scalars(
-                select(AdminInvitation.id)
+        # Незавершённый вызов Telegram мог доставить сообщение. Повтор запрещён.
+        await session.execute(
+            update(AdminInvitation)
+            .where(
+                AdminInvitation.status == "pending",
+                AdminInvitation.delivery_state == "sending",
+                AdminInvitation.updated_at < now - timedelta(minutes=2),
+            )
+            .values(delivery_state="unknown", last_delivery_error="delivery_outcome_unknown")
+        )
+        await session.commit()
+
+    for _ in range(10):
+        async with session_factory() as session:
+            now = datetime.now(UTC)
+            invitation = await session.scalar(
+                select(AdminInvitation)
                 .where(
                     AdminInvitation.status == "pending",
-                    AdminInvitation.delivered_at.is_(None),
+                    AdminInvitation.delivery_state == "queued",
                     AdminInvitation.expires_at > now,
                     or_(
                         AdminInvitation.next_delivery_at.is_(None),
@@ -222,44 +236,44 @@ async def deliver_admin_invitations(bot: MessageSender, session_factory: async_s
                     ),
                 )
                 .order_by(AdminInvitation.id)
-                .limit(10)
+                .limit(1)
+                .with_for_update(skip_locked=True)
             )
-        )
-        await session.commit()
+            if invitation is None:
+                break
+            invitation.delivery_state = "sending"
+            invitation.delivery_attempts += 1
+            invitation_id = invitation.id
+            target_id = invitation.target_telegram_id
+            await session.commit()
 
-    for invitation_id in ids:
+        error: Exception | None = None
+        try:
+            await bot.send_message(
+                target_id,
+                "Вас приглашают стать администратором TOPSBOT. Подтвердите или отклоните приглашение.",
+                reply_markup=_admin_invitation_keyboard(invitation_id),
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = exc
+
         async with session_factory() as session:
             invitation = await session.scalar(
                 select(AdminInvitation)
                 .where(AdminInvitation.id == invitation_id)
-                .with_for_update(skip_locked=True)
-                .execution_options(populate_existing=True)
+                .with_for_update()
             )
-            if invitation is None or invitation.status != "pending" or invitation.delivered_at is not None:
+            if invitation is None or invitation.delivery_state != "sending":
                 continue
-            now = datetime.now(UTC)
-            if invitation.expires_at.replace(tzinfo=UTC) <= now:
-                invitation.status = "expired"
-                invitation.decided_at = now
-                await session.commit()
-                continue
-            if invitation.next_delivery_at is not None and invitation.next_delivery_at.replace(tzinfo=UTC) > now:
-                continue
-            try:
-                await bot.send_message(
-                    invitation.target_telegram_id,
-                    "Вас приглашают стать администратором TOPSBOT. Подтвердите или отклоните приглашение.",
-                    reply_markup=_admin_invitation_keyboard(invitation.id),
-                )
-            except Exception as exc:  # noqa: BLE001
-                invitation.delivery_attempts += 1
-                invitation.last_delivery_error = type(exc).__name__[:80]
-                invitation.next_delivery_at = now + timedelta(
-                    seconds=min(3600, 10 * 2 ** min(invitation.delivery_attempts, 8))
-                )
-            else:
+            if error is None:
+                invitation.delivery_state = "delivered"
                 invitation.delivered_at = datetime.now(UTC)
                 invitation.last_delivery_error = None
+                invitation.next_delivery_at = None
+            else:
+                # Ошибка сети не доказывает, что Telegram не доставил сообщение.
+                invitation.delivery_state = "unknown"
+                invitation.last_delivery_error = type(error).__name__[:80]
                 invitation.next_delivery_at = None
             await session.commit()
 
