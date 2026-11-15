@@ -153,3 +153,24 @@ async def test_startup_preflight_telegram_failure_exits_non_zero(
     with pytest.raises(RuntimeError, match="startup readiness failed"):
         await main_module.run_startup_preflight(settings, session_factory)
     assert "startup readiness failed: telegram" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_health_rejects_stale_worker_heartbeat(settings, session_factory, monkeypatch):
+    app = api_module.create_app(settings, session_factory)
+    app.state.bot_task = asyncio.get_running_loop().create_future()
+    app.state.worker_task = asyncio.get_running_loop().create_future()
+    app.state.worker_heartbeat = asyncio.get_running_loop().time() - 31
+
+    async def healthy(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(api_module, "check_database_ready", healthy)
+    monkeypatch.setattr(api_module, "check_telegram_ready", healthy)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/healthz")
+        assert response.status_code == 503
+        assert response.json()["checks"]["worker"] == "failed"
+        app.state.worker_heartbeat = asyncio.get_running_loop().time()
+        response = await client.get("/healthz")
+        assert response.status_code == 200
