@@ -1,0 +1,468 @@
+import { SEARCH_DEBOUNCE_MS } from "./constants.js";
+import { state } from "./store.js";
+import { telegramWebApp } from "./telegram.js";
+import { escapeHtml } from "./utils.js";
+
+const inbox = {
+  client: null,
+  conversations: [],
+  nextCursor: null,
+  listRequest: 0,
+  listLoading: false,
+  query: "",
+  group: "",
+  current: null,
+  messages: [],
+  historyCursor: null,
+  historyRequest: 0,
+  historyLoading: false,
+  readThrough: null,
+  replyTo: null,
+  unread: 0,
+  searchTimer: null,
+  opener: null,
+  backHandler: null,
+  sending: false,
+  openingUser: false,
+};
+let bound = false;
+
+const el = (id) => document.getElementById(id);
+const dialog = () => el("inbox-dialog");
+const isOpen = () => Boolean(dialog()?.open);
+const text = (value) => escapeHtml(String(value ?? ""));
+const time = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? ""
+    : new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date);
+};
+const label = (user) => user?.full_name || "Пользователь";
+const groupLabel = (user) => user?.study_group_name || "Группа не указана";
+const statusText = {
+  queued: "В очереди",
+  sending: "Отправляется",
+  sent: "Отправлено",
+  failed: "Ошибка отправки",
+};
+const key = () => window.crypto?.randomUUID?.() || String(Date.now()) + "-" + Math.random().toString(36).slice(2);
+
+export function isInboxEnabled() {
+  return Boolean(inbox.client);
+}
+
+function status(nodeId, message) {
+  const node = el(nodeId);
+  if (node) node.textContent = message || "";
+}
+
+function paintBadge() {
+  const badge = el("inbox-unread");
+  if (!badge) return;
+  badge.textContent = inbox.unread > 99 ? "99+" : String(inbox.unread);
+  badge.classList.toggle("hidden", !inbox.unread);
+}
+
+async function loadSummary() {
+  if (!inbox.client) return;
+  const client = inbox.client;
+  try {
+    const response = await client.summary();
+    if (client !== inbox.client) return;
+    inbox.unread = Math.max(0, Number(response?.unread_count) || 0);
+    paintBadge();
+  } catch {
+    if (client === inbox.client) paintBadge();
+  }
+}
+
+function renderGroups() {
+  const control = el("inbox-group");
+  if (!control) return;
+  const previous = control.value;
+  control.replaceChildren(new Option("Все группы", ""));
+  for (const group of state.studyGroups) {
+    control.add(new Option(group.code, String(group.id)));
+  }
+  control.value = inbox.group;
+  if (control.selectedIndex === -1) {
+    control.add(new Option("Выбранная группа", inbox.group));
+    control.value = inbox.group;
+  }
+}
+
+function renderConversations() {
+  const list = el("inbox-conversations");
+  if (!list) return;
+  list.innerHTML = inbox.conversations.map((item) => {
+    const user = item.user || {};
+    const last = item.last_message;
+    const snippet = typeof last === "string" ? last
+      : last?.text || last?.caption || (last?.kind ? "Вложение" : "Сообщений пока нет");
+    const unread = Math.max(0, Number(item.unread_count) || 0);
+    return '<button type="button" class="inbox-conversation" data-inbox-conversation="' + Number(item.id) + '">' +
+      '<span class="inbox-row-heading"><strong>' + text(label(user)) + '</strong>' +
+      '<time>' + text(time(item.last_message_at)) + '</time></span>' +
+      '<span class="inbox-row-subtitle">' + text(groupLabel(user)) + '</span>' +
+      '<span class="inbox-row-bottom"><span class="inbox-snippet">' + text(snippet) + '</span>' +
+      (unread ? '<span class="inbox-count" aria-label="Непрочитанных: ' + unread + '">' + (unread > 99 ? "99+" : unread) + '</span>' : "") +
+      '</span></button>';
+  }).join("");
+  const more = el("inbox-more");
+  more?.classList.toggle("hidden", !inbox.nextCursor);
+  if (more) more.disabled = inbox.listLoading;
+  status("inbox-list-status", inbox.listLoading
+    ? "Загружаем диалоги…"
+    : inbox.conversations.length ? "" : "Диалогов пока нет.");
+}
+
+async function loadConversations(reset = false) {
+  if (!inbox.client || (inbox.listLoading && !reset)) return;
+  const generation = ++inbox.listRequest;
+  const client = inbox.client;
+  const query = inbox.query;
+  const group = inbox.group;
+  const cursor = reset ? null : inbox.nextCursor;
+  if (reset) {
+    inbox.conversations = [];
+    inbox.nextCursor = null;
+  }
+  inbox.listLoading = true;
+  renderConversations();
+  try {
+    const response = await client.conversations({ query, study_group_id: group, cursor, limit: 50 });
+    if (generation !== inbox.listRequest || client !== inbox.client || !isOpen()) return;
+    const byId = new Map((reset ? [] : inbox.conversations).map((item) => [item.id, item]));
+    for (const item of response.items || []) byId.set(item.id, item);
+    inbox.conversations = [...byId.values()];
+    inbox.nextCursor = response.next_cursor ?? null;
+  } catch (error) {
+    if (generation === inbox.listRequest && client === inbox.client)
+      status("inbox-list-status", error?.message || "Не удалось загрузить диалоги.");
+    return;
+  } finally {
+    if (generation === inbox.listRequest) {
+      inbox.listLoading = false;
+      renderConversations();
+    }
+  }
+}
+
+function showList() {
+  ++inbox.historyRequest;
+  inbox.current = null;
+  inbox.messages = [];
+  inbox.replyTo = null;
+  el("inbox-list-screen").hidden = false;
+  el("inbox-history-screen").hidden = true;
+  el("inbox-back").hidden = true;
+  el("inbox-title").textContent = "Сообщения";
+  el("inbox-search")?.focus();
+  void loadConversations(true);
+  void loadSummary();
+}
+
+function renderReply() {
+  const node = el("inbox-reply");
+  if (!node) return;
+  node.replaceChildren();
+  if (inbox.replyTo == null) return;
+  const message = inbox.messages.find((item) => item.id === inbox.replyTo);
+  if (!message) {
+    inbox.replyTo = null;
+    return;
+  }
+  const line = document.createElement("span");
+  line.textContent = "Ответ на: " + (message.text || message.caption || "сообщение").slice(0, 90);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.id = "inbox-clear-reply";
+  button.textContent = "×";
+  button.setAttribute("aria-label", "Отменить ответ");
+  node.append(line, button);
+}
+
+function renderHistory({ preserveScroll = false } = {}) {
+  const list = el("inbox-history");
+  if (!list) return;
+  const oldHeight = list.scrollHeight;
+  const oldTop = list.scrollTop;
+  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 75;
+  const unread = Math.max(0, Number(inbox.current?.unread_count) || 0);
+  const inbound = inbox.messages.filter((message) => message.direction === "incoming");
+  const unreadStart = unread > 0 ? inbound.at(-Math.min(unread, inbound.length))?.id : null;
+  list.innerHTML = inbox.messages.map((message) => {
+    const outgoing = message.direction === "outgoing";
+    const delivery = outgoing && message.delivery_status ? message.delivery_status : null;
+    const body = message.text || message.caption || (message.attachment ? "Вложение: " + (message.kind || "файл") : "");
+    const isUnread = unreadStart === message.id;
+    return (isUnread ? '<div class="inbox-unread-divider">Непрочитанные сообщения</div>' : "") +
+      '<article class="inbox-message ' + (outgoing ? "is-outgoing" : "is-incoming") + '" data-inbox-message="' + text(message.id) + '">' +
+      '<span class="inbox-message-author">' + (outgoing
+        ? "Администратор" + (message.author_admin_telegram_id != null ? " · ID " + text(message.author_admin_telegram_id) : "")
+        : "Пользователь") + '</span>' +
+      (message.reply_to_telegram_message_id != null
+        ? '<span class="inbox-message-reply">Ответ на Telegram #' + text(message.reply_to_telegram_message_id) + '</span>' : "") +
+      '<span class="inbox-message-body">' + text(body) + '</span>' +
+      '<span class="inbox-message-meta"><time>' + text(time(message.created_at)) + '</time>' +
+      (delivery ? '<span class="' + (delivery === "failed" ? "inbox-failed" : "") + '">' + text(statusText[delivery] || delivery) + '</span>' : "") +
+      '</span>' +
+      '<span class="inbox-message-actions"><button type="button" data-inbox-reply="' + text(message.id) + '">Ответить</button>' +
+      (delivery === "failed" ? '<button type="button" data-inbox-retry="' + text(message.id) + '">Повторить</button>' : "") +
+      '</span></article>' +
+      (inbox.readThrough === message.id ? '<div class="inbox-read-marker">Прочитано до этого сообщения</div>' : "");
+  }).join("");
+  el("inbox-older")?.classList.toggle("hidden", !inbox.historyCursor);
+  if (el("inbox-older")) el("inbox-older").disabled = inbox.historyLoading;
+  status("inbox-history-status", inbox.historyLoading
+    ? "Загружаем сообщения…" : inbox.messages.length ? "" : "Сообщений пока нет.");
+  renderReply();
+  if (preserveScroll) list.scrollTop = oldTop + list.scrollHeight - oldHeight;
+  else if (atBottom || !oldHeight) list.scrollTop = list.scrollHeight;
+}
+
+async function loadMessages({ older = false, refresh = false } = {}) {
+  if (!inbox.client || !inbox.current || (inbox.historyLoading && older)) return;
+  const generation = ++inbox.historyRequest;
+  const client = inbox.client;
+  const conversationId = inbox.current.id;
+  const before = older ? inbox.historyCursor : null;
+  if (older && !before) return;
+  inbox.historyLoading = true;
+  renderHistory();
+  const list = el("inbox-history");
+  const oldScrollHeight = list.scrollHeight;
+  const oldTop = list.scrollTop;
+  const wasAtBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 75;
+  try {
+    const response = await client.messages(conversationId, { before, limit: 50 });
+    if (generation !== inbox.historyRequest || client !== inbox.client || inbox.current?.id !== conversationId || !isOpen()) return;
+    const byId = new Map((older || refresh ? inbox.messages : []).map((item) => [item.id, item]));
+    for (const item of response.items || []) byId.set(item.id, item);
+    inbox.messages = [...byId.values()].sort((a, b) => Number(a.id) - Number(b.id));
+    if (older || !refresh) inbox.historyCursor = response.next_cursor ?? null;
+    renderHistory();
+    if (older) list.scrollTop = oldTop + list.scrollHeight - oldScrollHeight;
+    else if (wasAtBottom || !refresh) list.scrollTop = list.scrollHeight;
+    if (wasAtBottom || !older) void markRead();
+  } catch (error) {
+    if (generation === inbox.historyRequest && client === inbox.client)
+      status("inbox-history-status", error?.message || "Не удалось загрузить сообщения.");
+  } finally {
+    if (generation === inbox.historyRequest) {
+      inbox.historyLoading = false;
+      el("inbox-older").disabled = false;
+      el("inbox-older")?.classList.toggle("hidden", !inbox.historyCursor);
+    }
+  }
+}
+
+async function markRead() {
+  if (!inbox.client || !inbox.current) return;
+  const last = [...inbox.messages].reverse().find((message) => message.direction === "incoming" && Number.isInteger(Number(message.id)));
+  if (!last || Number(last.id) <= Number(inbox.readThrough || 0)) return;
+  const client = inbox.client;
+  const id = inbox.current.id;
+  try {
+    const result = await client.read(id, last.id);
+    if (client !== inbox.client || inbox.current?.id !== id) return;
+    inbox.readThrough = result.last_read_message_id;
+    inbox.current.unread_count = result.unread_count;
+    renderHistory();
+    void loadSummary();
+  } catch {
+    // A read marker may be retried on the next refresh or scroll to bottom.
+  }
+}
+
+async function openConversation(conversation) {
+  inbox.current = conversation;
+  inbox.messages = [];
+  inbox.historyCursor = null;
+  inbox.readThrough = null;
+  inbox.replyTo = null;
+  ++inbox.historyRequest;
+  el("inbox-list-screen").hidden = true;
+  el("inbox-history-screen").hidden = false;
+  el("inbox-back").hidden = false;
+  el("inbox-title").textContent = label(conversation.user);
+  el("inbox-text").value = "";
+  renderHistory();
+  el("inbox-text").focus();
+  await loadMessages();
+}
+
+async function openForUser(userId) {
+  if (!inbox.client || inbox.openingUser) return;
+  inbox.openingUser = true;
+  const user = state.users.find((item) => Number(item.id) === Number(userId));
+  try {
+    if (!isOpen()) openInbox();
+    const result = await inbox.client.open(Number(userId));
+    if (!isOpen()) return;
+    const existing = inbox.conversations.find((item) => Number(item.id) === Number(result.conversation_id));
+    await openConversation(existing || { id: result.conversation_id,
+      user: { id: userId, full_name: user?.full_name, study_group_name: user?.study_group?.code },
+      unread_count: 0 });
+  } catch (error) {
+    status("inbox-list-status", error?.message || "Не удалось открыть диалог.");
+  } finally {
+    inbox.openingUser = false;
+  }
+}
+
+async function sendMessage(textValue, replyTo = null) {
+  if (!inbox.client || !inbox.current || inbox.sending || !textValue.trim()) return;
+  const id = inbox.current.id;
+  const client = inbox.client;
+  const input = el("inbox-text");
+  const send = el("inbox-send");
+  const previous = input.value;
+  const messageKey = key();
+  inbox.sending = true;
+  send.disabled = true;
+  input.value = "";
+  inbox.replyTo = null;
+  const tempId = "pending-" + messageKey;
+  inbox.messages.push({ id: tempId, conversation_id: id, direction: "outgoing",
+    kind: "text", text: textValue, caption: null, created_at: new Date().toISOString(),
+    author_admin_telegram_id: null, telegram_message_id: null,
+    reply_to_telegram_message_id: null, delivery_status: "queued",
+    delivery_error_code: null, attachment: null });
+  renderHistory();
+  try {
+    const pending = inbox.messages.find((item) => item.id === tempId);
+    if (pending) pending.delivery_status = "sending";
+    renderHistory();
+    const response = await client.send(id, { text: textValue, reply_to_message_id: replyTo,
+      idempotency_key: messageKey });
+    if (client !== inbox.client || inbox.current?.id !== id) return;
+    inbox.messages = inbox.messages.filter((item) => item.id !== tempId);
+    inbox.messages.push(response.message);
+    inbox.messages.sort((a, b) => Number(a.id) - Number(b.id));
+    renderHistory();
+  } catch {
+    const pending = inbox.messages.find((item) => item.id === tempId);
+    if (pending) pending.delivery_status = "failed";
+    status("inbox-compose-status", "Не удалось отправить. Сообщение можно повторить.");
+    renderHistory();
+  } finally {
+    inbox.sending = false;
+    send.disabled = false;
+    if (!input.value && !inbox.messages.some((item) => item.id === tempId && item.delivery_status === "failed"))
+      input.value = previous === textValue ? "" : input.value;
+  }
+}
+
+function openInbox() {
+  if (!inbox.client || isOpen()) return;
+  inbox.opener = document.activeElement;
+  dialog().showModal();
+  const back = telegramWebApp()?.BackButton;
+  inbox.backHandler = () => { if (isOpen()) dialog().close(); };
+  back?.onClick?.(inbox.backHandler);
+  back?.show?.();
+  renderGroups();
+  showList();
+}
+
+function closeInbox() {
+  if (isOpen()) dialog().close();
+}
+
+function cleanup() {
+  ++inbox.listRequest;
+  ++inbox.historyRequest;
+  clearTimeout(inbox.searchTimer);
+  const back = telegramWebApp()?.BackButton;
+  if (inbox.backHandler) back?.offClick?.(inbox.backHandler);
+  inbox.backHandler = null;
+  back?.hide?.();
+  if (inbox.opener?.isConnected && !inbox.opener.closest(".hidden, [hidden]"))
+    inbox.opener.focus();
+  inbox.opener = null;
+}
+
+export function configureInboxClient(client) {
+  if (client !== null && (!client || ["summary", "conversations", "open", "messages", "send", "read"].some((method) => typeof client[method] !== "function")))
+    throw new TypeError("Inbox client does not implement contract #24");
+  if (isOpen()) closeInbox();
+  inbox.client = client;
+  inbox.unread = 0;
+  paintBadge();
+  el("inbox-open")?.classList.toggle("hidden", !client);
+  const list = el("users-list");
+  if (list) {
+    list.dataset.userIds = "";
+    void import("./render-users.js").then(({ renderUsers }) => renderUsers());
+  }
+  if (client) void loadSummary();
+}
+
+export function bindInbox() {
+  if (bound) return;
+  bound = true;
+  el("inbox-open")?.addEventListener("click", openInbox);
+  el("inbox-close")?.addEventListener("click", closeInbox);
+  el("inbox-back")?.addEventListener("click", showList);
+  dialog()?.addEventListener("close", cleanup);
+  el("inbox-search")?.addEventListener("input", (event) => {
+    inbox.query = event.target.value;
+    ++inbox.listRequest;
+    clearTimeout(inbox.searchTimer);
+    inbox.searchTimer = window.setTimeout(() => void loadConversations(true), SEARCH_DEBOUNCE_MS);
+  });
+  el("inbox-group")?.addEventListener("change", (event) => {
+    inbox.group = event.target.value;
+    ++inbox.listRequest;
+    clearTimeout(inbox.searchTimer);
+    void loadConversations(true);
+  });
+  el("inbox-more")?.addEventListener("click", () => void loadConversations());
+  el("inbox-older")?.addEventListener("click", () => void loadMessages({ older: true }));
+  el("inbox-refresh")?.addEventListener("click", () => void loadMessages({ refresh: true }));
+  el("inbox-conversations")?.addEventListener("click", (event) => {
+    const row = event.target.closest("[data-inbox-conversation]");
+    if (!row) return;
+    const item = inbox.conversations.find((conversation) => conversation.id === Number(row.dataset.inboxConversation));
+    if (item) void openConversation(item);
+  });
+  el("inbox-history")?.addEventListener("click", (event) => {
+    const reply = event.target.closest("[data-inbox-reply]");
+    const retry = event.target.closest("[data-inbox-retry]");
+    if (reply) {
+      const message = inbox.messages.find((item) => String(item.id) === reply.dataset.inboxReply);
+      if (message && Number.isInteger(Number(message.id))) {
+        inbox.replyTo = Number(message.id);
+        renderReply();
+        el("inbox-text").focus();
+      }
+    }
+    if (retry) {
+      const message = inbox.messages.find((item) => String(item.id) === retry.dataset.inboxRetry);
+      if (message) void sendMessage(message.text || message.caption || "");
+    }
+  });
+  el("inbox-history")?.addEventListener("scroll", (event) => {
+    const list = event.target;
+    if (list.scrollTop < 48 && inbox.historyCursor && !inbox.historyLoading)
+      void loadMessages({ older: true });
+    if (list.scrollHeight - list.scrollTop - list.clientHeight < 50) void markRead();
+  }, { passive: true });
+  el("inbox-reply")?.addEventListener("click", (event) => {
+    if (!event.target.closest("#inbox-clear-reply")) return;
+    inbox.replyTo = null;
+    renderReply();
+    el("inbox-text").focus();
+  });
+  el("inbox-composer")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    status("inbox-compose-status", "");
+    void sendMessage(el("inbox-text").value, inbox.replyTo);
+  });
+  document.addEventListener("click", (event) => {
+    const write = event.target.closest("[data-inbox-write]");
+    if (write && inbox.client) void openForUser(write.dataset.inboxWrite);
+  });
+}
