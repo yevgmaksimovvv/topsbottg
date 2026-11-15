@@ -100,7 +100,8 @@ def main_keyboard(
 
 def _main_keyboard_for(message: Message, settings) -> ReplyKeyboardMarkup:
     return main_keyboard(
-        mini_app_url=settings.mini_app_url, chat_entrypoint_enabled=settings.chat_entrypoint_enabled
+        mini_app_url=settings.mini_app_url,
+        chat_entrypoint_enabled=settings.chat_entrypoint_enabled and settings.chat_inbox_enabled,
     )
 
 
@@ -802,7 +803,7 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
         )
 
 
-    if _settings.chat_entrypoint_enabled:
+    if _settings.chat_entrypoint_enabled and _settings.chat_inbox_enabled:
         @router.message(StateFilter(None), F.chat.type == "private", F.text == CHAT_ENTRYPOINT_TEXT)
         async def chat_entrypoint(message: Message):
             if message.from_user is None or message.from_user.is_bot:
@@ -813,39 +814,44 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
                     return
             await _safe_message_answer(message, message.from_user.id, "Напишите сообщение администратору.")
 
-    @router.message(
-        StateFilter(None),
-        F.chat.type == "private",
-        F.text,
-        ~F.text.startswith("/"),
-    )
-    async def incoming_chat_text(message: Message):
-        if message.from_user is None or message.from_user.is_bot:
-            return
-        async with session_factory() as session:
-            user = await get_user_by_telegram_id(session, message.from_user.id)
-            if user is None or user.registration_completed_at is None:
+    if _settings.chat_inbox_enabled:
+        @router.message(
+            StateFilter(None),
+            F.chat.type == "private",
+            F.text,
+            ~F.text.startswith("/"),
+        )
+        async def incoming_chat_text(message: Message, state: FSMContext):
+            if message.from_user is None or message.from_user.is_bot:
                 return
-            consumed = await session.get(
-                BotSensitiveMessage,
-                (message.chat.id, message.message_id),
-            )
-            if consumed is not None:
+            # The first migration cannot recover pending payment input from MemoryStorage.
+            # Require a context created by the new bot before accepting free-form text.
+            if isinstance(state.storage, DatabaseFSMStorage) and not await state.storage.has_context(state.key):
                 return
-            conversation = await get_or_create_conversation(session, user_id=user.id)
-            _, created = await record_incoming_message(
-                session,
-                conversation_id=conversation.id,
-                telegram_chat_id=message.chat.id,
-                telegram_message_id=message.message_id,
-                text=message.text,
-                reply_to_telegram_message_id=(
-                    message.reply_to_message.message_id if message.reply_to_message is not None else None
-                ),
-                source="telegram_reply" if message.reply_to_message is not None else "telegram",
-            )
-            if created:
-                queue_admin_event(session, "chat.changed", {"conversation_id": conversation.id})
-            await session.commit()
+            async with session_factory() as session:
+                user = await get_user_by_telegram_id(session, message.from_user.id)
+                if user is None or user.registration_completed_at is None:
+                    return
+                consumed = await session.get(
+                    BotSensitiveMessage,
+                    (message.chat.id, message.message_id),
+                )
+                if consumed is not None:
+                    return
+                conversation = await get_or_create_conversation(session, user_id=user.id)
+                _, created = await record_incoming_message(
+                    session,
+                    conversation_id=conversation.id,
+                    telegram_chat_id=message.chat.id,
+                    telegram_message_id=message.message_id,
+                    text=message.text,
+                    reply_to_telegram_message_id=(
+                        message.reply_to_message.message_id if message.reply_to_message is not None else None
+                    ),
+                    source="telegram_reply" if message.reply_to_message is not None else "telegram",
+                )
+                if created:
+                    queue_admin_event(session, "chat.changed", {"conversation_id": conversation.id})
+                await session.commit()
 
     return router

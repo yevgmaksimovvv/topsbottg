@@ -66,6 +66,16 @@ class DatabaseFSMStorage(BaseStorage):
             )
             await session.commit()
 
+    async def has_context(self, key: StorageKey) -> bool:
+        """Only contexts touched since the switch from MemoryStorage are safe for inbox capture."""
+        async with self._session_factory() as session:
+            value = await session.scalar(
+                select(BotFSMState.storage_key).where(
+                    BotFSMState.storage_key == self._storage_key(key)
+                )
+            )
+            return value is not None
+
     async def get_state(self, key: StorageKey) -> str | None:
         async with self._session_factory() as session:
             return await session.scalar(

@@ -26,6 +26,7 @@ def settings(tmp_path: Path) -> Settings:
         admin_telegram_ids="123",
         mini_app_url="https://localhost/miniapp/",
         broadcast_rate_per_second=5,
+        chat_inbox_enabled=True,
         environment="test",
     )
 

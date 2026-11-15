@@ -1417,3 +1417,79 @@ async def test_concurrent_payment_updates_wait_for_fsm_before_chat_filter(
         assert (await session.scalars(select(Conversation))).all() == []
         assert (await session.scalars(select(BotSensitiveMessage))).all() != []
     assert "private-racing-profile-value" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_first_rollout_drops_old_memory_storage_payment_input(
+    session_factory, settings, caplog
+):
+    caplog.set_level(logging.INFO)
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 715, "Пользователь со старым FSM")
+        await session.commit()
+        user_id = user.id
+
+    bot, _ = _make_bot()
+    old_bot = _make_dispatcher(session_factory, settings)
+    await old_bot.feed_update(bot, _make_update(bot, 715, CHANGE_PAYMENT_DETAILS_BUTTON_TEXT, 1000))
+    old_context = await old_bot.fsm.get_context(bot=bot, chat_id=715, user_id=715)
+    assert await old_context.get_state() == "RegistrationFSM:payment_details"
+
+    async with session_factory() as session:
+        assert (await session.scalars(select(BotFSMState))).all() == []
+
+    secret = "rollout-confidential-bank-account"
+    sse = get_admin_events_broadcaster().subscribe()
+    try:
+        first_release_settings = settings.model_copy(
+            update={"chat_inbox_enabled": False, "chat_entrypoint_enabled": True}
+        )
+        first_release = create_bot_dispatcher(session_factory, first_release_settings)
+        await first_release.feed_update(bot, _make_update(bot, 715, secret, 1001))
+        assert sse.empty()
+
+        # Even an accidentally enabled inbox cannot capture legacy pending input.
+        enabled = create_bot_dispatcher(session_factory, settings)
+        await enabled.feed_update(bot, _make_update(bot, 715, secret, 1002))
+        assert sse.empty()
+        async with session_factory() as session:
+            assert (await session.scalars(select(BotFSMState))).all() == []
+            assert (await session.scalars(select(Conversation))).all() == []
+            assert (await session.scalars(select(ChatMessage))).all() == []
+            assert (await session.scalar(select(User.id).where(User.id == user_id))) == user_id
+
+        # An explicit /start in the new version resets the old flow and creates a trusted context.
+        await enabled.feed_update(bot, _make_update(bot, 715, "/start", 1003))
+        async with session_factory() as session:
+            fsm_rows = list((await session.scalars(select(BotFSMState))).all())
+            assert len(fsm_rows) == 1
+            assert fsm_rows[0].state is None
+
+        await enabled.feed_update(bot, _make_update(bot, 715, "Вопрос после /start", 1004))
+        assert sse.get_nowait()["event"] == "chat.changed"
+        async with session_factory() as session:
+            messages = list((await session.scalars(select(ChatMessage))).all())
+            assert len(messages) == 1
+            assert messages[0].text == "Вопрос после /start"
+    finally:
+        get_admin_events_broadcaster().unsubscribe(sse)
+    assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_disabled_inbox_cannot_capture_even_after_post_migration_start(session_factory, settings):
+    async with session_factory() as session:
+        await get_or_create_user(session, 716, "Зарегистрированная пользовательница")
+        await session.commit()
+
+    disabled = settings.model_copy(update={
+        "chat_inbox_enabled": False, "chat_entrypoint_enabled": True,
+    })
+    bot, recorder = _make_bot()
+    dispatcher = create_bot_dispatcher(session_factory, disabled)
+    await dispatcher.feed_update(bot, _make_update(bot, 716, "/start", 1010))
+    assert CHAT_ENTRYPOINT_TEXT not in str(_last_message_method(recorder).reply_markup)
+    await dispatcher.feed_update(bot, _make_update(bot, 716, "Текст при выключенной переписке", 1011))
+    async with session_factory() as session:
+        assert (await session.scalars(select(BotFSMState))).all() != []
+        assert (await session.scalars(select(ChatMessage))).all() == []
