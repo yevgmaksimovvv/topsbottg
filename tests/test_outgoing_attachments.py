@@ -499,9 +499,14 @@ async def test_slow_media_does_not_stall_healthcheck_or_payout(
 
     stop_event = asyncio.Event()
     heartbeat_times = []
+
+    def report_heartbeat(stamp):
+        heartbeat_times.append(stamp)
+        app.state.worker_heartbeat = stamp
+
     bot = PausedMediaBot()
     worker_task = asyncio.create_task(
-        run_worker(bot, session_factory, settings, stop_event, heartbeat=heartbeat_times.append)
+        run_worker(bot, session_factory, settings, stop_event, heartbeat=report_heartbeat)
     )
     # The HTTP health route uses this same worker heartbeat in production.
     fake_polling = asyncio.create_task(asyncio.Event().wait())
@@ -539,8 +544,11 @@ async def test_slow_media_does_not_stall_healthcheck_or_payout(
             result = await session.get(PayoutRecipient, recipient_id)
             assert result.status == RecipientStatus.payment_required.value
             assert result.sent_at is not None
+        for _ in range(50):
+            if app.state.worker_heartbeat > loop.time() - 30:
+                break
+            await asyncio.sleep(0.02)
         assert heartbeat_times and loop.time() - heartbeat_times[-1] < 30
-        app.state.worker_heartbeat = heartbeat_times[-1]
         assert (await client.get("/healthz")).status_code == 200
         assert not media_cancelled.is_set()
         async with session_factory() as session:
