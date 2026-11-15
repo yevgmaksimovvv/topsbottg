@@ -194,6 +194,8 @@ async function installFixture(page, unread = 3) {
         if (state.sendFailures-- > 0) throw new Error("Connection lost after HTTP 202");
         return { message: accepted.message };
       },
+      async upload() { throw new Error("Unexpected media upload in text fixture"); },
+      async download() { throw new Error("Unexpected media download in text fixture"); },
       async read(conversationId, lastReadMessageId) {
         state.read.push({ conversationId, lastReadMessageId });
         state.unread = 0;
@@ -299,6 +301,8 @@ test("Inbox: empty list, per-admin unread, cursor, group filter and stale search
         open: async () => ({ conversation_id: 1 }),
         messages: async () => ({ items: [], next_cursor: null }),
         send: async () => ({}),
+        upload: async () => ({}),
+        download: async () => new Blob([]),
         read: async () => ({ last_read_message_id: 0, unread_count: 0 }),
       });
     });
