@@ -45,7 +45,7 @@ async def search_candidates(
 ) -> tuple[list[User], bool]:
     """Find registered users by any fragments of their name, independently of group membership."""
     words = name.split()
-    if not words:
+    if not words and study_group_id is None:
         return [], False
     query = (
         select(User)
