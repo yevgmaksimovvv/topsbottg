@@ -336,45 +336,69 @@ function renderReply() {
   node.append(line, button);
 }
 
+function messageClock(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? ""
+    : new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(date);
+}
+
 function renderHistory({ preserveScroll = false } = {}) {
-  const list = el("inbox-history");
-  if (!list) return;
-  const oldHeight = list.scrollHeight;
-  const oldTop = list.scrollTop;
-  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 75;
+  const scroll = el("inbox-history");
+  const list = el("inbox-messages");
+  if (!scroll || !list) return;
+  const oldHeight = scroll.scrollHeight;
+  const oldTop = scroll.scrollTop;
+  const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 75;
   const unread = Math.max(0, Number(inbox.current?.unread_count) || 0);
   const inbound = inbox.messages.filter((message) => message.direction === "incoming");
   const unreadStart = unread > 0 && inbound.length >= unread ? inbound.at(-unread)?.id : null;
-  list.innerHTML = inbox.messages.map((message) => {
+  const authors = new Set(inbox.messages.filter((message) => message.direction === "outgoing" &&
+    message.author_admin_telegram_id != null).map((message) => String(message.author_admin_telegram_id)));
+  const multipleAuthors = authors.size > 1;
+  list.innerHTML = inbox.messages.map((message, index) => {
     const outgoing = message.direction === "outgoing";
     const delivery = outgoing && message.delivery_status ? message.delivery_status : null;
-    const body = message.text || message.caption || (message.attachment ? "Вложение: " + (message.kind || "файл") : "");
+    const body = message.text || message.caption || (message.attachment
+      ? ({ photo: "Фотография", document: "Документ", voice: "Голосовое сообщение" }[message.kind] || "Вложение")
+      : "");
     const isUnread = unreadStart === message.id;
+    const authorId = message.author_admin_telegram_id;
+    const previous = inbox.messages[index - 1];
+    const showAuthor = outgoing && multipleAuthors && authorId != null &&
+      (!previous || previous.direction !== "outgoing" || previous.author_admin_telegram_id !== authorId);
+    const quoted = message.reply_to_telegram_message_id == null ? null :
+      inbox.messages.find((item) => Number(item.telegram_message_id) === Number(message.reply_to_telegram_message_id));
+    const quote = message.reply_to_telegram_message_id == null ? "" :
+      '<span class="inbox-message-reply">' + text(
+        quoted?.text || quoted?.caption || (quoted?.attachment ? "Вложение" : "Ответ на сообщение")
+      ).slice(0, 110) + '</span>';
     return (isUnread ? '<div class="inbox-unread-divider">Непрочитанные сообщения</div>' : "") +
-      '<article class="inbox-message ' + (outgoing ? "is-outgoing" : "is-incoming") + '" data-inbox-message="' + text(message.id) + '">' +
-      '<span class="inbox-message-author">' + (outgoing
-        ? "Администратор" + (message.author_admin_telegram_id != null ? " · ID " + text(message.author_admin_telegram_id) : "")
-        : "Пользователь") + '</span>' +
-      (message.reply_to_telegram_message_id != null
-        ? '<span class="inbox-message-reply">Ответ на Telegram #' + text(message.reply_to_telegram_message_id) + '</span>' : "") +
+      '<article class="inbox-message ' + (outgoing ? "is-outgoing" : "is-incoming") +
+      (delivery === "failed" ? ' has-failure' : "") + '" data-inbox-message="' + text(message.id) +
+      '" tabindex="0">' +
+      (showAuthor ? '<span class="inbox-message-author">Админ · ' + text(authorId) + '</span>' : "") +
+      quote +
       '<span class="inbox-message-body">' + text(body) + '</span>' +
-      '<span class="inbox-message-meta"><time>' + text(time(message.created_at)) + '</time>' +
-      (delivery ? '<span class="' + (delivery === "failed" ? "inbox-failed" : "") + '">' + text(statusText[delivery] || delivery) + '</span>' : "") +
+      '<span class="inbox-message-meta"><time>' + text(messageClock(message.created_at)) + '</time>' +
+      (delivery ? '<span class="inbox-delivery' + (delivery === "failed" ? ' inbox-failed' : "") +
+        '">' + text(statusText[delivery] || delivery) + '</span>' : "") +
       '</span>' +
-      '<span class="inbox-message-actions"><button type="button" data-inbox-reply="' + text(message.id) + '">Ответить</button>' +
-      (delivery === "failed" ? '<button type="button" data-inbox-retry="' + text(message.id) + '">' +
-        (message._sendRequest ? "Повторить" : "Отправить заново") + '</button>' : "") +
-      '</span></article>' +
-      (inbox.readThrough === message.id ? '<div class="inbox-read-marker">Прочитано до этого сообщения</div>' : "");
+      '<span class="inbox-message-actions">' +
+      '<button type="button" data-inbox-reply="' + text(message.id) +
+        '" aria-label="Ответить на сообщение" title="Ответить">↶</button>' +
+      (delivery === "failed" ? '<button type="button" class="inbox-retry-action" data-inbox-retry="' +
+        text(message.id) + '">' + (message._sendRequest ? "Повторить" : "Отправить заново") + '</button>' : "") +
+      '</span></article>';
   }).join("");
   el("inbox-older")?.classList.toggle("hidden", !inbox.historyCursor);
   if (el("inbox-older")) el("inbox-older").disabled = inbox.historyLoading;
   status("inbox-history-status", inbox.historyLoading
     ? "Загружаем сообщения…" : inbox.historyError || (inbox.messages.length ? "" : "Сообщений пока нет."));
   renderReply();
-  if (preserveScroll) list.scrollTop = oldTop + list.scrollHeight - oldHeight;
-  else if (atBottom || !oldHeight) list.scrollTop = list.scrollHeight;
-  else list.scrollTop = oldTop;
+  if (preserveScroll) scroll.scrollTop = oldTop + scroll.scrollHeight - oldHeight;
+  else if (atBottom || !oldHeight) scroll.scrollTop = scroll.scrollHeight;
+  else scroll.scrollTop = oldTop;
 }
 
 async function loadMessages({ older = false, refresh = false } = {}) {
