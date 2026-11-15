@@ -2,17 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import selectinload
 
 from topsbottg.access import get_principal
-from topsbottg.models import Payout, PayoutReadyNotification, PayoutRecipient, PayoutStatus, RecipientStatus
+from topsbottg.models import (
+    AdminInvitation,
+    Payout,
+    PayoutReadyNotification,
+    PayoutRecipient,
+    PayoutStatus,
+    RecipientStatus,
+)
 from topsbottg.services import (
     ADMIN_EVENT_PAYOUT_RECIPIENTS_CHANGED,
     claim_pending_recipients,
@@ -182,10 +189,88 @@ async def deliver_ready_notification(
             await settle_ready_notification(session, message_id, error)
 
 
+def _admin_invitation_keyboard(invitation_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="Принять", callback_data=f"admin_invite:accept:{invitation_id}"
+            ),
+            InlineKeyboardButton(
+                text="Отклонить", callback_data=f"admin_invite:decline:{invitation_id}"
+            ),
+        ]]
+    )
+
+
+async def deliver_admin_invitations(bot: MessageSender, session_factory: async_sessionmaker) -> None:
+    """Existing worker delivers pending invitations; row locks prevent concurrent sends."""
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        await session.execute(
+            update(AdminInvitation)
+            .where(AdminInvitation.status == "pending", AdminInvitation.expires_at <= now)
+            .values(status="expired", decided_at=now)
+        )
+        ids = list(
+            await session.scalars(
+                select(AdminInvitation.id)
+                .where(
+                    AdminInvitation.status == "pending",
+                    AdminInvitation.delivered_at.is_(None),
+                    AdminInvitation.expires_at > now,
+                    or_(
+                        AdminInvitation.next_delivery_at.is_(None),
+                        AdminInvitation.next_delivery_at <= now,
+                    ),
+                )
+                .order_by(AdminInvitation.id)
+                .limit(10)
+            )
+        )
+        await session.commit()
+
+    for invitation_id in ids:
+        async with session_factory() as session:
+            invitation = await session.scalar(
+                select(AdminInvitation)
+                .where(AdminInvitation.id == invitation_id)
+                .with_for_update(skip_locked=True)
+                .execution_options(populate_existing=True)
+            )
+            if invitation is None or invitation.status != "pending" or invitation.delivered_at is not None:
+                continue
+            now = datetime.now(UTC)
+            if invitation.expires_at.replace(tzinfo=UTC) <= now:
+                invitation.status = "expired"
+                invitation.decided_at = now
+                await session.commit()
+                continue
+            if invitation.next_delivery_at is not None and invitation.next_delivery_at.replace(tzinfo=UTC) > now:
+                continue
+            try:
+                await bot.send_message(
+                    invitation.target_telegram_id,
+                    "Вас приглашают стать администратором TOPSBOT. Подтвердите или отклоните приглашение.",
+                    reply_markup=_admin_invitation_keyboard(invitation.id),
+                )
+            except Exception as exc:  # noqa: BLE001
+                invitation.delivery_attempts += 1
+                invitation.last_delivery_error = type(exc).__name__[:80]
+                invitation.next_delivery_at = now + timedelta(
+                    seconds=min(3600, 10 * 2 ** min(invitation.delivery_attempts, 8))
+                )
+            else:
+                invitation.delivered_at = datetime.now(UTC)
+                invitation.last_delivery_error = None
+                invitation.next_delivery_at = None
+            await session.commit()
+
+
 async def run_worker(bot: Bot, session_factory: async_sessionmaker, settings, stop_event: asyncio.Event) -> None:
     loop = asyncio.get_running_loop()
     next_recovery = 0.0
     next_notification = 0.0
+    next_invitations = 0.0
     while not stop_event.is_set():
         now = loop.time()
         if now >= next_recovery:
@@ -196,6 +281,9 @@ async def run_worker(bot: Bot, session_factory: async_sessionmaker, settings, st
         if now >= next_notification:
             await deliver_ready_notifications(bot, session_factory, settings)
             next_notification = loop.time() + 5
+        if now >= next_invitations:
+            await deliver_admin_invitations(bot, session_factory)
+            next_invitations = loop.time() + 5
         async with session_factory() as session:
             rows = await claim_pending_recipients(session, limit=max(1, int(settings.broadcast_rate_per_second)))
             await session.commit()

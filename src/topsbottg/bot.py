@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from contextlib import suppress
 
-from aiogram import F, Router
+from aiogram import BaseMiddleware, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -21,7 +21,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from topsbottg.access import get_principal
+from topsbottg.access import AccessDenied, get_principal
+from topsbottg.invitations import decide_invitation, observe_telegram_profile
 from topsbottg.logging_utils import log_event
 from topsbottg.models import PayoutRecipient, RecipientStatus
 from topsbottg.services import (
@@ -322,8 +323,40 @@ async def _save_payment_details(
     )
 
 
+class TelegramProfileObserver(BaseMiddleware):
+    """Keep identity hints current after bot interactions, without creating registrations."""
+
+    def __init__(self, session_factory: async_sessionmaker) -> None:
+        self.session_factory = session_factory
+
+    async def __call__(self, handler, event, data):
+        result = await handler(event, data)
+        user = getattr(event, "from_user", None)
+        chat = getattr(event, "chat", None)
+        if chat is None and isinstance(event, CallbackQuery):
+            chat = getattr(event.message, "chat", None)
+        if user is None or chat is None or chat.type != "private":
+            return result
+        try:
+            async with self.session_factory() as session:
+                await observe_telegram_profile(
+                    session, user.id, user.username, user.first_name, user.last_name
+                )
+                await session.commit()
+        except SQLAlchemyError:
+            log_event(
+                logger, "ERROR", "telegram_profile_update_failed",
+                "Не удалось обновить данные Telegram",
+                telegram_user_id=user.id,
+            )
+        return result
+
+
 def build_router(session_factory: async_sessionmaker, _settings) -> Router:
     router = Router()
+    observer = TelegramProfileObserver(session_factory)
+    router.message.outer_middleware(observer)
+    router.callback_query.outer_middleware(observer)
 
     @router.message(CommandStart())
     async def start(message: Message, state: FSMContext):
@@ -392,6 +425,65 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
             mini_app_url_present=bool(_settings.mini_app_url),
         )
         await _show_admin_entrypoint(message, _settings, allowed=allowed)
+
+    @router.callback_query(F.data.startswith("admin_invite:"))
+    async def admin_invitation_response(callback: CallbackQuery):
+        parts = (callback.data or "").split(":")
+        if (
+            len(parts) != 3
+            or parts[1] not in {"accept", "decline"}
+            or not parts[2].isdecimal()
+            or callback.message is None
+            or callback.message.chat.type != "private"
+        ):
+            await _safe_callback_answer(callback, callback.from_user.id, "Неверное приглашение.", show_alert=True)
+            return
+        invitation_id = int(parts[2])
+        if invitation_id <= 0:
+            await _safe_callback_answer(callback, callback.from_user.id, "Неверное приглашение.", show_alert=True)
+            return
+        try:
+            async with session_factory() as session:
+                outcome = await decide_invitation(
+                    session,
+                    invitation_id=invitation_id,
+                    actor_id=callback.from_user.id,
+                    accept=parts[1] == "accept",
+                    owner_ids=_settings.admin_ids_set,
+                )
+                await session.commit()
+        except AccessDenied:
+            await _safe_callback_answer(
+                callback, callback.from_user.id,
+                "Это приглашение адресовано другому пользователю.", show_alert=True,
+            )
+            return
+        except ValueError:
+            await _safe_callback_answer(
+                callback, callback.from_user.id,
+                "Приглашение больше недействительно.", show_alert=True,
+            )
+            return
+        responses = {
+            "accepted": "Доступ администратора предоставлен. Используйте /admin.",
+            "declined": "Приглашение отклонено.",
+            "expired": "Срок приглашения истёк.",
+            "cancelled": "Приглашение отменено.",
+            "missing": "Приглашение не найдено.",
+        }
+        reply = responses.get(outcome, "Приглашение уже обработано.")
+        if callback.message is not None:
+            try:
+                await callback.message.edit_text(reply, reply_markup=None)
+            except Exception as exc:  # noqa: BLE001
+                log_event(
+                    logger, "WARNING", "telegram_invitation_message_edit_failed",
+                    "Не удалось обновить приглашение в Telegram",
+                    telegram_user_id=callback.from_user.id,
+                    invitation_id=invitation_id,
+                    error_type=type(exc).__name__,
+                )
+        await _safe_callback_answer(callback, callback.from_user.id, reply, show_alert=False)
 
     @router.message(RegistrationFSM.registration_full_name)
     async def save_registration_name(message: Message, state: FSMContext):

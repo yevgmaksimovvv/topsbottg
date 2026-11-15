@@ -8,6 +8,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from topsbottg.constants import MAX_PAYOUT_MESSAGE_LENGTH
 
 
+class AdminInvitationCreateIn(BaseModel):
+    target_telegram_id: int = Field(gt=0, strict=True)
+    expected_username: str | None = Field(default=None, max_length=33)
+
+
 class StudyGroupOut(BaseModel):
     id: int
     code: str

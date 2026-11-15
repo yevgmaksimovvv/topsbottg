@@ -1040,3 +1040,99 @@ async def test_database_admin_can_open_bot_admin_until_revoked(session_factory, 
     # A configured owner can use /admin even without a row in users.
     await dispatcher.feed_update(instance, _make_update(instance, 123, "/admin", 3))
     assert _last_message_method(recording_session).text == "Откройте админку."
+
+@pytest.mark.asyncio
+async def test_start_saves_current_telegram_username_for_owner_lookup(session_factory, settings):
+    bot, recording = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+    update = Update.model_validate(
+        {
+            "update_id": 1,
+            "message": {
+                "message_id": 11,
+                "date": int(datetime.now(UTC).timestamp()),
+                "chat": {"id": 555, "type": "private"},
+                "from": {
+                    "id": 555, "is_bot": False, "first_name": "Настоящее",
+                    "last_name": "Имя", "username": "first_handle",
+                },
+                "text": "/start",
+            },
+        },
+        context={"bot": bot},
+    )
+    await dispatcher.feed_update(bot, update)
+    async with session_factory() as session:
+        user = await session.scalar(select(User).where(User.telegram_id == 555))
+        assert user.telegram_username == "first_handle"
+        assert user.telegram_display_name == "Настоящее Имя"
+        assert user.telegram_profile_seen_at is not None
+    assert "Здравствуйте" in _last_message_method(recording).text
+
+
+@pytest.mark.asyncio
+async def test_invite_callback_requires_matching_telegram_user_then_grants_access(session_factory, settings):
+    from topsbottg.access import get_principal
+    from topsbottg.invitations import create_invitation, observe_telegram_profile
+    from topsbottg.models import AdminInvitation
+
+    async with session_factory() as session:
+        await get_or_create_user(session, 555, "Иван Иванов")
+        await observe_telegram_profile(session, 555, "valid_name", "Иван", "Иванов")
+        invitation = await create_invitation(
+            session, actor_id=123, target_id=555, owner_ids=settings.admin_ids_set
+        )
+        invitation_id = invitation.id
+        await session.commit()
+
+    bot, recording = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+    await dispatcher.feed_update(
+        bot, _make_callback_update(
+            bot, callback_user_id=999, message_from_user_id=123, chat_id=999,
+            data=f"admin_invite:accept:{invitation_id}", update_id=1,
+        ),
+    )
+    assert _last_method(recording).text == "Это приглашение адресовано другому пользователю."
+    async with session_factory() as session:
+        assert await get_principal(session, 555, settings.admin_ids_set) is None
+
+    await dispatcher.feed_update(
+        bot, _make_callback_update(
+            bot, callback_user_id=555, message_from_user_id=123, chat_id=555,
+            data=f"admin_invite:accept:{invitation_id}", update_id=2,
+        ),
+    )
+    assert _last_method(recording).text == "Доступ администратора предоставлен. Используйте /admin."
+    async with session_factory() as session:
+        assert (await get_principal(session, 555, settings.admin_ids_set)).role == "admin"
+        assert (await session.get(AdminInvitation, invitation_id)).status == "accepted"
+
+    await dispatcher.feed_update(bot, _make_update(bot, 555, "/admin", 3))
+    assert _last_message_method(recording).text == "Откройте админку."
+
+
+@pytest.mark.asyncio
+async def test_invite_decline_button_never_grants_admin(session_factory, settings):
+    from topsbottg.access import get_principal
+    from topsbottg.invitations import create_invitation, observe_telegram_profile
+
+    async with session_factory() as session:
+        await get_or_create_user(session, 555, "Иван Иванов")
+        await observe_telegram_profile(session, 555, "valid_name", "Иван", "Иванов")
+        invitation = await create_invitation(
+            session, actor_id=123, target_id=555, owner_ids=settings.admin_ids_set
+        )
+        id_ = invitation.id
+        await session.commit()
+    bot, recording = _make_bot()
+    dispatcher = _make_dispatcher(session_factory, settings)
+    await dispatcher.feed_update(
+        bot, _make_callback_update(
+            bot, callback_user_id=555, message_from_user_id=123, chat_id=555,
+            data=f"admin_invite:decline:{id_}", update_id=1,
+        ),
+    )
+    assert _last_method(recording).text == "Приглашение отклонено."
+    async with session_factory() as session:
+        assert await get_principal(session, 555, settings.admin_ids_set) is None
