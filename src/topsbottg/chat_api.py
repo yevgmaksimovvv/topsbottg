@@ -5,11 +5,12 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import secrets
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, delete, func, insert, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -21,7 +22,15 @@ from topsbottg.conversations import (
     list_conversation_messages,
 )
 from topsbottg.db import get_session
-from topsbottg.models import ChatMessage, Conversation, ConversationRead, StudyGroup, User
+from topsbottg.models import (
+    ChatMessage,
+    Conversation,
+    ConversationListSnapshot,
+    ConversationListSnapshotItem,
+    ConversationRead,
+    StudyGroup,
+    User,
+)
 from topsbottg.schemas import (
     ChatMessageOut,
     ChatMessagePageOut,
@@ -63,7 +72,7 @@ def _encode_cursor(payload: dict[str, object]) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def _decode_cursor(value: str) -> dict[str, object]:
+def _decode_cursor(value: str, *, version: int = 1) -> dict[str, object]:
     if not value or len(value) > 2048:
         raise HTTPException(status_code=422, detail="invalid cursor")
     try:
@@ -71,7 +80,7 @@ def _decode_cursor(value: str) -> dict[str, object]:
         payload = json.loads(raw)
     except (ValueError, UnicodeDecodeError, binascii.Error) as exc:
         raise HTTPException(status_code=422, detail="invalid cursor") from exc
-    if not isinstance(payload, dict) or payload.get("v") != 1:
+    if not isinstance(payload, dict) or payload.get("v") != version:
         raise HTTPException(status_code=422, detail="invalid cursor")
     return payload
 
@@ -80,34 +89,21 @@ def _positive_int(value: object, *, allow_zero: bool = False) -> bool:
     return type(value) is int and (value >= 0 if allow_zero else value > 0)
 
 
-def _conversation_cursor(
-    value: str | None, *, query: str, study_group_id: int | None,
-) -> tuple[int, int, int | None, datetime | None] | None:
+def _conversation_cursor(value: str | None) -> tuple[str, int] | None:
     if value is None:
         return None
-    payload = _decode_cursor(value)
-    ceiling = payload.get("c")
-    message_ceiling = payload.get("m")
-    last_id = payload.get("id")
-    last_time = payload.get("at")
+    payload = _decode_cursor(value, version=2)
+    snapshot_id = payload.get("sid")
+    position = payload.get("position")
     if (
-        not _positive_int(ceiling)
-        or not _positive_int(message_ceiling, allow_zero=True)
-        or not _positive_int(last_id)
-        or last_id > ceiling
-        or payload.get("q") != query.casefold()
-        or payload.get("g") != study_group_id
-        or (last_time is not None and not isinstance(last_time, str))
+        set(payload) != {"v", "sid", "position"}
+        or not isinstance(snapshot_id, str)
+        or not 20 <= len(snapshot_id) <= 48
+        or not all(ch.isascii() and (ch.isalnum() or ch in "-_") for ch in snapshot_id)
+        or not _positive_int(position)
     ):
         raise HTTPException(status_code=422, detail="invalid cursor")
-    if last_time is None:
-        stamp = None
-    else:
-        try:
-            stamp = _utc(datetime.fromisoformat(last_time))
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail="invalid cursor") from exc
-    return ceiling, message_ceiling, last_id, stamp
+    return snapshot_id, position
 
 
 def _history_cursor(value: str | None, conversation_id: int) -> int | None:
@@ -130,29 +126,104 @@ async def _conversation_or_404(session: AsyncSession, conversation_id: int) -> C
     return conversation
 
 
+SNAPSHOT_TTL = timedelta(minutes=15)
+
+
+async def _create_list_snapshot(
+    session: AsyncSession, *, actor_id: int, query: str, study_group_id: int | None,
+) -> str:
+    """Freeze the committed ordering in one SQL statement, including in-flight IDs only after commit."""
+    now = datetime.now(UTC)
+    expired_ids = select(ConversationListSnapshot.id).where(ConversationListSnapshot.expires_at <= now)
+    await session.execute(
+        delete(ConversationListSnapshotItem).where(
+            ConversationListSnapshotItem.snapshot_id.in_(expired_ids)
+        )
+    )
+    await session.execute(
+        delete(ConversationListSnapshot).where(ConversationListSnapshot.expires_at <= now)
+    )
+
+    snapshot_id = secrets.token_urlsafe(24)
+    session.add(ConversationListSnapshot(
+        id=snapshot_id,
+        admin_telegram_id=actor_id,
+        search_query=query.casefold(),
+        study_group_id=study_group_id,
+        expires_at=now + SNAPSHOT_TTL,
+    ))
+    await session.flush()
+
+    # The latest message ID and the maximum created_at are not necessarily the
+    # same row: PostgreSQL transaction timestamps can precede message ID order.
+    latest_id = (
+        select(func.max(ChatMessage.id))
+        .where(ChatMessage.conversation_id == Conversation.id)
+        .correlate(Conversation)
+        .scalar_subquery()
+    )
+    activity = (
+        select(func.max(ChatMessage.created_at))
+        .where(ChatMessage.conversation_id == Conversation.id)
+        .correlate(Conversation)
+        .scalar_subquery()
+    )
+    snapshot_rows = (
+        select(
+            literal(snapshot_id),
+            func.row_number().over(order_by=(activity.desc().nulls_last(), Conversation.id.desc())),
+            Conversation.id,
+            latest_id,
+            activity,
+        )
+        .select_from(Conversation)
+        .join(User, User.id == Conversation.user_id)
+    )
+    if query:
+        if session.get_bind().dialect.name == "sqlite":
+            # SQLite's lower() cannot case-fold Cyrillic.
+            names = await session.execute(
+                select(User.id, User.full_name).join(Conversation, Conversation.user_id == User.id)
+            )
+            matching_ids = [user_id for user_id, name in names if query.casefold() in name.casefold()]
+            snapshot_rows = snapshot_rows.where(User.id.in_(matching_ids))
+        else:
+            escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            snapshot_rows = snapshot_rows.where(User.full_name.ilike(f"%{escaped}%", escape="\\"))
+    if study_group_id is not None:
+        snapshot_rows = snapshot_rows.where(User.study_group_id == study_group_id)
+
+    await session.execute(insert(ConversationListSnapshotItem).from_select(
+        ["snapshot_id", "position", "conversation_id", "last_message_id", "last_message_at"],
+        snapshot_rows,
+    ))
+    await session.commit()
+    return snapshot_id
+
+
 async def _list_conversations(
     session: AsyncSession, *, actor_id: int, query: str,
     study_group_id: int | None, cursor: str | None, limit: int,
 ) -> ConversationPageOut:
     query = query.strip()
-    decoded = _conversation_cursor(cursor, query=query, study_group_id=study_group_id)
+    decoded = _conversation_cursor(cursor)
     if decoded is None:
-        conversation_ceiling = int(await session.scalar(select(func.max(Conversation.id))) or 0)
-        message_ceiling = int(await session.scalar(select(func.max(ChatMessage.id))) or 0)
-        last_id = None
-        last_time = None
+        snapshot_id = await _create_list_snapshot(
+            session, actor_id=actor_id, query=query, study_group_id=study_group_id,
+        )
+        position = 0
     else:
-        conversation_ceiling, message_ceiling, last_id, last_time = decoded
-    if not conversation_ceiling:
-        return ConversationPageOut(items=[], next_cursor=None)
+        snapshot_id, position = decoded
+        snapshot = await session.get(ConversationListSnapshot, snapshot_id)
+        if (
+            snapshot is None
+            or snapshot.admin_telegram_id != actor_id
+            or snapshot.search_query != query.casefold()
+            or snapshot.study_group_id != study_group_id
+            or _utc(snapshot.expires_at) <= datetime.now(UTC)
+        ):
+            raise HTTPException(status_code=422, detail="invalid cursor")
 
-    latest_id = (
-        select(func.max(ChatMessage.id))
-        .where(ChatMessage.conversation_id == Conversation.id, ChatMessage.id <= message_ceiling)
-        .correlate(Conversation)
-        .scalar_subquery()
-    )
-    latest = aliased(ChatMessage)
     read_marker = (
         select(ConversationRead.last_read_message_id)
         .where(
@@ -168,61 +239,31 @@ async def _list_conversations(
         .where(
             incoming.conversation_id == Conversation.id,
             incoming.direction == "incoming",
-            incoming.id <= message_ceiling,
             incoming.id > func.coalesce(read_marker, 0),
         )
         .correlate(Conversation)
         .scalar_subquery()
     )
-
-    statement = (
-        select(Conversation, User, StudyGroup, latest, unread_count)
+    rows = (await session.execute(
+        select(
+            ConversationListSnapshotItem, User, StudyGroup, ChatMessage, unread_count,
+        )
+        .join(Conversation, Conversation.id == ConversationListSnapshotItem.conversation_id)
         .join(User, User.id == Conversation.user_id)
         .outerjoin(StudyGroup, StudyGroup.id == User.study_group_id)
-        .outerjoin(latest, latest.id == latest_id)
-        .where(Conversation.id <= conversation_ceiling)
-    )
-    if query:
-        if session.get_bind().dialect.name == "sqlite":
-            # SQLite's built-in lower() does not case-fold Cyrillic, unlike PostgreSQL ILIKE.
-            names = await session.execute(
-                select(User.id, User.full_name)
-                .join(Conversation, Conversation.user_id == User.id)
-                .where(Conversation.id <= conversation_ceiling)
-            )
-            matching_ids = [user_id for user_id, name in names if query.casefold() in name.casefold()]
-            statement = statement.where(User.id.in_(matching_ids))
-        else:
-            escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            statement = statement.where(User.full_name.ilike(f"%{escaped}%", escape="\\"))
-    if study_group_id is not None:
-        statement = statement.where(User.study_group_id == study_group_id)
+        .outerjoin(ChatMessage, ChatMessage.id == ConversationListSnapshotItem.last_message_id)
+        .where(
+            ConversationListSnapshotItem.snapshot_id == snapshot_id,
+            ConversationListSnapshotItem.position > position,
+        )
+        .order_by(ConversationListSnapshotItem.position)
+        .limit(limit + 1)
+    )).all()
 
-    activity = latest.created_at
-    cursor_time = last_time
-    if session.get_bind().dialect.name == "sqlite":
-        # SQLite CURRENT_TIMESTAMP omits fractional seconds, so normalize both
-        # sides before keyset comparison instead of comparing different text formats.
-        activity = func.strftime("%Y-%m-%dT%H:%M:%f", latest.created_at)
-        if last_time is not None:
-            cursor_time = last_time.strftime("%Y-%m-%dT%H:%M:%S.%f")[:23]
-
-    if last_id is not None:
-        if last_time is None:
-            statement = statement.where(latest.id.is_(None), Conversation.id < last_id)
-        else:
-            statement = statement.where(or_(
-                activity < cursor_time,
-                and_(activity == cursor_time, Conversation.id < last_id),
-                latest.id.is_(None),
-            ))
-    statement = statement.order_by(activity.desc().nulls_last(), Conversation.id.desc()).limit(limit + 1)
-    rows = (await session.execute(statement)).all()
     page = rows[:limit]
-
     items = [
         ConversationItemOut(
-            id=conversation.id,
+            id=entry.conversation_id,
             user=ConversationUserOut(
                 id=user.id,
                 telegram_id=user.telegram_id,
@@ -232,22 +273,13 @@ async def _list_conversations(
             ),
             last_message=_message_out(message) if message else None,
             unread_count=int(unread or 0),
-            last_message_at=_utc(message.created_at) if message else None,
+            last_message_at=_utc(entry.last_message_at) if entry.last_message_at else None,
         )
-        for conversation, user, group, message, unread in page
+        for entry, user, group, message, unread in page
     ]
-    next_cursor = None
-    if len(rows) > limit:
-        last_conversation, _, _, last_message, _ = page[-1]
-        next_cursor = _encode_cursor({
-            "v": 1,
-            "c": conversation_ceiling,
-            "m": message_ceiling,
-            "id": last_conversation.id,
-            "at": _utc(last_message.created_at).isoformat() if last_message else None,
-            "q": query.casefold(),
-            "g": study_group_id,
-        })
+    next_cursor = _encode_cursor({
+        "v": 2, "sid": snapshot_id, "position": page[-1][0].position,
+    }) if len(rows) > limit else None
     return ConversationPageOut(items=items, next_cursor=next_cursor)
 
 
