@@ -179,7 +179,7 @@ async def test_sse_token_bound_to_user_and_rejected_after_revocation(
         await session.commit()
     token_response = await client.post("/api/admin/events-token", headers=headers)
     assert token_response.status_code == 200
-    token = token_response.json()["token"]
+    token = token_response.cookies["topsbottg_events"]
     async with session_factory() as session:
         await revoke_admin(
             session, actor_telegram_id=123, target_telegram_id=555,
@@ -205,7 +205,7 @@ async def test_sse_stream_stops_before_emitting_after_revocation(
         )
         await session.commit()
 
-    token = (await client.post("/api/admin/events-token", headers=headers)).json()["token"]
+    token = (await client.post("/api/admin/events-token", headers=headers)).cookies["topsbottg_events"]
     route = next(route for route in app.routes if getattr(route, "path", None) == "/api/admin/events")
     response = await route.endpoint(token=token)
     stream = response.body_iterator
