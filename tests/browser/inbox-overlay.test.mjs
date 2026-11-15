@@ -121,7 +121,7 @@ async function installFixture(page, unread = 3) {
         last_message: { text: "Привет" }, last_message_at: date, unread_count: 1 },
     ];
     const state = { unread: unreadCount, conversations, messages, log: [],
-      sendFailures: 1, opened: [], read: [], newId: 60, delayed: "Анна" };
+      sendFailures: 1, accepted: new Map(), opened: [], read: [], newId: 60, delayed: "Анна" };
     window.__inboxFixture = state;
     configureInboxClient({
       async summary() { return { unread_count: state.unread }; },
@@ -163,16 +163,25 @@ async function installFixture(page, unread = 3) {
       async send(conversationId, payload) {
         state.log.push({ send: payload, conversationId });
         await new Promise((done) => setTimeout(done, 90));
-        if (state.sendFailures-- > 0) throw new Error("Delivery failed");
-        const message = {
-          id: state.newId++, conversation_id: conversationId, direction: "outgoing",
-          kind: "text", text: payload.text, caption: null, created_at: date,
-          author_admin_telegram_id: 123, telegram_message_id: null,
-          reply_to_telegram_message_id: payload.reply_to_message_id || null,
-          delivery_status: "sent", delivery_error_code: null, attachment: null,
-        };
-        state.messages.push(message);
-        return { message };
+        let accepted = state.accepted.get(payload.idempotency_key);
+        if (accepted) {
+          if (accepted.text !== payload.text ||
+            accepted.reply_to_message_id !== payload.reply_to_message_id)
+            throw new Error("409: Idempotency key reused with different payload");
+        } else {
+          const message = {
+            id: state.newId++, conversation_id: conversationId, direction: "outgoing",
+            kind: "text", text: payload.text, caption: null, created_at: date,
+            author_admin_telegram_id: 123, telegram_message_id: null,
+            reply_to_telegram_message_id: payload.reply_to_message_id || null,
+            delivery_status: "sent", delivery_error_code: null, attachment: null,
+          };
+          accepted = { text: payload.text, reply_to_message_id: payload.reply_to_message_id, message };
+          state.accepted.set(payload.idempotency_key, accepted);
+          state.messages.push(message);
+        }
+        if (state.sendFailures-- > 0) throw new Error("Connection lost after HTTP 202");
+        return { message: accepted.message };
       },
       async read(conversationId, lastReadMessageId) {
         state.read.push({ conversationId, lastReadMessageId });
@@ -303,7 +312,6 @@ test("Inbox: history, read marker, older messages, incoming refresh, send/retry 
     assert.match(await page.locator("#inbox-reply").innerText(), /Ответ на/);
     await page.locator("#inbox-text").fill("Первый ответ");
     await page.locator("#inbox-send").click();
-    await page.locator("#inbox-history").getByText("Не удалось отправить. Сообщение можно повторить.").count();
     await page.waitForFunction(() =>
       [...document.querySelectorAll(".inbox-message")].some((node) =>
         node.textContent.includes("Первый ответ") && node.textContent.includes("Ошибка отправки")));
@@ -311,10 +319,20 @@ test("Inbox: history, read marker, older messages, incoming refresh, send/retry 
       .locator("[data-inbox-retry]").click();
     await page.locator("#inbox-history .inbox-message").filter({ hasText: "Первый ответ" })
       .filter({ hasText: "Отправлено" }).waitFor();
-    const sent = await page.evaluate(() => window.__inboxFixture.log.filter((entry) => entry.send));
-    assert.equal(sent.length, 2);
-    assert.equal(sent[0].send.reply_to_message_id, 51);
-    assert.notEqual(sent[0].send.idempotency_key, sent[1].send.idempotency_key);
+    const sent = await page.evaluate(() => {
+      const fixture = window.__inboxFixture;
+      return { requests: fixture.log.filter((entry) => entry.send),
+        accepted: [...fixture.accepted.values()].map((entry) => entry.message.id) };
+    });
+    assert.equal(sent.requests.length, 2);
+    assert.equal(sent.requests[0].send.reply_to_message_id, 51);
+    assert.deepEqual(sent.requests[0].send, sent.requests[1].send,
+      "An uncertain response must be retried with the original key and payload");
+    assert.equal(sent.accepted.length, 1, "Backend accepted only one message");
+    assert.equal(await page.locator("#inbox-history .inbox-message").filter({ hasText: "Первый ответ" }).count(), 1);
+    assert.equal(await page.locator("#inbox-history .inbox-message").filter({ hasText: "Первый ответ" }).locator("[data-inbox-retry]").count(), 0);
+    assert.equal(await page.locator("#inbox-history [data-inbox-retry='54']").count(), 0,
+      "Failed server messages without an original key must not be blindly re-sent");
 
     await page.evaluate(() => {
       const fixture = window.__inboxFixture;
@@ -364,5 +382,81 @@ test("Write action opens existing or empty conversation without changing payout 
       const { state } = await import("/miniapp/js/store.js");
       return [ [...state.selectedUsers], [...state.selectedUsersByPayout.get(44)] ];
     }), [[1, 2], [1, 2]]);
+  });
+});
+
+
+test("Unread stays unread when history is scrolled up during refresh", async () => {
+  await withPage(async ({ page }) => {
+    await installFixture(page);
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-conversations .inbox-conversation").first().click();
+    await page.locator("#inbox-history [data-inbox-message='54']").waitFor();
+    await page.waitForFunction(() => window.__inboxFixture.read.length > 0);
+    const scrollHeight = await page.evaluate(() => {
+      const list = document.getElementById("inbox-history");
+      list.scrollTop = 0;
+      return list.scrollHeight - list.clientHeight;
+    });
+    assert.ok(scrollHeight > 100, "Fixture history must actually be scrollable");
+    const baselineReads = await page.evaluate(() => {
+      const fixture = window.__inboxFixture;
+      fixture.unread = 1;
+      fixture.conversations[0].unread_count = 1;
+      fixture.messages.push({
+        ...fixture.messages[0], id: 55,
+        text: "Новое входящее при чтении старой истории",
+        telegram_message_id: 900,
+      });
+      return fixture.read.length;
+    });
+    await page.locator("#inbox-refresh").click();
+    await page.locator("#inbox-history [data-inbox-message='55']").waitFor();
+    await page.waitForTimeout(100);
+    const beforeScroll = await page.evaluate(() => ({
+      calls: window.__inboxFixture.read.length,
+      unread: window.__inboxFixture.unread,
+      scrollTop: document.getElementById("inbox-history").scrollTop,
+    }));
+    assert.equal(beforeScroll.calls, baselineReads,
+      "A refresh while scrolled up must not advance the read marker");
+    assert.equal(beforeScroll.unread, 1);
+    assert.ok(beforeScroll.scrollTop < 50, "Refresh should preserve the top-of-history position");
+
+    await page.evaluate(() => {
+      const list = document.getElementById("inbox-history");
+      list.scrollTop = list.scrollHeight;
+    });
+    await page.waitForFunction(() =>
+      window.__inboxFixture.read.some((item) => item.lastReadMessageId === 55));
+    assert.equal(await page.evaluate(() => window.__inboxFixture.unread), 0);
+  });
+});
+
+test("Failed retry remains one bubble after a second timeout and keeps its original request", async () => {
+  await withPage(async ({ page }) => {
+    await installFixture(page);
+    await page.evaluate(() => { window.__inboxFixture.sendFailures = 2; });
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-conversations .inbox-conversation").first().click();
+    await page.locator("#inbox-history [data-inbox-message='54']").waitFor();
+    await page.locator("#inbox-text").fill("Три попытки — одно сообщение");
+    await page.locator("#inbox-send").click();
+    const bubble = page.locator(".inbox-message").filter({ hasText: "Три попытки — одно сообщение" });
+    await bubble.locator("[data-inbox-retry]").waitFor();
+    await bubble.locator("[data-inbox-retry]").click();
+    await bubble.locator("[data-inbox-retry]").waitFor();
+    await bubble.locator("[data-inbox-retry]").click();
+    await bubble.filter({ hasText: "Отправлено" }).waitFor();
+    const state = await page.evaluate(() => ({
+      attempts: window.__inboxFixture.log.filter((entry) => entry.send).map((entry) => entry.send),
+      records: window.__inboxFixture.accepted.size,
+    }));
+    assert.equal(state.attempts.length, 3);
+    assert.deepEqual(state.attempts[0], state.attempts[1]);
+    assert.deepEqual(state.attempts[1], state.attempts[2]);
+    assert.equal(state.records, 1);
+    assert.equal(await bubble.count(), 1);
+    assert.equal(await bubble.locator("[data-inbox-retry]").count(), 0);
   });
 });
