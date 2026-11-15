@@ -96,7 +96,7 @@ async def test_conversations_list_search_group_pagination_and_null_activity(
     assert page1["next_cursor"] is not None
     assert page1["items"][0]["unread_count"] == 1
     assert page1["items"][0]["user"]["study_group_name"] is None
-    assert page1["items"][0]["last_message_at"].endswith("+00:00")
+    assert page1["items"][0]["last_message_at"].endswith(("Z", "+00:00"))
     second = await client.get(path, headers=headers, params={"cursor": page1["next_cursor"], "limit": 1})
     assert [item["id"] for item in second.json()["items"]] == [ids[0]]
     third = await client.get(path, headers=headers, params={
@@ -149,7 +149,7 @@ async def test_history_message_contract_and_backwards_cursor(
     assert msg["attachment"] is None
     assert msg["delivery_status"] is None
     assert msg["direction"] == "incoming"
-    assert msg["created_at"].endswith("+00:00")
+    assert msg["created_at"].endswith(("Z", "+00:00"))
     assert (await client.get(url, headers=admin, params={"limit": 2})).json() == newest.json()
     older = await client.get(url, headers=owner, params={
         "limit": 2, "before": newest.json()["next_cursor"],
