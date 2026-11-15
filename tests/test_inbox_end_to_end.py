@@ -12,7 +12,7 @@ from aiogram.types import Message, Update
 from sqlalchemy import func, select
 
 from topsbottg.main import create_bot_dispatcher
-from topsbottg.models import AdminGrant, ChatMessage, Payout, User
+from topsbottg.models import AdminGrant, ChatMessage, Payout
 from topsbottg.services import get_admin_events_broadcaster, get_or_create_user
 from topsbottg.worker import deliver_chat_outbox
 
