@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -13,13 +14,24 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardMarkup, Message, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, WebAppInfo
 from sqlalchemy import select
 
+from topsbottg import bot as bot_module
 from topsbottg.bot import (
     CHANGE_PAYMENT_DETAILS_BUTTON_TEXT,
     CHAT_ENTRYPOINT_TEXT,
     build_router,
     main_keyboard,
 )
-from topsbottg.models import ChatMessage, Conversation, PaymentProfile, PayoutStatus, RecipientStatus, User
+from topsbottg.main import create_bot_dispatcher
+from topsbottg.models import (
+    BotFSMState,
+    BotSensitiveMessage,
+    ChatMessage,
+    Conversation,
+    PaymentProfile,
+    PayoutStatus,
+    RecipientStatus,
+    User,
+)
 from topsbottg.services import (
     add_recipients,
     create_payout,
@@ -1314,3 +1326,93 @@ async def test_chat_entrypoint_is_hidden_by_default_and_enabled_only_with_flag(s
     async with session_factory() as session:
         messages = list((await session.scalars(select(ChatMessage))).all())
         assert len(messages) == 1 and messages[0].text == "Вопрос администратору"
+
+
+@pytest.mark.asyncio
+async def test_payment_details_survive_dispatcher_restart_and_never_enter_chat(
+    session_factory, settings, caplog
+):
+    caplog.set_level(logging.INFO)
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 711, "Зарегистрированный пользователь")
+        payout = await create_payout(session, actor_telegram_id=123, payload=_payout_payload())
+        payout.status = PayoutStatus.sent.value
+        [recipient] = await add_recipients(session, payout, [user.id])
+        recipient.status = RecipientStatus.sent.value
+        await session.commit()
+        recipient_id = recipient.id
+
+    bot, _ = _make_bot()
+    first = create_bot_dispatcher(session_factory, settings)
+    await first.feed_update(bot, _make_update(bot, 711, CHANGE_PAYMENT_DETAILS_BUTTON_TEXT, 800))
+
+    async with session_factory() as session:
+        fsm_rows = list((await session.scalars(select(BotFSMState))).all())
+        assert len(fsm_rows) == 1
+        assert fsm_rows[0].state == "RegistrationFSM:payment_details"
+
+    secret = "private-payment-snapshot-value"
+    fresh = create_bot_dispatcher(session_factory, settings)
+    await fresh.feed_update(bot, _make_update(bot, 711, secret, 801))
+
+    async with session_factory() as session:
+        profile = await get_payment_profile(session, user.id)
+        assert profile is not None and profile.raw_payment_details == secret
+        assert (await session.get(type(recipient), recipient_id)).status == RecipientStatus.payment_received.value
+        assert (await session.scalars(select(ChatMessage))).all() == []
+        assert (await session.scalars(select(Conversation))).all() == []
+        assert (await session.scalars(select(BotSensitiveMessage))).all() != []
+
+    # The payment update can be replayed after the FSM was cleared or the service restarted.
+    another = create_bot_dispatcher(session_factory, settings)
+    await another.feed_update(bot, _make_update(bot, 711, secret, 801))
+    await another.feed_update(bot, _make_update(bot, 711, "Обычный вопрос", 802))
+    async with session_factory() as session:
+        messages = list((await session.scalars(select(ChatMessage))).all())
+        assert len(messages) == 1
+        assert messages[0].text == "Обычный вопрос"
+    assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_concurrent_payment_updates_wait_for_fsm_before_chat_filter(
+    session_factory, settings, monkeypatch, caplog
+):
+    caplog.set_level(logging.INFO)
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 712, "Второй пользователь")
+        await session.commit()
+
+    entered = asyncio.Event()
+    allow_payment_flow = asyncio.Event()
+    original = bot_module.get_latest_active_recipient
+
+    async def delayed_recipient(session, user_id):
+        entered.set()
+        await allow_payment_flow.wait()
+        return await original(session, user_id)
+
+    monkeypatch.setattr(bot_module, "get_latest_active_recipient", delayed_recipient)
+    bot, _ = _make_bot()
+    dispatcher = create_bot_dispatcher(session_factory, settings)
+    first = asyncio.create_task(
+        dispatcher.feed_update(bot, _make_update(bot, 712, CHANGE_PAYMENT_DETAILS_BUTTON_TEXT, 900))
+    )
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    second = asyncio.create_task(
+        dispatcher.feed_update(bot, _make_update(bot, 712, "private-racing-profile-value", 901))
+    )
+    try:
+        await asyncio.sleep(0.1)
+        assert not second.done()
+    finally:
+        allow_payment_flow.set()
+    await asyncio.wait_for(asyncio.gather(first, second), timeout=10)
+
+    async with session_factory() as session:
+        profile = await get_payment_profile(session, user.id)
+        assert profile is not None and profile.raw_payment_details == "private-racing-profile-value"
+        assert (await session.scalars(select(ChatMessage))).all() == []
+        assert (await session.scalars(select(Conversation))).all() == []
+        assert (await session.scalars(select(BotSensitiveMessage))).all() != []
+    assert "private-racing-profile-value" not in caplog.text
