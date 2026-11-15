@@ -13,6 +13,8 @@ class Settings(BaseSettings):
 
     app_domain: str = Field(min_length=1)
     bot_token: str = Field(min_length=1)
+    telegram_api_id: int | None = Field(default=None, gt=0)
+    telegram_api_hash: str | None = None
     database_url: str = Field(min_length=1)
     admin_telegram_ids: str = Field(min_length=1)
     mini_app_url: str = Field(min_length=1)
@@ -53,6 +55,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_mini_app_url(self) -> Settings:
+        if (self.telegram_api_id is None) != (not self.telegram_api_hash):
+            raise ValueError("Set both TELEGRAM_API_ID and TELEGRAM_API_HASH for username search")
         parsed = urlsplit(self.mini_app_url)
         if parsed.scheme != "https":
             raise ValueError("MINI_APP_URL must use https")
