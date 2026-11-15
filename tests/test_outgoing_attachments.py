@@ -322,13 +322,16 @@ async def test_post_commit_cancellation_preserves_queued_media(
 
     with monkeypatch.context() as patch:
         patch.setattr(AsyncSession, "commit", committed_then_cancel)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises((asyncio.CancelledError, RuntimeError)) as error:
             await client.post(
                 f"/api/admin/conversations/{cid}/attachments",
                 headers={"X-Telegram-Init-Data": admin_init_data, "Idempotency-Key": "cancel-after-commit"},
                 data={"kind": "document"},
                 files={"file": ("report.pdf", PDF, "application/pdf")},
             )
+    if isinstance(error.value, RuntimeError):
+        # Starlette's BaseHTTPMiddleware reports a cancelled response this way.
+        assert str(error.value) == "No response returned"
     assert did_raise
     async with session_factory() as session:
         job = await session.scalar(select(ChatMessageOutbox))
