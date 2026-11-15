@@ -503,7 +503,7 @@ test("Telegram-style bubbles and composer remain readable across mobile and desk
     assert.equal(await page.locator("#inbox-refresh").count(), 0);
     assert.equal(await page.locator(".inbox-history-tools, .inbox-read-marker").count(), 0);
     assert.equal(await page.locator(".inbox-message-reply").count(), 1);
-    assert.equal(await page.locator(".inbox-message-author").count(), 2);
+    assert.equal(await page.locator(".inbox-message-author").count(), 3);
     assert.equal(await page.locator('[data-inbox-reply="51"]').getAttribute("aria-label"), "Ответить на сообщение");
     assert.equal(await page.locator('[data-inbox-retry="54"]').innerText(), "Отправить заново");
 
