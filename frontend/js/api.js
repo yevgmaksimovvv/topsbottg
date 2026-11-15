@@ -15,6 +15,7 @@ import {
   renderPayouts,
 } from "./render-common.js";
 import { renderUsers } from "./render-users.js";
+import { disableInboxAccess, refreshInboxFromEvent } from "./inbox.js";
 import { renderRecipients } from "./render-recipients.js";
 import {
   createPayout as renderCreatePayout,
@@ -115,6 +116,10 @@ async function api(path, options = {}) {
     throw new Error("Нет доступа к данным");
   }
   const controller = new AbortController();
+  const externalSignal = options.signal;
+  const abortExternally = () => controller.abort();
+  if (externalSignal?.aborted) abortExternally();
+  else externalSignal?.addEventListener("abort", abortExternally, { once: true });
   const timeoutId = window.setTimeout(
     () => controller.abort("timeout"),
     API_TIMEOUT_MS,
@@ -142,6 +147,7 @@ async function api(path, options = {}) {
     if (isJsonResponse(response)) return response.json();
     return response.text();
   } catch (error) {
+    if (externalSignal?.aborted) throw new DOMException("Запрос отменён.", "AbortError");
     if (error?.name === "AbortError" || error === "timeout") {
       throw new Error("Запрос превысил время ожидания.");
     }
@@ -151,6 +157,7 @@ async function api(path, options = {}) {
     throw wrapped;
   } finally {
     clearTimeout(timeoutId);
+    externalSignal?.removeEventListener("abort", abortExternally);
   }
 }
 
@@ -473,6 +480,10 @@ export function stopAdminEvents({ resetRecovery = true } = {}) {
 
 export function handleAdminEvent(type, payload = {}) {
   if (type === "ping" || !state.initData) return;
+  if (type === "chat.changed") {
+    void refreshInboxFromEvent(payload.conversation_id);
+    return;
+  }
   if (type === "users_changed") {
     void loadUsers({ reset: true, silent: true });
     void loadStudyGroups();
@@ -539,8 +550,12 @@ export async function startAdminEvents(retryTokenRefresh = false) {
       adminEventsWarningShown = false;
       source.addEventListener("open", () => {
         adminEventsRecoveryUsed = false;
+        void refreshInboxFromEvent(null, { reconnect: true });
       });
       source.addEventListener("ping", () => handleAdminEvent("ping", {}));
+      source.addEventListener("chat.changed", (event) =>
+        handleAdminEvent("chat.changed", parseEventPayload(event.data)),
+      );
       source.addEventListener("users_changed", (event) =>
         handleAdminEvent("users_changed", parseEventPayload(event.data)),
       );
@@ -561,6 +576,7 @@ export async function startAdminEvents(retryTokenRefresh = false) {
       };
       return source;
     } catch (error) {
+      if (error?.status === 401 || error?.status === 403) disableInboxAccess();
       if (retryTokenRefresh && !adminEventsWarningShown) {
         adminEventsWarningShown = true;
         setToast("Realtime обновление временно недоступно.", "warning");
