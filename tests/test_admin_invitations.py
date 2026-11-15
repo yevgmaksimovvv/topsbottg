@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
+import topsbottg.api as api_module
 
 import pytest
 from sqlalchemy import select
@@ -18,6 +21,27 @@ from topsbottg.invitations import (
 from topsbottg.models import AdminInvitation, AuditLog, User
 from topsbottg.services import get_or_create_user
 from topsbottg.worker import deliver_admin_invitations
+
+
+@pytest.fixture(autouse=True)
+def telegram_identity(monkeypatch):
+    current = {"username": "valid_name"}
+
+    class FakeBot:
+        def __init__(self, token):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get_chat(self, telegram_id):
+            return SimpleNamespace(username=current["username"])
+
+    monkeypatch.setattr(api_module, "Bot", FakeBot)
+    return current
 
 
 class InvitationBot:
@@ -180,8 +204,9 @@ async def test_owner_api_lookup_invites_and_grants_only_after_acceptance(
 
 @pytest.mark.asyncio
 async def test_username_change_blocks_stale_invitation_and_unknown_identity(
-    client, session_factory, admin_init_data
+    client, session_factory, admin_init_data, telegram_identity
 ):
+    telegram_identity["username"] = "changed_name"
     await known(session_factory)
     headers = {"X-Telegram-Init-Data": admin_init_data}
     async with session_factory() as session:
