@@ -8,7 +8,7 @@
     />
     <meta name="color-scheme" content="light dark" />
     <title>topsbottg</title>
-    <link rel="stylesheet" href="/miniapp/styles.css?v=20261115-inbox-api" />
+    <link rel="stylesheet" href="/miniapp/styles.css?v=20261116-inbox-chat" />
   </head>
   <body>
     <main class="app-shell">
@@ -331,35 +331,58 @@
     <dialog id="inbox-dialog" class="inbox-dialog" aria-labelledby="inbox-title">
       <div class="inbox-panel">
         <header class="inbox-panel-header">
-          <button type="button" id="inbox-back" class="header-icon-button" aria-label="К списку диалогов" hidden>‹</button>
+          <button type="button" id="inbox-back" class="header-icon-button" aria-label="Назад к диалогам" hidden>‹</button>
           <h2 id="inbox-title">Сообщения</h2>
+          <button type="button" id="inbox-new" class="header-icon-button inbox-new-button" aria-label="Новый диалог" title="Новый диалог">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8"
+              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M13 6H5a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-8"/>
+              <path d="m14 5 5 5M9 15l3.5-.8L21 5.7a2.1 2.1 0 0 0-3-3L9.8 11z"/>
+            </svg>
+          </button>
           <button type="button" id="inbox-close" class="header-icon-button" aria-label="Закрыть сообщения">×</button>
         </header>
         <section id="inbox-list-screen" class="inbox-screen" aria-label="Список диалогов">
           <div class="inbox-filters">
             <label class="sr-only" for="inbox-search">Поиск диалога по ФИО</label>
-            <input id="inbox-search" type="search" autocomplete="off" placeholder="Поиск по ФИО" />
+            <input id="inbox-search" type="search" autocomplete="off" placeholder="Поиск диалога" />
             <label class="sr-only" for="inbox-group">Фильтр группы</label>
             <select id="inbox-group" aria-label="Фильтр группы"><option value="">Все группы</option></select>
           </div>
           <p id="inbox-list-status" class="inbox-feedback" role="status"></p>
-          <div id="inbox-conversations" class="inbox-scroll" aria-label="Диалоги"></div>
+          <div id="inbox-conversations" class="inbox-scroll inbox-chat-list" aria-label="Диалоги"></div>
           <button type="button" id="inbox-list-retry" class="button button-quiet inbox-page-button hidden">Повторить загрузку</button>
           <button type="button" id="inbox-more" class="button button-quiet inbox-page-button hidden">Загрузить ещё</button>
         </section>
-        <section id="inbox-history-screen" class="inbox-screen" aria-label="История диалога" hidden>
-          <div class="inbox-history-tools">
-            <button type="button" id="inbox-older" class="button button-quiet hidden">Ранние сообщения</button>
-            <button type="button" id="inbox-refresh" class="button button-quiet">Обновить</button>
+        <section id="inbox-new-screen" class="inbox-screen" aria-label="Новый диалог" hidden>
+          <div class="inbox-filters">
+            <label class="sr-only" for="inbox-new-search">Поиск зарегистрированного пользователя</label>
+            <input id="inbox-new-search" type="search" autocomplete="off" maxlength="128" placeholder="ФИО пользователя" />
+            <label class="sr-only" for="inbox-new-group">Группа пользователя</label>
+            <select id="inbox-new-group" aria-label="Группа пользователя"><option value="">Все группы</option></select>
           </div>
+          <p id="inbox-new-status" class="inbox-feedback" role="status"></p>
+          <div id="inbox-new-users" class="inbox-scroll inbox-chat-list" aria-label="Найденные пользователи"></div>
+          <button type="button" id="inbox-new-retry" class="button button-quiet inbox-page-button hidden">Повторить поиск</button>
+          <button type="button" id="inbox-new-more" class="button button-quiet inbox-page-button hidden">Загрузить ещё</button>
+        </section>
+        <section id="inbox-history-screen" class="inbox-screen" aria-label="История диалога" hidden>
           <p id="inbox-history-status" class="inbox-feedback" role="status"></p>
-          <div id="inbox-history" class="inbox-scroll inbox-messages" tabindex="0" aria-label="Сообщения диалога"></div>
+          <div id="inbox-history" class="inbox-scroll inbox-history-scroll" tabindex="0" aria-label="Сообщения диалога">
+            <button type="button" id="inbox-older" class="inbox-older-button hidden">Загрузить предыдущие сообщения</button>
+            <div id="inbox-messages" class="inbox-messages"></div>
+          </div>
           <form id="inbox-composer" class="inbox-composer">
             <div id="inbox-reply" class="inbox-reply-preview"></div>
             <label class="sr-only" for="inbox-text">Написать сообщение</label>
             <div class="inbox-send-row">
-              <textarea id="inbox-text" rows="2" maxlength="4096" placeholder="Сообщение" aria-label="Написать сообщение"></textarea>
-              <button type="submit" id="inbox-send" class="button button-primary">Отправить</button>
+              <textarea id="inbox-text" rows="1" maxlength="4096" placeholder="Сообщение" aria-label="Написать сообщение"></textarea>
+              <button type="submit" id="inbox-send" class="inbox-send-button" aria-label="Отправить сообщение" title="Отправить сообщение">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor"
+                  stroke-width="2" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true">
+                  <path d="m4 20 16-8L4 4v6l9 2-9 2z"/>
+                </svg>
+              </button>
             </div>
             <p id="inbox-compose-status" class="inbox-feedback" role="status"></p>
           </form>
@@ -441,6 +464,6 @@
       <pre id="preview" class="preview-root"></pre>
     </dialog>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script type="module" src="/miniapp/app.js?v=20261115-inbox-api"></script>
+    <script type="module" src="/miniapp/app.js?v=20261116-inbox-chat"></script>
   </body>
 </html>
