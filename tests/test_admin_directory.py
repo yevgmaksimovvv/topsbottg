@@ -6,18 +6,16 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from conftest import make_init_data
+from sqlalchemy import select
 
 from topsbottg.access import grant_admin
-from topsbottg.invitations import find_candidate
-from topsbottg.invitations import create_invitation, observe_telegram_profile
+from topsbottg.invitations import create_invitation, find_candidate, observe_telegram_profile
+from topsbottg.models import User
 from topsbottg.services import get_or_create_user
 
 
 @pytest.mark.asyncio
 async def test_admin_me_observes_signed_telegram_profile(client, settings, session_factory):
-    from topsbottg.models import User
-    from sqlalchemy import select
-
     async with session_factory() as session:
         await get_or_create_user(session, 123, "Евгений")
         await session.commit()

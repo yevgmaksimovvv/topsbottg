@@ -4,9 +4,8 @@ import asyncio
 import logging
 from pathlib import Path
 
-from httpx import ASGITransport, AsyncClient
-
 import pytest
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import topsbottg.api as api_module
