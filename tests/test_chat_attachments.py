@@ -251,7 +251,7 @@ async def test_download_enforces_auth_revocation_and_safe_headers(
     assert response.content == b"%PDF-1.7\nprivate content"
     assert response.headers["content-type"] == "application/octet-stream"
     assert response.headers["x-content-type-options"] == "nosniff"
-    assert response.headers["cache-control"] == "private, no-store"
+    assert response.headers["cache-control"] == "no-store"
     assert response.headers["content-disposition"].startswith("attachment;")
     assert "\r" not in response.headers["content-disposition"]
     assert "\n" not in response.headers["content-disposition"]
