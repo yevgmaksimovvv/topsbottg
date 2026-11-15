@@ -586,3 +586,185 @@ test("Upward scrolling loads older messages without jumping to the newest", asyn
     assert.deepEqual(errors, []);
   });
 });
+
+
+test("Authorized photo, document and voice stay in history after reload, faults and revocation", async () => {
+  await withBackend(async ({ db, createPage }) => {
+    const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL1swAAAABJRU5ErkJggg==", "base64");
+    const mediaMessage = (id, kind, caption, attachment, reply = null) => ({
+      id, conversation_id: 11, direction: "incoming", kind, text: null, caption,
+      created_at: "2026-11-15T13:00:00Z", author_admin_telegram_id: null,
+      telegram_message_id: id + 100, reply_to_telegram_message_id: reply,
+      delivery_status: null, delivery_error_code: null, attachment: { kind, ...attachment, available: true },
+    });
+    db.messages.push(
+      mediaMessage(203, "photo", "Фотография с подписью",
+        { filename: null, size: image.length, width: 1, height: 1, mime_type: "image/jpeg" }, 301),
+      mediaMessage(204, "document", "Документ в истории",
+        { filename: "план.pdf", size: 26, mime_type: "application/pdf" }),
+      mediaMessage(205, "voice", "Слышу сообщение",
+        { filename: null, size: 25, mime_type: "audio/ogg", duration: 8 }),
+    );
+    db.media.set(203, { type: "image/jpeg", content: image });
+    db.media.set(204, { type: "application/octet-stream", content: Buffer.from("%PDF-1.7\nTest page\n%%EOF\n") });
+    db.media.set(205, { type: "audio/ogg", content: Buffer.from("OggSxxxxOpusHeadxxxx") });
+
+    const { page, errors } = await createPage(123, 390);
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.locator('[data-inbox-message="203"]').scrollIntoViewIfNeeded();
+    await page.locator('[data-inbox-photo="203"][src^="blob:"]').waitFor();
+    assert.match(await page.locator('[data-inbox-message="203"]').innerText(), /Фотография с подписью/);
+    assert.match(await page.locator('[data-inbox-message="204"]').innerText(), /план.pdf/);
+    assert.match(await page.locator('[data-inbox-message="205"]').innerText(), /Слышу сообщение/);
+    assert.equal(await page.locator('[data-inbox-jump="201"]').count(), 1);
+    await page.locator('[data-inbox-jump="201"]').click();
+    assert.equal(await page.locator('[data-inbox-message="201"]').evaluate(
+      (node) => document.activeElement === node), true);
+    await page.locator('[data-inbox-view-photo="203"]').click();
+    await page.locator("#inbox-photo-viewer").waitFor({ state: "visible" });
+    assert.match(await page.locator("#inbox-photo-full").getAttribute("src"), /^blob:/);
+    await page.locator("#inbox-photo-close").click();
+
+    db.mediaFaults.set(204, 502);
+    await page.locator('[data-inbox-download="204"]').click();
+    await page.locator('[data-inbox-message="204"] .inbox-media-error').waitFor();
+    assert.match(await page.locator('[data-inbox-message="204"]').innerText(), /Документ в истории/);
+    db.mediaFaults.delete(204);
+    const downloaded = page.waitForEvent("download");
+    await page.locator('[data-inbox-reload-media="204"]').click();
+    const result = await downloaded;
+    assert.equal(result.suggestedFilename(), "план.pdf");
+    await page.locator('[data-inbox-message="204"] .inbox-media-error').waitFor({ state: "detached" });
+    await page.locator('[data-inbox-load-voice="205"]').click();
+    await page.locator('[data-inbox-audio-player="205"][src^="blob:"]').waitFor();
+
+    for (const theme of ["light", "dark"]) {
+      await page.evaluate((value) => {
+        window.Telegram.WebApp.colorScheme = value;
+        for (const cb of window.Telegram.WebApp.__callbacks.themeChanged || []) cb();
+      }, theme);
+      for (const width of [320, 390, 768, 1280]) {
+        await page.setViewportSize({ width, height: 844 });
+        await page.evaluate(() => {
+          window.Telegram.WebApp.viewportHeight = 844;
+          for (const cb of window.Telegram.WebApp.__callbacks.viewportChanged || []) cb();
+        });
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+        assert.ok(await page.locator("#inbox-send").evaluate((node) => node.getBoundingClientRect().height >= 44));
+        await mkdir(screenshots, { recursive: true });
+        await page.screenshot({ path: resolve(screenshots, "inbox-media-" + theme + "-" + width + ".png") });
+      }
+    }
+    assert.equal(await page.locator('[data-inbox-write]').count(), 0);
+    assert.equal(await page.locator('[data-mobile-view]').count(), 4);
+    assert.equal(await page.evaluate(() => !!document.querySelector('[src*="api.telegram.org"]')), false);
+    assert.equal(await page.locator("#inbox-messages").getAttribute("data-telegram-file-id"), null);
+
+    await page.reload();
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.locator('[data-inbox-message="205"]').waitFor();
+    await page.locator('[data-inbox-message="203"]').scrollIntoViewIfNeeded();
+    await page.locator('[data-inbox-photo="203"][src^="blob:"]').waitFor();
+    await page.locator('[data-inbox-load-voice="205"]').click();
+    await page.locator('[data-inbox-audio-player="205"][src^="blob:"]').waitFor();
+
+    db.mediaFaults.set(205, 415);
+    await page.locator("#inbox-back").click();
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.locator('[data-inbox-load-voice="205"]').click();
+    await page.locator('[data-inbox-message="205"] .inbox-media-error').waitFor();
+    assert.match(await page.locator('[data-inbox-message="205"]').innerText(), /Формат файла не поддерживается/);
+    db.mediaFaults.delete(205);
+
+    const other = await createPage(555, 390);
+    await other.page.locator("#inbox-open").click();
+    await other.page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    db.granted.delete(555);
+    await other.page.locator('[data-inbox-download="204"]').click();
+    await other.page.locator("#inbox-dialog").waitFor({ state: "hidden" });
+    assert.equal(await other.page.locator("#inbox-open").isVisible(), false);
+    assert.ok(db.requests.some((request) => request.path ===
+      "/api/admin/chat-messages/204/attachment" && request.actor === 555));
+    assert.deepEqual(errors, []);
+    assert.deepEqual(other.errors, []);
+  });
+});
+
+test("Multipart upload preserves caption, file and key across 202 loss, rejects 413/415", async () => {
+  await withBackend(async ({ db, createPage }) => {
+    const { page, errors } = await createPage(123, 390);
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.locator('[data-inbox-reply="201"]').click();
+    db.failUpload = true;
+    await page.locator("#inbox-file").setInputFiles({
+      name: "report.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7\nTest report\n"),
+    });
+    await page.locator("#inbox-text").fill("Подпись к PDF");
+    await page.locator("#inbox-send").click();
+    await page.locator("#inbox-history").getByText("Ошибка отправки").waitFor();
+    assert.equal(await page.locator("#inbox-file-preview").isVisible(), true);
+    assert.equal(await page.locator("#inbox-text").inputValue(), "Подпись к PDF");
+    assert.equal(db.uploadByKey.size, 1);
+    const [key, stored] = [...db.uploadByKey.entries()][0];
+    assert.equal(stored.kind, "document");
+    assert.equal(stored.caption, "Подпись к PDF");
+    assert.equal(stored.reply, "201");
+    assert.equal(stored.filename, "report.pdf");
+    assert.ok(stored.raw.includes("%PDF-1.7"));
+    assert.ok(db.requests.find((r) => r.path.endsWith("/attachments")).contentType.includes("boundary="));
+
+    await page.locator("#inbox-send").click();
+    await page.locator("#inbox-history").getByText("Подпись к PDF").waitFor();
+    await page.locator("#inbox-file-preview").waitFor({ state: "hidden" });
+    const attempts = db.requests.filter((r) => r.method === "POST" &&
+      r.path === "/api/admin/conversations/11/attachments");
+    assert.equal(attempts.length, 2);
+    assert.equal(attempts[0].key, attempts[1].key);
+    assert.equal(attempts[0].key, key);
+    assert.equal(db.uploadByKey.size, 1);
+    assert.equal(db.messages.filter((message) => message.caption === "Подпись к PDF").length, 1);
+
+    await page.locator("#inbox-file").setInputFiles({
+      name: "image.jpg", mimeType: "image/jpeg", buffer: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+    });
+    db.uploadFault = 415;
+    await page.locator("#inbox-text").fill("Неправильная фотография");
+    await page.locator("#inbox-send").click();
+    await page.locator("#inbox-compose-status").getByText("file_signature_mismatch").waitFor();
+    assert.equal(await page.locator("#inbox-file-preview").isVisible(), true);
+    assert.equal(await page.locator("#inbox-text").inputValue(), "Неправильная фотография");
+    db.uploadFault = null;
+    await page.locator("#inbox-send").click();
+    await page.locator("#inbox-file-preview").waitFor({ state: "hidden" });
+    const photo = [...db.uploadByKey.values()].find((entry) => entry.kind === "photo");
+    assert.ok(photo && photo.caption === "Неправильная фотография");
+
+    await page.locator("#inbox-file").setInputFiles({
+      name: "voice.ogg", mimeType: "audio/ogg", buffer: Buffer.from("OggS..OpusHead"),
+    });
+    db.uploadFault = 413;
+    await page.locator("#inbox-send").click();
+    await page.locator("#inbox-compose-status").getByText("file_too_large").waitFor();
+    assert.equal(await page.locator("#inbox-file-preview").isVisible(), true);
+    db.uploadFault = null;
+    await page.locator("#inbox-send").click();
+    await page.locator("#inbox-file-preview").waitFor({ state: "hidden" });
+    assert.ok([...db.uploadByKey.values()].some((entry) => entry.kind === "voice"));
+
+    await page.locator("#inbox-file").setInputFiles({
+      name: "oversize.pdf", mimeType: "application/pdf",
+      buffer: Buffer.alloc(20 * 1024 * 1024 + 1),
+    });
+    await page.locator("#inbox-send").click();
+    await page.locator("#inbox-file-status").getByText(/превышает 20 МБ/).waitFor();
+    assert.equal(db.uploadByKey.size, 3);
+    await page.locator("#inbox-remove-file").click();
+    assert.equal(await page.locator("#inbox-file-preview").isVisible(), false);
+    await mkdir(screenshots, { recursive: true });
+    await page.screenshot({ path: resolve(screenshots, "inbox-media-upload-mobile.png") });
+    assert.deepEqual(errors, []);
+  });
+});
