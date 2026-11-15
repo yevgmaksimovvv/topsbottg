@@ -27,6 +27,7 @@ const inbox = {
   historyLoading: false,
   historyError: "",
   readThrough: null,
+  seenIncoming: new Set(),
   replyTo: null,
   unread: 0,
   searchTimer: null,
@@ -184,6 +185,12 @@ async function loadConversations(reset = false) {
     for (const item of response.items || []) byId.set(item.id, item);
     inbox.conversations = [...byId.values()];
     inbox.nextCursor = response.next_cursor ?? null;
+    const current = inbox.conversations.find((item) => Number(item.id) === Number(inbox.current?.id));
+    if (current) {
+      inbox.current.unread_count = current.unread_count;
+      renderHistory();
+      void markRead();
+    }
   } catch (error) {
     if (generation === inbox.listRequest && client === inbox.client && !isAbort(error)) {
       if (!handleRequestError(error)) inbox.listError = error?.message || "Не удалось загрузить диалоги.";
@@ -203,6 +210,7 @@ function showList() {
   inbox.readController?.abort();
   inbox.current = null;
   inbox.messages = [];
+  inbox.seenIncoming.clear();
   inbox.replyTo = null;
   el("inbox-list-screen").hidden = false;
   el("inbox-history-screen").hidden = true;
@@ -241,7 +249,7 @@ function renderHistory({ preserveScroll = false } = {}) {
   const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 75;
   const unread = Math.max(0, Number(inbox.current?.unread_count) || 0);
   const inbound = inbox.messages.filter((message) => message.direction === "incoming");
-  const unreadStart = unread > 0 ? inbound.at(-Math.min(unread, inbound.length))?.id : null;
+  const unreadStart = unread > 0 && inbound.length >= unread ? inbound.at(-unread)?.id : null;
   list.innerHTML = inbox.messages.map((message) => {
     const outgoing = message.direction === "outgoing";
     const delivery = outgoing && message.delivery_status ? message.delivery_status : null;
@@ -294,10 +302,18 @@ async function loadMessages({ older = false, refresh = false } = {}) {
   try {
     const response = await client.messages(conversationId, { before, limit: 50, signal: controller.signal });
     if (generation !== inbox.historyRequest || controller.signal.aborted || client !== inbox.client || inbox.current?.id !== conversationId || !isOpen()) return;
-    const byId = new Map((older || refresh ? inbox.messages : []).map((item) => [item.id, item]));
-    for (const item of response.items || []) byId.set(item.id, item);
+    const page = response.items || [];
+    const continuous = !refresh || page.some((item) =>
+      inbox.messages.some((existing) => existing.id === item.id));
+    const preserved = older || (refresh && continuous) ? inbox.messages : [];
+    const byId = new Map(preserved.map((item) => [item.id, item]));
+    for (const item of page) byId.set(item.id, item);
     inbox.messages = [...byId.values()].sort((a, b) => Number(a.id) - Number(b.id));
-    if (older || !refresh) inbox.historyCursor = response.next_cursor ?? null;
+    if (refresh && !continuous) {
+      inbox.seenIncoming.clear();
+      inbox.current.unread_count = null;
+    }
+    if (older || !refresh || !continuous) inbox.historyCursor = response.next_cursor ?? null;
     renderHistory();
     if (older) list.scrollTop = oldTop + list.scrollHeight - oldScrollHeight;
     else if (wasAtBottom || !refresh) list.scrollTop = list.scrollHeight;
@@ -318,37 +334,50 @@ async function loadMessages({ older = false, refresh = false } = {}) {
   }
 }
 
-function lastVisibleIncomingId() {
+function visibleIncomingIds() {
   const history = el("inbox-history");
   if (!isOpen() || el("inbox-history-screen")?.hidden ||
-      document.visibilityState !== "visible" || !document.hasFocus() || !history) return null;
+      document.visibilityState !== "visible" || !document.hasFocus() || !history) return [];
   const viewport = history.getBoundingClientRect();
-  if (!viewport.width || !viewport.height) return null;
-  let last = null;
+  if (!viewport.width || !viewport.height) return [];
+  const visible = [];
   for (const message of history.querySelectorAll(".inbox-message.is-incoming")) {
     const rect = message.getBoundingClientRect();
     const visibleHeight = Math.min(rect.bottom, viewport.bottom) - Math.max(rect.top, viewport.top);
     if (visibleHeight >= Math.min(24, rect.height / 2)) {
       const id = Number(message.dataset.inboxMessage);
-      if (Number.isInteger(id) && id > 0) last = Math.max(last || 0, id);
+      if (Number.isInteger(id) && id > 0) visible.push(id);
     }
   }
-  return last;
+  return visible;
 }
 
 async function markRead() {
   if (!inbox.client || !inbox.current) return;
-  const visibleId = lastVisibleIncomingId();
-  if (!visibleId || visibleId <= Number(inbox.readThrough || 0) ||
-      visibleId <= Number(inbox.readingId || 0)) return;
+  const visible = visibleIncomingIds();
+  if (!visible.length) return;
+  for (const id of visible) inbox.seenIncoming.add(id);
+  const unreadCount = inbox.current.unread_count;
+  if (!Number.isInteger(unreadCount) || unreadCount <= 0) return;
+  const incoming = inbox.messages.filter((message) => message.direction === "incoming" &&
+    Number.isInteger(message.id)).map((message) => message.id);
+  // A monotone marker cannot skip any unread message, even one on an unloaded page.
+  if (incoming.length < unreadCount) return;
+  let lastSeen = null;
+  for (const id of incoming.slice(-unreadCount)) {
+    if (!inbox.seenIncoming.has(id)) break;
+    lastSeen = id;
+  }
+  if (!lastSeen || lastSeen <= Number(inbox.readThrough || 0) ||
+      lastSeen <= Number(inbox.readingId || 0)) return;
   const client = inbox.client;
   const id = inbox.current.id;
   const controller = new AbortController();
   inbox.readController?.abort();
   inbox.readController = controller;
-  inbox.readingId = visibleId;
+  inbox.readingId = lastSeen;
   try {
-    const result = await client.read(id, visibleId, { signal: controller.signal });
+    const result = await client.read(id, lastSeen, { signal: controller.signal });
     if (controller.signal.aborted || client !== inbox.client || inbox.current?.id !== id) return;
     if (Number(result.last_read_message_id) < Number(inbox.readThrough || 0)) return;
     inbox.readThrough = result.last_read_message_id;
@@ -359,15 +388,19 @@ async function markRead() {
     if (!isAbort(error)) handleRequestError(error);
   } finally {
     if (inbox.readController === controller) inbox.readController = null;
-    if (inbox.readingId === visibleId) inbox.readingId = null;
+    if (inbox.readingId === lastSeen) inbox.readingId = null;
   }
 }
 
 async function openConversation(conversation) {
+  ++inbox.openRequest;
+  inbox.openController?.abort();
+  inbox.openingUser = false;
   inbox.historyController?.abort();
   inbox.readController?.abort();
   inbox.current = conversation;
   inbox.messages = [];
+  inbox.seenIncoming.clear();
   inbox.historyCursor = null;
   inbox.readThrough = null;
   inbox.readingId = null;
@@ -524,6 +557,7 @@ export function configureInboxClient(client) {
     ++inbox.summaryRequest;
     inbox.conversations = [];
     inbox.messages = [];
+    inbox.seenIncoming.clear();
     inbox.current = null;
     inbox.nextCursor = null;
     inbox.historyCursor = null;
@@ -621,10 +655,9 @@ export function refreshInboxFromEvent(conversationId = null, { reconnect = false
   if (!inbox.client) return;
   void loadSummary();
   if (!isOpen()) return;
-  if (!el("inbox-list-screen")?.hidden) {
-    void loadConversations(true);
-  } else if (inbox.current && (reconnect || conversationId == null ||
-      Number(inbox.current.id) === Number(conversationId))) {
+  void loadConversations(true);
+  if (el("inbox-list-screen")?.hidden && inbox.current &&
+      (reconnect || conversationId == null || Number(inbox.current.id) === Number(conversationId))) {
     void loadMessages({ refresh: true });
   }
 }
