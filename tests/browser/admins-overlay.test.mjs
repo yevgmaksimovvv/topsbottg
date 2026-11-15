@@ -86,7 +86,7 @@ async function browserFixture(role, run) {
       else if (path === "/api/admin/me" && method === "GET")
         data = { telegram_user_id: role === "owner" ? 123 : 555, is_admin: true, role };
       else if (path === "/api/admin/study-groups" && method === "GET")
-        data = [];
+        data = [{ id: 9, code: "М3О-207СВ-25" }];
       else if (path === "/api/admin/payouts" && method === "GET")
         data = [];
       else if (path === "/api/admin/users" && method === "GET")
@@ -105,18 +105,29 @@ async function browserFixture(role, run) {
         else if (state.searchFailures > 0) {
           state.searchFailures--;
           code = 503;
-        } else data = search.get("username") === "@valid_name"
-          ? [{ telegram_id: 777, username: "valid_name", full_name: "Анна Петрова",
-              study_group: "М3О-207СВ-25", role: null }]
-          : search.get("username") === "@owner_name"
-            ? [{ telegram_id: 123, username: "owner_name", full_name: "Евгений",
-                role: "owner" }]
-            : [];
+        } else {
+          const name = search.get("search");
+          if (name === "Анна") {
+            const entries = [
+              { telegram_id: 777, full_name: "Анна Петрова", study_group: null, role: null },
+              { telegram_id: 778, full_name: "Анна Смирнова", study_group: "М3О-207СВ-25", role: null },
+            ];
+            const filtered = search.get("study_group_id") === "9" ? [entries[1]] : entries;
+            const offset = Number(search.get("offset") || "0");
+            const page = filtered.slice(offset, offset + 1);
+            data = { items: page, has_more: offset + 1 < filtered.length };
+          } else if (name === "Евгений") {
+            data = { items: [{ telegram_id: 123, full_name: "Евгений",
+              study_group: null, role: "owner" }], has_more: false };
+          } else {
+            data = { items: [], has_more: false };
+          }
+        }
       } else if (path === "/api/admin/admin-invitations" && method === "POST") {
         const payload = req.postDataJSON();
         if (role !== "owner") code = 403;
         else if (payload.target_telegram_id !== 777 ||
-          payload.expected_username !== "valid_name") code = 409;
+          Object.hasOwn(payload, "expected_username")) code = 409;
         else {
           state.invitations = [{
             id: 42, target_telegram_id: 777, status: "pending",
@@ -196,15 +207,20 @@ test("owner can invite, cancel, revoke; modal retains payout state and supports 
     assert.doesNotMatch(await page.locator("#admins-members").innerText(), /ADMIN_TELEGRAM_IDS|\.env|555/);
 
     state.searchFailures = 1;
-    await page.locator("#admins-search-input").fill("@valid_name");
+    await page.locator("#admins-search-input").fill("Анна");
     await page.locator("#admins-search-form button").click();
     await page.waitForFunction(() => document.querySelector("#admins-search-error")?.textContent.includes("Backend"));
     await page.locator("#admins-search-form button").click();
     await page.locator("#admins-candidate").getByText("Анна Петрова").waitFor();
+    assert.match(await page.locator("#admins-candidate").innerText(), /Группа не указана/);
+    await page.locator("#admins-candidate [data-admin-action='more-candidates']").click();
+    await page.locator("#admins-candidate").getByText("Анна Смирнова").waitFor();
+    assert.equal(await page.locator("#admins-candidate .admins-candidate-card").count(), 2);
+
     const candidateBox = await page.locator(".admins-candidate-card").boundingBox();
     assert.ok(candidateBox && candidateBox.height < 160,
       `Candidate card is unexpectedly tall: ${candidateBox?.height}`);
-    await page.locator("#admins-candidate [data-admin-action='invite']").click();
+    await page.locator("#admins-candidate .admins-candidate-card").first().locator("[data-admin-action='invite']").click();
     assert.equal(state.invitations.length, 0);
     await page.locator("#admins-candidate [data-admin-action='confirm-invite']").click();
     await page.locator("#admins-pending").getByText("В очереди на отправку").waitFor();
@@ -219,7 +235,13 @@ test("owner can invite, cancel, revoke; modal retains payout state and supports 
     await page.locator("#admins-pending [data-admin-action='cancel-invite']").click();
     await page.locator("#admins-pending").getByText("Нет ожидающих приглашений.").waitFor();
     assert.equal(state.invitations.length, 0);
-    await page.locator("#admins-search-input").fill("@owner_name");
+    await page.locator("#admins-search-group").selectOption("9");
+    await page.locator("#admins-search-input").fill("Анна");
+    await page.locator("#admins-search-form button").click();
+    await page.locator("#admins-candidate").getByText("Анна Смирнова").waitFor();
+    assert.equal(await page.locator("#admins-candidate .admins-candidate-card").count(), 1);
+    await page.locator("#admins-search-group").selectOption("");
+    await page.locator("#admins-search-input").fill("Евгений");
     await page.locator("#admins-search-form button").click();
     await page.locator("#admins-candidate").getByText("Уже владелец").waitFor();
     assert.equal(await page.locator("#admins-candidate [data-admin-action='invite']").count(), 0);
