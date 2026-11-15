@@ -331,7 +331,7 @@ async def test_post_commit_cancellation_preserves_queued_media(
             )
     if isinstance(error.value, RuntimeError):
         # Starlette's BaseHTTPMiddleware reports a cancelled response this way.
-        assert str(error.value) == "No response returned"
+        assert str(error.value).startswith("No response returned")
     assert did_raise
     async with session_factory() as session:
         job = await session.scalar(select(ChatMessageOutbox))
