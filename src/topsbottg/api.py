@@ -17,7 +17,16 @@ from topsbottg.access import AccessDenied, require_admin, require_owner, revoke_
 from topsbottg.config import Settings
 from topsbottg.db import get_session
 from topsbottg.logging_utils import log_event
-from topsbottg.models import AdminGrant, PaymentProfile, PaymentReply, Payout, PayoutRecipient, PayoutStatus, StudyGroup, User
+from topsbottg.models import (
+    AdminGrant,
+    PaymentProfile,
+    PaymentReply,
+    Payout,
+    PayoutRecipient,
+    PayoutStatus,
+    StudyGroup,
+    User,
+)
 from topsbottg.schemas import (
     AddRecipientsIn,
     AdminEventsTokenOut,

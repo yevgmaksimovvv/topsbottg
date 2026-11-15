@@ -8,7 +8,6 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
-from conftest import make_init_data
 from topsbottg.access import (
     AccessDenied,
     get_principal,
@@ -18,7 +17,7 @@ from topsbottg.access import (
     revoke_admin,
 )
 from topsbottg.models import AdminGrant, AuditLog
-from topsbottg.services import get_admin_events_broadcaster, publish_admin_event
+from topsbottg.services import publish_admin_event
 
 
 @pytest.mark.asyncio
@@ -119,9 +118,11 @@ async def test_database_failure_cannot_authorize_dynamic_admin(settings):
 
 
 @pytest.mark.asyncio
-async def test_owner_only_admin_grants_endpoints(client, session_factory, settings):
-    owner_headers = {"X-Telegram-Init-Data": make_init_data(settings.bot_token, 123)}
-    admin_headers = {"X-Telegram-Init-Data": make_init_data(settings.bot_token, 555)}
+async def test_owner_only_admin_grants_endpoints(
+    client, session_factory, settings, admin_init_data, dynamic_admin_init_data
+):
+    owner_headers = {"X-Telegram-Init-Data": admin_init_data}
+    admin_headers = {"X-Telegram-Init-Data": dynamic_admin_init_data}
     async with session_factory() as session:
         await grant_admin(
             session, actor_telegram_id=123, target_telegram_id=555,
@@ -145,15 +146,19 @@ async def test_owner_only_admin_grants_endpoints(client, session_factory, settin
 
 
 @pytest.mark.asyncio
-async def test_dynamic_admin_can_use_payout_api_and_get_role(client, session_factory, settings):
+async def test_dynamic_admin_can_use_payout_api_and_get_role(
+    client, session_factory, settings, admin_init_data, dynamic_admin_init_data
+):
     async with session_factory() as session:
         await grant_admin(
             session, actor_telegram_id=123, target_telegram_id=555,
             owner_ids=settings.admin_ids_set
         )
         await session.commit()
-    for telegram_id, expected_role in [(123, "owner"), (555, "admin")]:
-        headers = {"X-Telegram-Init-Data": make_init_data(settings.bot_token, telegram_id)}
+    for init_data, expected_role in [
+        (admin_init_data, "owner"), (dynamic_admin_init_data, "admin")
+    ]:
+        headers = {"X-Telegram-Init-Data": init_data}
         me = await client.get("/api/admin/me", headers=headers)
         assert me.status_code == 200
         assert me.json()["role"] == expected_role
@@ -162,8 +167,10 @@ async def test_dynamic_admin_can_use_payout_api_and_get_role(client, session_fac
 
 
 @pytest.mark.asyncio
-async def test_sse_token_bound_to_user_and_rejected_after_revocation(client, app, session_factory, settings):
-    headers = {"X-Telegram-Init-Data": make_init_data(settings.bot_token, 555)}
+async def test_sse_token_bound_to_user_and_rejected_after_revocation(
+    client, app, session_factory, settings, dynamic_admin_init_data
+):
+    headers = {"X-Telegram-Init-Data": dynamic_admin_init_data}
     async with session_factory() as session:
         await grant_admin(
             session, actor_telegram_id=123, target_telegram_id=555,
@@ -187,8 +194,10 @@ async def test_sse_token_bound_to_user_and_rejected_after_revocation(client, app
 
 
 @pytest.mark.asyncio
-async def test_sse_stream_stops_before_emitting_after_revocation(client, app, session_factory, settings):
-    headers = {"X-Telegram-Init-Data": make_init_data(settings.bot_token, 555)}
+async def test_sse_stream_stops_before_emitting_after_revocation(
+    client, app, session_factory, settings, dynamic_admin_init_data
+):
+    headers = {"X-Telegram-Init-Data": dynamic_admin_init_data}
     async with session_factory() as session:
         await grant_admin(
             session, actor_telegram_id=123, target_telegram_id=555,

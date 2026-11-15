@@ -22,7 +22,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from topsbottg.access import get_principal
-
 from topsbottg.logging_utils import log_event
 from topsbottg.models import PayoutRecipient, RecipientStatus
 from topsbottg.services import (

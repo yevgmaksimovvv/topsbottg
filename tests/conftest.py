@@ -81,6 +81,11 @@ def non_admin_init_data(settings: Settings) -> str:
 
 
 @pytest.fixture
+def dynamic_admin_init_data(settings: Settings) -> str:
+    return make_init_data(settings.bot_token, 555)
+
+
+@pytest.fixture
 def invalid_init_data(settings: Settings) -> str:
     value = make_init_data(settings.bot_token, 999)
     return value.replace("hash=", "hash=0", 1)

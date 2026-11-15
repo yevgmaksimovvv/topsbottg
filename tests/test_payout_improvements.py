@@ -82,7 +82,7 @@ async def test_ready_notification_is_persisted_once_and_retried(session_factory)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stale_state", ["cancelled", "deleted"])
-async def test_stale_ready_notification_is_discarded_without_sending(session_factory, stale_state):
+async def test_stale_ready_notification_is_discarded_without_sending(session_factory, settings, stale_state):
     async with session_factory() as session:
         user = await get_or_create_user(session, 112, "Notification recipient")
         payout = await create_payout(session, actor_telegram_id=123, payload=payload())
@@ -111,7 +111,7 @@ async def test_stale_ready_notification_is_discarded_without_sending(session_fac
             self.sent = True
 
     bot = NeverSend()
-    await deliver_ready_notification(bot, session_factory, notice_id, 123, "ready")
+    await deliver_ready_notification(bot, session_factory, notice_id, 123, "ready", settings)
     assert bot.sent is False
     async with session_factory() as session:
         notice = await session.scalar(select(PayoutReadyNotification))
@@ -121,7 +121,7 @@ async def test_stale_ready_notification_is_discarded_without_sending(session_fac
 
 
 @pytest.mark.asyncio
-async def test_cancelled_payout_before_notification_claim_is_terminally_discarded(session_factory):
+async def test_cancelled_payout_before_notification_claim_is_terminally_discarded(session_factory, settings):
     async with session_factory() as session:
         user = await get_or_create_user(session, 114, "Notification recipient")
         payout = await create_payout(session, actor_telegram_id=123, payload=payload())
@@ -140,7 +140,7 @@ async def test_cancelled_payout_before_notification_claim_is_terminally_discarde
             self.sent = True
 
     bot = NeverSend()
-    await deliver_ready_notifications(bot, session_factory)
+    await deliver_ready_notifications(bot, session_factory, settings)
     assert bot.sent is False
     async with session_factory() as session:
         notice = await session.scalar(select(PayoutReadyNotification))
@@ -148,7 +148,7 @@ async def test_cancelled_payout_before_notification_claim_is_terminally_discarde
 
 
 @pytest.mark.asyncio
-async def test_ready_notification_telegram_error_retries_and_restart_recovers(session_factory):
+async def test_ready_notification_telegram_error_retries_and_restart_recovers(session_factory, settings):
     async with session_factory() as session:
         user = await get_or_create_user(session, 113, "Notification recipient")
         payout = await create_payout(session, actor_telegram_id=123, payload=payload())
@@ -166,7 +166,7 @@ async def test_ready_notification_telegram_error_retries_and_restart_recovers(se
         async def send_message(self, *args, **kwargs):
             raise RuntimeError("Telegram unavailable")
 
-    await deliver_ready_notifications(FailingBot(), session_factory)
+    await deliver_ready_notifications(FailingBot(), session_factory, settings)
     async with session_factory() as session:
         notice = await session.get(PayoutReadyNotification, notice.id)
         assert notice is not None and notice.attempts == 1
@@ -184,7 +184,7 @@ async def test_ready_notification_telegram_error_retries_and_restart_recovers(se
             self.sent += 1
 
     bot = WorkingBot()
-    await deliver_ready_notifications(bot, session_factory)
+    await deliver_ready_notifications(bot, session_factory, settings)
     assert bot.sent == 1
     async with session_factory() as session:
         notice = await session.get(PayoutReadyNotification, notice.id)

@@ -8,6 +8,8 @@ from __future__ import annotations
 import pytest
 from fastapi.routing import APIRoute
 
+from topsbottg.access import grant_admin, revoke_admin
+
 ADMIN_ROUTES = [
     ("GET", "/api/admin/me", None),
     ("POST", "/api/admin/events-token", None),
@@ -90,10 +92,8 @@ OWNER_ONLY_ROUTES = {
 
 @pytest.mark.parametrize("method,path,body", ADMIN_ROUTES)
 async def test_active_database_admin_can_use_non_owner_routes(
-    client, session_factory, settings, method, path, body
+    client, session_factory, settings, dynamic_admin_init_data, method, path, body
 ):
-    from conftest import make_init_data
-    from topsbottg.access import grant_admin
 
     async with session_factory() as session:
         await grant_admin(
@@ -101,7 +101,7 @@ async def test_active_database_admin_can_use_non_owner_routes(
             owner_ids=settings.admin_ids_set
         )
         await session.commit()
-    init_data = make_init_data(settings.bot_token, 555)
+    init_data = dynamic_admin_init_data
     response = await client.request(
         method, path, headers={"X-Telegram-Init-Data": init_data}, json=body
     )
@@ -113,10 +113,8 @@ async def test_active_database_admin_can_use_non_owner_routes(
 
 @pytest.mark.parametrize("method,path,body", ADMIN_ROUTES)
 async def test_revoked_database_admin_has_no_admin_api_access(
-    client, session_factory, settings, method, path, body
+    client, session_factory, settings, dynamic_admin_init_data, method, path, body
 ):
-    from conftest import make_init_data
-    from topsbottg.access import grant_admin, revoke_admin
 
     async with session_factory() as session:
         await grant_admin(
@@ -128,7 +126,7 @@ async def test_revoked_database_admin_has_no_admin_api_access(
             owner_ids=settings.admin_ids_set
         )
         await session.commit()
-    init_data = make_init_data(settings.bot_token, 555)
+    init_data = dynamic_admin_init_data
     response = await client.request(
         method, path, headers={"X-Telegram-Init-Data": init_data}, json=body
     )
