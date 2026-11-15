@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 
 from topsbottg.access import AccessDenied, require_admin, require_owner, revoke_admin
 from topsbottg.config import Settings
+from topsbottg.chat_api import register_conversation_routes
 from topsbottg.db import get_session
 from topsbottg.invitations import (
     InvitationConflict,
@@ -1370,4 +1371,5 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
         )
         return serialize_recipient(recipient)
 
+    register_conversation_routes(app, settings, _require_admin)
     return app
