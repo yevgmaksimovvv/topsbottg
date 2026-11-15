@@ -361,10 +361,15 @@ def create_app(settings: Settings, session_factory) -> FastAPI:
                     app.state.telegram_health_checked_until = now + 60
                 telegram_ready = app.state.telegram_health_ok and not bot_task.done()
             worker_task = getattr(app.state, "worker_task", None)
+            last_heartbeat = getattr(app.state, "worker_heartbeat", None)
+            worker_alive = (
+                worker_task is not None and not worker_task.done()
+                and (last_heartbeat is None or now - last_heartbeat <= 30)
+            )
             checks = {
                 "database": "ok" if await check_database_ready(session_factory) else "failed",
                 "telegram": "ok" if telegram_ready else "failed",
-                "worker": "ok" if worker_task is not None and not worker_task.done() else "failed",
+                "worker": "ok" if worker_alive else "failed",
             }
         status = "ok" if all(value == "ok" for value in checks.values()) else "error"
         return JSONResponse({"status": status, "checks": checks}, status_code=200 if status == "ok" else 503)
