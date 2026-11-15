@@ -332,3 +332,71 @@ async def test_worker_counts_period_and_payment_details_and_continues_broadcast(
         failed, sent_at_limit = [await session.get(PayoutRecipient, recipient_id) for recipient_id in recipient_ids]
         assert failed.status == RecipientStatus.failed.value
         assert sent_at_limit.status == RecipientStatus.payment_required.value
+
+@pytest.mark.asyncio
+async def test_ready_notification_is_discarded_after_admin_revocation(session_factory, settings):
+    from sqlalchemy import select
+
+    from topsbottg.access import grant_admin, revoke_admin
+    from topsbottg.models import PayoutReadyNotification
+    from topsbottg.services import queue_payout_ready
+    from topsbottg.worker import deliver_ready_notifications
+
+    async with session_factory() as session:
+        await grant_admin(
+            session, actor_telegram_id=123, target_telegram_id=555,
+            owner_ids=settings.admin_ids_set
+        )
+        user = await get_or_create_user(session, 111, "Иван Иванов")
+        payout = await create_payout(
+            session, actor_telegram_id=555, payload=_payout_payload()
+        )
+        [recipient] = await add_recipients(session, payout, [user.id])
+        payout.status = PayoutStatus.sent.value
+        recipient.status = RecipientStatus.payment_received.value
+        assert await queue_payout_ready(session, payout.id)
+        await session.commit()
+
+    async with session_factory() as session:
+        await revoke_admin(
+            session, actor_telegram_id=123, target_telegram_id=555,
+            owner_ids=settings.admin_ids_set
+        )
+        await session.commit()
+
+    bot = FakeBot()
+    await deliver_ready_notifications(bot, session_factory, settings)
+    assert bot.sent == []
+    async with session_factory() as session:
+        notification = await session.scalar(select(PayoutReadyNotification))
+        assert notification.delivered_at is None
+        assert notification.discarded_at is not None
+
+
+@pytest.mark.asyncio
+async def test_ready_notification_still_reaches_environment_owner(session_factory, settings):
+    from sqlalchemy import select
+
+    from topsbottg.models import PayoutReadyNotification
+    from topsbottg.services import queue_payout_ready
+    from topsbottg.worker import deliver_ready_notifications
+
+    async with session_factory() as session:
+        user = await get_or_create_user(session, 111, "Иван Иванов")
+        payout = await create_payout(
+            session, actor_telegram_id=123, payload=_payout_payload()
+        )
+        [recipient] = await add_recipients(session, payout, [user.id])
+        payout.status = PayoutStatus.sent.value
+        recipient.status = RecipientStatus.payment_received.value
+        assert await queue_payout_ready(session, payout.id)
+        await session.commit()
+
+    bot = FakeBot()
+    await deliver_ready_notifications(bot, session_factory, settings)
+    assert len(bot.sent) == 1
+    assert bot.sent[0][0] == 123
+    async with session_factory() as session:
+        notification = await session.scalar(select(PayoutReadyNotification))
+        assert notification.delivered_at is not None
+        assert notification.discarded_at is None

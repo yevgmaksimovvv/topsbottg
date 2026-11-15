@@ -63,6 +63,18 @@ class StudyGroup(Base, TimestampMixin):
     users: Mapped[list[User]] = relationship(back_populates="study_group")
 
 
+class AdminGrant(Base, TimestampMixin):
+    """A revocable admin role independent of the user's registration."""
+
+    __tablename__ = "admin_grants"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
+    granted_by_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class User(Base, TimestampMixin):
     __tablename__ = "users"
 

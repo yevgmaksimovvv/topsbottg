@@ -18,8 +18,10 @@ from aiogram.types import (
     WebAppInfo,
 )
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from topsbottg.access import get_principal
 from topsbottg.logging_utils import log_event
 from topsbottg.models import PayoutRecipient, RecipientStatus
 from topsbottg.services import (
@@ -62,8 +64,19 @@ ADMIN_ENTRYPOINT_TEXT = "Админка"
 ADMIN_INLINE_BUTTON_TEXT = "Открыть админку"
 
 
-def _is_admin(settings, telegram_id: int) -> bool:
-    return telegram_id in settings.admin_ids_set
+async def _is_admin(settings, telegram_id: int, session_factory) -> bool:
+    if telegram_id in settings.admin_ids_set:
+        return True
+    try:
+        async with session_factory() as session:
+            return await get_principal(session, telegram_id, settings.admin_ids_set) is not None
+    except SQLAlchemyError:
+        log_event(
+            logger, "ERROR", "bot_admin_role_check_failed",
+            "Не удалось проверить права администратора",
+            telegram_user_id=telegram_id,
+        )
+        return False
 
 
 def main_keyboard(*, is_admin: bool = False, mini_app_url: str | None = None) -> ReplyKeyboardMarkup:
@@ -76,7 +89,7 @@ def main_keyboard(*, is_admin: bool = False, mini_app_url: str | None = None) ->
 
 
 def _main_keyboard_for(message: Message, settings) -> ReplyKeyboardMarkup:
-    return main_keyboard(is_admin=_is_admin(settings, message.from_user.id), mini_app_url=settings.mini_app_url)
+    return main_keyboard(mini_app_url=settings.mini_app_url)
 
 
 def admin_keyboard(mini_app_url: str) -> InlineKeyboardMarkup:
@@ -117,8 +130,8 @@ async def _safe_callback_answer(callback: CallbackQuery, telegram_user_id: int, 
         raise
 
 
-async def _show_admin_entrypoint(message: Message, settings) -> None:
-    if not _is_admin(settings, message.from_user.id):
+async def _show_admin_entrypoint(message: Message, settings, *, allowed: bool) -> None:
+    if not allowed:
         log_event(
             logger,
             "WARNING",
@@ -320,7 +333,7 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
             "bot_start_received",
             "Пользователь отправил /start",
             telegram_user_id=message.from_user.id,
-            is_admin=_is_admin(_settings, message.from_user.id),
+            is_admin=await _is_admin(_settings, message.from_user.id, session_factory),
         )
         async with session_factory() as session:
             user, needs_name = await start_user(session, message.from_user.id)
@@ -354,29 +367,31 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
 
     @router.message(Command("admin"))
     async def admin_command(message: Message):
+        allowed = await _is_admin(_settings, message.from_user.id, session_factory)
         log_event(
             logger,
             "INFO",
             "bot_admin_entrypoint_requested",
             "Пользователь запросил вход в админку",
             telegram_user_id=message.from_user.id,
-            is_admin=_is_admin(_settings, message.from_user.id),
+            is_admin=allowed,
             mini_app_url_present=bool(_settings.mini_app_url),
         )
-        await _show_admin_entrypoint(message, _settings)
+        await _show_admin_entrypoint(message, _settings, allowed=allowed)
 
     @router.message(F.text == ADMIN_ENTRYPOINT_TEXT)
     async def admin_text(message: Message):
+        allowed = await _is_admin(_settings, message.from_user.id, session_factory)
         log_event(
             logger,
             "INFO",
             "bot_admin_entrypoint_requested",
             "Пользователь запросил вход в админку",
             telegram_user_id=message.from_user.id,
-            is_admin=_is_admin(_settings, message.from_user.id),
+            is_admin=allowed,
             mini_app_url_present=bool(_settings.mini_app_url),
         )
-        await _show_admin_entrypoint(message, _settings)
+        await _show_admin_entrypoint(message, _settings, allowed=allowed)
 
     @router.message(RegistrationFSM.registration_full_name)
     async def save_registration_name(message: Message, state: FSMContext):

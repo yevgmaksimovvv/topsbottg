@@ -86,7 +86,8 @@ async def test_payout_send_lock_serializes_across_postgres_engines():
 
 
 @pytest.mark.asyncio
-async def test_notification_is_revalidated_after_claim_before_send_on_postgres():
+async def test_notification_is_revalidated_after_claim_before_send_on_postgres(settings):
+    settings.admin_telegram_ids = "1"
     database_url = os.getenv("POSTGRES_TEST_URL")
     if not database_url:
         pytest.skip("POSTGRES_TEST_URL is not configured")
@@ -130,7 +131,7 @@ async def test_notification_is_revalidated_after_claim_before_send_on_postgres()
                 self.sent = True
 
         bot = NeverSend()
-        await deliver_ready_notification(bot, sessions, notice_id, notice.telegram_id, notice.message)
+        await deliver_ready_notification(bot, sessions, notice_id, notice.telegram_id, notice.message, settings)
         assert bot.sent is False
         async with sessions() as session:
             notice = await session.get(PayoutReadyNotification, notice_id)
@@ -145,7 +146,8 @@ async def test_notification_is_revalidated_after_claim_before_send_on_postgres()
 
 
 @pytest.mark.asyncio
-async def test_concurrent_postgres_workers_send_one_ready_notification_once():
+async def test_concurrent_postgres_workers_send_one_ready_notification_once(settings):
+    settings.admin_telegram_ids = "1"
     database_url = os.getenv("POSTGRES_TEST_URL")
     if not database_url:
         pytest.skip("POSTGRES_TEST_URL is not configured")
@@ -193,8 +195,8 @@ async def test_concurrent_postgres_workers_send_one_ready_notification_once():
 
         bot = SlowBot()
         await asyncio.gather(
-            deliver_ready_notifications(bot, sessions_factories[0]),
-            deliver_ready_notifications(bot, sessions_factories[1]),
+            deliver_ready_notifications(bot, sessions_factories[0], settings),
+            deliver_ready_notifications(bot, sessions_factories[1], settings),
         )
         assert entered.is_set()
         assert bot.count == 1
@@ -211,7 +213,8 @@ async def test_concurrent_postgres_workers_send_one_ready_notification_once():
 
 
 @pytest.mark.asyncio
-async def test_postgres_delete_waits_for_inflight_ready_notification():
+async def test_postgres_delete_waits_for_inflight_ready_notification(settings):
+    settings.admin_telegram_ids = "1"
     database_url = os.getenv("POSTGRES_TEST_URL")
     if not database_url:
         pytest.skip("POSTGRES_TEST_URL is not configured")
@@ -261,7 +264,7 @@ async def test_postgres_delete_waits_for_inflight_ready_notification():
                 await release_send.wait()
 
         async def send_notice():
-            await deliver_ready_notification(SlowBot(), factories[0], notice_id, chat_id, message)
+            await deliver_ready_notification(SlowBot(), factories[0], notice_id, chat_id, message, settings)
 
         async def delete_after_send_started():
             await entered.wait()
