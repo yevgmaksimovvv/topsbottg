@@ -124,9 +124,6 @@ def create_runtime(settings: Settings) -> FastAPI:
             ),
             return_exceptions=True,
         )
-        username_resolver = getattr(app.state, "username_resolver", None)
-        if username_resolver is not None:
-            await username_resolver.close()
         bot = getattr(app.state, "bot", None)
         if bot is not None:
             await bot.session.close()
