@@ -707,7 +707,8 @@ test("Authorized photo, document and voice stay in history after reload, faults 
     await other.page.locator("#inbox-conversations").getByText("Анна Петрова").click();
     await other.page.locator('[data-inbox-download="204"]').waitFor();
     db.revokeOnMediaGet.add(555);
-    await other.page.locator('[data-inbox-download="204"]').click();
+    // A 403 closes inbox immediately; bypass Playwright actionability retries on detached DOM.
+    await other.page.locator('[data-inbox-download="204"]').dispatchEvent("click");
     await other.page.locator("#inbox-dialog").waitFor({ state: "hidden" });
     assert.equal(await other.page.locator("#inbox-open").isVisible(), false);
     assert.ok(db.requests.some((request) => request.path ===
