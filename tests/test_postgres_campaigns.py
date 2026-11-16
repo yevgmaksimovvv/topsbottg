@@ -10,8 +10,9 @@ from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import func, select, text
+from sqlalchemy import event, func, insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import Session
 
 from topsbottg.api import create_app
 from topsbottg.chat_outbox import claim_chat_outbox, settle_chat_outbox
@@ -326,3 +327,140 @@ async def test_pg_same_key_is_scoped_to_admin_not_globally(
         assert await session.scalar(select(func.count(ChatMessageOutbox.id))) == 2
         assert await session.scalar(select(func.count(CampaignRecipient.id))) == 2
         assert await session.scalar(select(func.count(Conversation.id))) == 1
+
+
+@pytest.mark.postgres
+async def test_pg_campaign_list_batches_counts_without_loading_recipients(
+    postgres_campaign, admin_init_data,
+):
+    """A hundred campaign summaries must cost two SQL queries, not N+1 or collection hydration."""
+    client, factory, user_ids, _, _ = postgres_campaign
+    campaign_count = 105
+    statuses = ("queued", "sending", "sent", "failed")
+    async with factory() as session:
+        await session.execute(
+            insert(Conversation),
+            [{"user_id": uid} for uid in user_ids],
+        )
+        conversation_ids = dict((await session.execute(
+            select(Conversation.user_id, Conversation.id)
+        )).all())
+        campaign_ids = (await session.scalars(
+            insert(MessageCampaign).returning(MessageCampaign.id),
+            [
+                {
+                    "admin_telegram_id": 123, "idempotency_key": f"batch-{i}",
+                    "payload_fingerprint": "a" * 64, "text": "Объявление",
+                    "user_ids": user_ids, "study_group_ids": [],
+                    "recipient_count": len(user_ids),
+                }
+                for i in range(campaign_count)
+            ],
+        )).all()
+        items = [
+            (cid, uid, conversation_ids[uid], statuses[i % len(statuses)])
+            for i, cid in enumerate(campaign_ids)
+            for uid in user_ids
+        ]
+        await session.execute(insert(ChatMessage), [
+            {
+                "conversation_id": conversation_id,
+                "direction": "outgoing", "kind": "text", "text": "Объявление",
+                "author_admin_telegram_id": 123, "source": "campaign",
+            }
+            for _, _, conversation_id, _ in items
+        ])
+        message_ids = (await session.scalars(
+            select(ChatMessage.id).order_by(ChatMessage.id)
+        )).all()
+        assert len(message_ids) == campaign_count * len(user_ids)
+        await session.execute(insert(ChatMessageOutbox), [
+            {
+                "message_id": message_id,
+                "conversation_id": conversation_id, "admin_telegram_id": 123,
+                "idempotency_key": f"batch-{cid}-{uid}",
+                "payload_fingerprint": "b" * 64, "status": status,
+            }
+            for message_id, (cid, uid, conversation_id, status)
+            in zip(message_ids, items, strict=True)
+        ])
+        outbox_ids = (await session.scalars(
+            select(ChatMessageOutbox.id).order_by(ChatMessageOutbox.id)
+        )).all()
+        assert len(outbox_ids) == len(items)
+        await session.execute(insert(CampaignRecipient), [
+            {
+                "campaign_id": cid, "user_id": uid,
+                "full_name": f"Recipient {uid}", "study_group_name": None,
+                "conversation_id": conversation_id, "message_id": message_id,
+                "outbox_id": outbox_id, "status": status,
+            }
+            for (cid, uid, conversation_id, status), message_id, outbox_id
+            in zip(items, message_ids, outbox_ids, strict=True)
+        ])
+        await session.commit()
+
+    sql_statements = []
+    loaded_recipients = []
+
+    def capture_sql(connection, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().lower().startswith("select "):
+            sql_statements.append(" ".join(statement.lower().split()))
+
+    def capture_load(session, instance):
+        if isinstance(instance, CampaignRecipient):
+            loaded_recipients.append(instance.id)
+
+    engine = factory.kw["bind"]
+    event.listen(engine.sync_engine, "before_cursor_execute", capture_sql)
+    event.listen(Session, "loaded_as_persistent", capture_load)
+    try:
+        page = await client.get(
+            "/api/admin/message-campaigns?limit=100",
+            headers=_headers(admin_init_data),
+        )
+        first_sql = list(sql_statements)
+        assert page.status_code == 200, page.text
+        assert len(page.json()["items"]) == 100
+        assert page.json()["next_cursor"]
+        assert not loaded_recipients, "List endpoint hydrated campaign recipients"
+        assert len([sql for sql in first_sql if "from message_campaigns" in sql]) == 1
+        batches = [
+            sql for sql in first_sql
+            if "from campaign_recipients join chat_message_outbox" in sql
+        ]
+        assert len(batches) == 1, first_sql
+        assert (
+            "group by campaign_recipients.campaign_id, chat_message_outbox.status"
+            in batches[0]
+        )
+        assert len(first_sql) <= 4, first_sql
+        expected_by_id = {
+            cid: statuses[i % len(statuses)] for i, cid in enumerate(campaign_ids)
+        }
+        for summary in page.json()["items"]:
+            expected = expected_by_id[summary["id"]]
+            assert summary["status"] == expected
+            assert summary[f"{expected}_count"] == len(user_ids)
+            assert sum(summary[f"{s}_count"] for s in statuses) == len(user_ids)
+            assert "recipients" not in summary
+
+        sql_statements.clear()
+        cursor = page.json()["next_cursor"]
+        next_page = await client.get(
+            "/api/admin/message-campaigns",
+            params={"cursor": cursor, "limit": 100},
+            headers=_headers(admin_init_data),
+        )
+        assert next_page.status_code == 200
+        assert len(next_page.json()["items"]) == 5
+        assert next_page.json()["next_cursor"] is None
+        assert len([sql for sql in sql_statements if "from message_campaigns" in sql]) == 1
+        assert len([
+            sql for sql in sql_statements
+            if "from campaign_recipients join chat_message_outbox" in sql
+        ]) == 1
+        assert not loaded_recipients
+    finally:
+        event.remove(Session, "loaded_as_persistent", capture_load)
+        event.remove(engine.sync_engine, "before_cursor_execute", capture_sql)
