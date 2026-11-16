@@ -612,7 +612,7 @@ test("Authorized photo, document and voice stay in history after reload, faults 
     );
     db.media.set(203, { type: "image/jpeg", content: image });
     db.media.set(204, { type: "application/octet-stream", content: Buffer.from("%PDF-1.7\nTest page\n%%EOF\n") });
-    db.media.set(205, { type: "audio/ogg", content: Buffer.from("OggSxxxxOpusHeadxxxx") });
+    db.media.set(205, { type: "audio/ogg", content: Buffer.from("T2dnUwACAAAAAAAAAAB8rLP3AAAAAFkXjjQBE09wdXNIZWFkAQE4AYC7AAAAAABPZ2dTAAAAAAAAAAAAAHyss/cBAAAAgVS/aQE9T3B1c1RhZ3MMAAAATGF2ZjYxLjcuMTAzAQAAAB0AAABlbmNvZGVyPUxhdmM2MS4xOS4xMDEgbGlib3B1c09nZ1MAAEC/AAAAAAAAfKyz9wIAAAA5vckwEQ8ODg4ODg4ODg4ODg4ODg4OGAL5jsjhz5S+lx76gm6wGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENJPZ2dTAACAfgEAAAAAAHyss/cDAAAAHw7+BxEODg4ODg4ODg4ODg4ODg4ODhgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENJPZ2dTAADAPQIAAAAAAHyss/cEAAAAjhbikhEODg4ODg4ODg4ODg4ODg4ODhgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENJPZ2dTAAR4kQIAAAAAAHyss/cFAAAAucVC7wgODg4ODg4ODhgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENI=", "base64") });
 
     const { page, errors } = await createPage(123, 390);
     await page.locator("#inbox-open").click();
@@ -644,6 +644,23 @@ test("Authorized photo, document and voice stay in history after reload, faults 
     await page.locator('[data-inbox-message="204"] .inbox-media-error').waitFor({ state: "detached" });
     await page.locator('[data-inbox-load-voice="205"]').click();
     await page.locator('[data-inbox-audio-player="205"][src^="blob:"]').waitFor();
+    await page.evaluate(async () => {
+      const audio = document.querySelector('[data-inbox-audio-player="205"]');
+      window.__playingVoice = audio;
+      await audio.play();
+    });
+    await page.waitForFunction(() => window.__playingVoice.currentTime > 0.2);
+    const beforeVoiceRefetch = await page.evaluate(() => window.__playingVoice.currentTime);
+    const refetch = page.waitForResponse((response) =>
+      response.url().includes("/api/admin/conversations/11/messages?") && response.request().method() === "GET");
+    await page.evaluate(() => window.__sse.at(-1).emit("chat.changed", { conversation_id: 11 }));
+    await refetch;
+    await page.waitForTimeout(140);
+    assert.deepEqual(await page.evaluate((previousTime) => ({
+      sameElement: window.__playingVoice === document.querySelector('[data-inbox-audio-player="205"]'),
+      playing: !window.__playingVoice.paused,
+      progressed: window.__playingVoice.currentTime > previousTime,
+    }), beforeVoiceRefetch), { sameElement: true, playing: true, progressed: true });
 
     for (const theme of ["light", "dark"]) {
       await page.evaluate((value) => {
