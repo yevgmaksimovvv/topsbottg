@@ -1026,6 +1026,9 @@ test("Campaign preview uses the server union, invalidates on selection changes a
       button.click();
     });
     await page.waitForFunction(() => document.getElementById("campaign-confirm-button").disabled);
+    assert.equal(await page.locator('[data-campaign-group="9"]').isDisabled(), true,
+      "Cannot change a campaign's source criteria while confirmation is in flight");
+    assert.equal(await page.locator("#campaign-text").isDisabled(), true);
     assert.equal(db.requests.filter((entry) =>
       entry.method === "POST" && entry.path === "/api/admin/message-campaigns").length, 1,
       "Concurrent confirmation must create only one request");
