@@ -1,0 +1,466 @@
+"""PostgreSQL snapshot, concurrent campaign creation and outbox consistency."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from uuid import uuid4
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event, func, insert, select, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import Session
+
+from topsbottg.api import create_app
+from topsbottg.chat_outbox import claim_chat_outbox, settle_chat_outbox
+from topsbottg.models import (
+    AdminGrant,
+    Base,
+    CampaignRecipient,
+    ChatMessage,
+    ChatMessageOutbox,
+    Conversation,
+    MessageCampaign,
+    Payout,
+    PayoutRecipient,
+    StudyGroup,
+    User,
+)
+from topsbottg.worker import deliver_chat_outbox
+
+
+@pytest.fixture
+async def postgres_campaign(settings):
+    url = os.getenv("POSTGRES_TEST_URL")
+    if not url:
+        pytest.skip("POSTGRES_TEST_URL required")
+    schema = f"ci_campaign_{uuid4().hex}"
+    admin_engine = create_async_engine(url)
+    engine = None
+    try:
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+        engine = create_async_engine(
+            url, connect_args={"server_settings": {"search_path": schema}},
+        )
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+        app = create_app(settings.model_copy(update={"database_url": url}), factory)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client, factory() as session:
+            a = StudyGroup(display_code="Группа A", normalized_code="GROUP-A")
+            b = StudyGroup(display_code="Группа B", normalized_code="GROUP-B")
+            session.add_all([a, b])
+            await session.flush()
+            users = [
+                User(
+                    telegram_id=88000 + index, full_name=f"Recipient {index}",
+                    study_group_id=a.id if index <= 10 else b.id if index <= 19 else None,
+                    registration_completed_at=datetime.now(UTC),
+                )
+                for index in range(1, 21)
+            ]
+            session.add_all(users)
+            await session.commit()
+            yield client, factory, [u.id for u in users], a.id, b.id
+    finally:
+        if engine is not None:
+            await engine.dispose()
+        async with admin_engine.begin() as connection:
+            await connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin_engine.dispose()
+
+
+def _headers(init_data, key="concurrent-post"):
+    return {"X-Telegram-Init-Data": init_data, "Idempotency-Key": key}
+
+
+def _body(ids, a, b, *, text="Всем зарегистрированным"):
+    return {"user_ids": [ids[0], ids[19], ids[0]], "study_group_ids": [a, b, a], "text": text}
+
+
+@pytest.mark.postgres
+async def test_pg_parallel_campaign_post_has_one_frozen_snapshot(postgres_campaign, admin_init_data):
+    client, factory, ids, a, b = postgres_campaign
+    body = _body(ids, a, b)
+    headers = _headers(admin_init_data)
+    results = await asyncio.wait_for(asyncio.gather(*[
+        client.post("/api/admin/message-campaigns", json=body, headers=headers)
+        for _ in range(8)
+    ]), timeout=35)
+    assert [r.status_code for r in results] == [202] * 8, [r.text for r in results]
+    campaign_ids = {r.json()["id"] for r in results}
+    assert len(campaign_ids) == 1
+    campaign_id = next(iter(campaign_ids))
+    assert all(r.json()["recipient_count"] == 20 for r in results)
+
+    async with factory() as session:
+        assert await session.scalar(select(func.count(MessageCampaign.id))) == 1
+        assert await session.scalar(select(func.count(CampaignRecipient.id))) == 20
+        assert await session.scalar(select(func.count(ChatMessageOutbox.id))) == 20
+        assert await session.scalar(select(func.count(ChatMessage.id))) == 20
+        assert await session.scalar(select(func.count(Conversation.id))) == 20
+        assert await session.scalar(select(func.count(Payout.id))) == 0
+        assert await session.scalar(select(func.count(PayoutRecipient.id))) == 0
+        recipients = (await session.scalars(
+            select(CampaignRecipient).order_by(CampaignRecipient.user_id)
+        )).all()
+        assert [rec.user_id for rec in recipients] == ids
+        assert len({rec.outbox_id for rec in recipients}) == 20
+        user = await session.get(User, ids[0])
+        user.study_group_id = b
+        await session.commit()
+
+    detail = await client.get(f"/api/admin/message-campaigns/{campaign_id}", headers=headers)
+    assert detail.status_code == 200
+    assert detail.json()["recipients"][0]["study_group_name"] == "Группа A"
+    assert detail.json()["recipient_count"] == 20
+    repeat = await client.post("/api/admin/message-campaigns", json=body, headers=headers)
+    assert repeat.status_code == 202 and repeat.json()["id"] == campaign_id
+    conflict = await client.post("/api/admin/message-campaigns", json=_body(ids, a, b, text="Другой текст"),
+                                 headers=headers)
+    assert conflict.status_code == 409
+
+    # Different actor, same operation key, is independent.
+    async with factory() as session:
+        session.add(AdminGrant(telegram_id=555, granted_by_telegram_id=123,
+                               granted_at=datetime.now(UTC)))
+        await session.commit()
+
+
+@pytest.mark.postgres
+async def test_pg_claims_are_exclusive_and_statuses_come_from_outbox(
+    postgres_campaign, admin_init_data
+):
+    client, factory, ids, a, b = postgres_campaign
+    headers = _headers(admin_init_data, key="claim-test")
+    response = await client.post("/api/admin/message-campaigns", json={
+        "user_ids": ids[:2], "study_group_ids": [], "text": "Отправка",
+    }, headers=headers)
+    assert response.status_code == 202
+    cid = response.json()["id"]
+    async with factory() as first:
+        [claim] = await claim_chat_outbox(first, limit=1)
+        async with factory() as second:
+            other = await asyncio.wait_for(claim_chat_outbox(second, limit=1), timeout=5)
+            assert len(other) == 1 and other[0].id != claim.id
+            # Neither session has yet committed the claims.
+            await second.commit()
+        await first.commit()
+    async with factory() as session:
+        statuses = (await session.scalars(
+            select(CampaignRecipient.status).where(CampaignRecipient.campaign_id == cid)
+        )).all()
+        assert statuses == ["sending", "sending"]
+
+    async with factory() as session:
+        assert await settle_chat_outbox(session, claim, telegram_message_id=901)
+        await session.commit()
+    async with factory() as session:
+        detail = await session.scalar(
+            select(CampaignRecipient).where(CampaignRecipient.outbox_id == claim.id)
+        )
+        assert detail.status == "sent" and detail.error_code is None
+        second_claim = other[0]
+        assert await settle_chat_outbox(
+            session, second_claim, error_code="blocked", permanent=True
+        )
+        await session.commit()
+    mixed = (await client.get(f"/api/admin/message-campaigns/{cid}", headers=headers)).json()
+    assert mixed["status"] == "partially_failed"
+    assert mixed["sent_count"] == mixed["failed_count"] == 1
+    assert {r["status"] for r in mixed["recipients"]} == {"sent", "failed"}
+
+    # Two simultaneous retry requests must never create two jobs.
+    retried = await asyncio.wait_for(asyncio.gather(
+        client.post(f"/api/admin/message-campaigns/{cid}/retry-failed", headers=headers),
+        client.post(f"/api/admin/message-campaigns/{cid}/retry-failed", headers=headers),
+    ), timeout=15)
+    assert [r.status_code for r in retried] == [200, 200]
+    async with factory() as session:
+        assert await session.scalar(select(func.count(CampaignRecipient.id))) == 2
+        assert await session.scalar(select(func.count(ChatMessageOutbox.id))) == 2
+        assert await session.scalar(select(func.count(ChatMessage.id))) == 2
+        recipient = await session.scalar(
+            select(CampaignRecipient).where(CampaignRecipient.outbox_id == second_claim.id)
+        )
+        assert recipient.retry_count == 1
+        assert recipient.status == "queued"
+        sent = await session.get(ChatMessageOutbox, claim.id)
+        assert sent.status == "sent" and sent.telegram_message_id == 901
+    after = (await client.get(f"/api/admin/message-campaigns/{cid}", headers=headers)).json()
+    assert after["queued_count"] == 1 and after["sent_count"] == 1
+
+
+@pytest.mark.postgres
+async def test_pg_campaign_failed_creation_rolls_back_every_outbox(
+    postgres_campaign, admin_init_data, monkeypatch
+):
+    import topsbottg.campaigns as campaigns
+
+    client, factory, ids, a, b = postgres_campaign
+    original = campaigns.create_outgoing_message
+    calls = 0
+
+    async def fail_halfway(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 4:
+            raise RuntimeError("simulated outbox insert failure")
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(campaigns, "create_outgoing_message", fail_halfway)
+    with pytest.raises(RuntimeError, match="simulated outbox"):
+        await client.post("/api/admin/message-campaigns", json={
+            "user_ids": ids[:10], "study_group_ids": [], "text": "rollback",
+        }, headers=_headers(admin_init_data, key="atomic-rollback"))
+    async with factory() as session:
+        for table in (MessageCampaign, CampaignRecipient, ChatMessageOutbox, ChatMessage, Conversation):
+            assert await session.scalar(select(func.count()).select_from(table)) == 0
+    monkeypatch.setattr(campaigns, "create_outgoing_message", original)
+    good = await client.post("/api/admin/message-campaigns", json={
+        "user_ids": ids[:10], "study_group_ids": [], "text": "rollback",
+    }, headers=_headers(admin_init_data, key="atomic-rollback"))
+    assert good.status_code == 202 and good.json()["recipient_count"] == 10
+
+
+@pytest.mark.postgres
+async def test_pg_revoked_admin_between_preview_and_create(
+    postgres_campaign, dynamic_admin_init_data
+):
+    client, factory, ids, a, b = postgres_campaign
+    criteria = {"user_ids": [ids[19]], "study_group_ids": [a]}
+    payload = {**criteria, "text": "Привет"}
+    headers = _headers(dynamic_admin_init_data, "revoked-actor")
+    async with factory() as session:
+        grant = AdminGrant(telegram_id=555, granted_by_telegram_id=123,
+                           granted_at=datetime.now(UTC))
+        session.add(grant)
+        await session.commit()
+        grant_id = grant.id
+    assert (await client.post("/api/admin/message-campaigns/preview",
+                              json=criteria, headers=headers)).status_code == 200
+    async with factory() as session:
+        grant = await session.get(AdminGrant, grant_id)
+        grant.revoked_at = datetime.now(UTC)
+        await session.commit()
+    assert (await client.post("/api/admin/message-campaigns", json=payload,
+                              headers=headers)).status_code == 403
+    assert (await client.get("/api/admin/message-campaigns", headers=headers)).status_code == 403
+    async with factory() as session:
+        assert await session.scalar(select(func.count(MessageCampaign.id))) == 0
+
+
+@pytest.mark.postgres
+async def test_pg_20_recipients_deliver_to_20_permanent_conversations(
+    postgres_campaign, admin_init_data,
+):
+    client, factory, ids, a, b = postgres_campaign
+    headers = _headers(admin_init_data, "twenty-deliveries")
+    response = await client.post(
+        "/api/admin/message-campaigns",
+        headers=headers, json=_body(ids, a, b),
+    )
+    assert response.status_code == 202
+    campaign_id = response.json()["id"]
+
+    class Delivered:
+        def __init__(self):
+            self.destinations = []
+            self.counter = 4000
+
+        async def send_message(self, chat_id, text, **kwargs):
+            self.destinations.append((chat_id, text))
+            self.counter += 1
+            return SimpleNamespace(message_id=self.counter)
+
+    bot = Delivered()
+    for _ in range(20):
+        await deliver_chat_outbox(bot, factory)
+    assert len(bot.destinations) == 20
+    assert len({chat_id for chat_id, _ in bot.destinations}) == 20
+    assert set(bot.destinations) == {
+        (88000 + i, "Всем зарегистрированным") for i in range(1, 21)
+    }
+    detail = (await client.get(
+        f"/api/admin/message-campaigns/{campaign_id}", headers=headers,
+    )).json()
+    assert detail["status"] == "sent" and detail["sent_count"] == 20
+    assert detail["queued_count"] == detail["sending_count"] == detail["failed_count"] == 0
+    async with factory() as session:
+        assert await session.scalar(select(func.count(ChatMessage.id))) == 20
+        assert await session.scalar(select(func.count(ChatMessageOutbox.id))) == 20
+        assert await session.scalar(select(func.count(CampaignRecipient.id))) == 20
+        assert await session.scalar(select(func.count(Conversation.id))) == 20
+        assert await session.scalar(select(func.count(Payout.id))) == 0
+        assert await session.scalar(select(func.count(PayoutRecipient.id))) == 0
+
+
+@pytest.mark.postgres
+async def test_pg_same_key_is_scoped_to_admin_not_globally(
+    postgres_campaign, admin_init_data, dynamic_admin_init_data,
+):
+    client, factory, ids, a, b = postgres_campaign
+    body = {"user_ids": ids[:1], "study_group_ids": [], "text": "Администраторы"}
+    async with factory() as session:
+        session.add(AdminGrant(
+            telegram_id=555, granted_by_telegram_id=123, granted_at=datetime.now(UTC),
+        ))
+        await session.commit()
+    one = await client.post(
+        "/api/admin/message-campaigns",
+        headers=_headers(admin_init_data, "shared-key"), json=body,
+    )
+    two = await client.post(
+        "/api/admin/message-campaigns",
+        headers=_headers(dynamic_admin_init_data, "shared-key"), json=body,
+    )
+    assert one.status_code == two.status_code == 202
+    assert one.json()["id"] != two.json()["id"]
+    async with factory() as session:
+        assert await session.scalar(select(func.count(MessageCampaign.id))) == 2
+        assert await session.scalar(select(func.count(ChatMessageOutbox.id))) == 2
+        assert await session.scalar(select(func.count(CampaignRecipient.id))) == 2
+        assert await session.scalar(select(func.count(Conversation.id))) == 1
+
+
+@pytest.mark.postgres
+async def test_pg_campaign_list_batches_counts_without_loading_recipients(
+    postgres_campaign, admin_init_data,
+):
+    """A hundred campaign summaries must cost two SQL queries, not N+1 or collection hydration."""
+    client, factory, user_ids, _, _ = postgres_campaign
+    campaign_count = 105
+    statuses = ("queued", "sending", "sent", "failed")
+    async with factory() as session:
+        await session.execute(
+            insert(Conversation),
+            [{"user_id": uid} for uid in user_ids],
+        )
+        conversation_ids = dict((await session.execute(
+            select(Conversation.user_id, Conversation.id)
+        )).all())
+        campaign_ids = (await session.scalars(
+            insert(MessageCampaign).returning(MessageCampaign.id),
+            [
+                {
+                    "admin_telegram_id": 123, "idempotency_key": f"batch-{i}",
+                    "payload_fingerprint": "a" * 64, "text": "Объявление",
+                    "user_ids": user_ids, "study_group_ids": [],
+                    "recipient_count": len(user_ids),
+                }
+                for i in range(campaign_count)
+            ],
+        )).all()
+        items = [
+            (cid, uid, conversation_ids[uid], statuses[i % len(statuses)])
+            for i, cid in enumerate(campaign_ids)
+            for uid in user_ids
+        ]
+        await session.execute(insert(ChatMessage), [
+            {
+                "conversation_id": conversation_id,
+                "direction": "outgoing", "kind": "text", "text": "Объявление",
+                "author_admin_telegram_id": 123, "source": "campaign",
+            }
+            for _, _, conversation_id, _ in items
+        ])
+        message_ids = (await session.scalars(
+            select(ChatMessage.id).order_by(ChatMessage.id)
+        )).all()
+        assert len(message_ids) == campaign_count * len(user_ids)
+        await session.execute(insert(ChatMessageOutbox), [
+            {
+                "message_id": message_id,
+                "conversation_id": conversation_id, "admin_telegram_id": 123,
+                "idempotency_key": f"batch-{cid}-{uid}",
+                "payload_fingerprint": "b" * 64, "status": status,
+            }
+            for message_id, (cid, uid, conversation_id, status)
+            in zip(message_ids, items, strict=True)
+        ])
+        outbox_ids = (await session.scalars(
+            select(ChatMessageOutbox.id).order_by(ChatMessageOutbox.id)
+        )).all()
+        assert len(outbox_ids) == len(items)
+        await session.execute(insert(CampaignRecipient), [
+            {
+                "campaign_id": cid, "user_id": uid,
+                "full_name": f"Recipient {uid}", "study_group_name": None,
+                "conversation_id": conversation_id, "message_id": message_id,
+                "outbox_id": outbox_id, "status": status,
+            }
+            for (cid, uid, conversation_id, status), message_id, outbox_id
+            in zip(items, message_ids, outbox_ids, strict=True)
+        ])
+        await session.commit()
+
+    sql_statements = []
+    loaded_recipients = []
+
+    def capture_sql(connection, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().lower().startswith("select "):
+            sql_statements.append(" ".join(statement.lower().split()))
+
+    def capture_load(session, instance):
+        if isinstance(instance, CampaignRecipient):
+            loaded_recipients.append(instance.id)
+
+    engine = factory.kw["bind"]
+    event.listen(engine.sync_engine, "before_cursor_execute", capture_sql)
+    event.listen(Session, "loaded_as_persistent", capture_load)
+    try:
+        page = await client.get(
+            "/api/admin/message-campaigns?limit=100",
+            headers=_headers(admin_init_data),
+        )
+        first_sql = list(sql_statements)
+        assert page.status_code == 200, page.text
+        assert len(page.json()["items"]) == 100
+        assert page.json()["next_cursor"]
+        assert not loaded_recipients, "List endpoint hydrated campaign recipients"
+        assert len([sql for sql in first_sql if "from message_campaigns" in sql]) == 1
+        batches = [
+            sql for sql in first_sql
+            if "from campaign_recipients join chat_message_outbox" in sql
+        ]
+        assert len(batches) == 1, first_sql
+        assert (
+            "group by campaign_recipients.campaign_id, chat_message_outbox.status"
+            in batches[0]
+        )
+        assert len(first_sql) <= 4, first_sql
+        expected_by_id = {
+            cid: statuses[i % len(statuses)] for i, cid in enumerate(campaign_ids)
+        }
+        for summary in page.json()["items"]:
+            expected = expected_by_id[summary["id"]]
+            assert summary["status"] == expected
+            assert summary[f"{expected}_count"] == len(user_ids)
+            assert sum(summary[f"{s}_count"] for s in statuses) == len(user_ids)
+            assert "recipients" not in summary
+
+        sql_statements.clear()
+        cursor = page.json()["next_cursor"]
+        next_page = await client.get(
+            "/api/admin/message-campaigns",
+            params={"cursor": cursor, "limit": 100},
+            headers=_headers(admin_init_data),
+        )
+        assert next_page.status_code == 200
+        assert len(next_page.json()["items"]) == 5
+        assert next_page.json()["next_cursor"] is None
+        assert len([sql for sql in sql_statements if "from message_campaigns" in sql]) == 1
+        assert len([
+            sql for sql in sql_statements
+            if "from campaign_recipients join chat_message_outbox" in sql
+        ]) == 1
+        assert not loaded_recipients
+    finally:
+        event.remove(Session, "loaded_as_persistent", capture_load)
+        event.remove(engine.sync_engine, "before_cursor_execute", capture_sql)

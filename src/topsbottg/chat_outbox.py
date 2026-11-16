@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from topsbottg.attachment_staging import StagedUpload
 from topsbottg.conversations import lock_conversation_for_message
-from topsbottg.models import ChatAttachment, ChatMessage, ChatMessageOutbox, Conversation, User
+from topsbottg.models import CampaignRecipient, ChatAttachment, ChatMessage, ChatMessageOutbox, Conversation, User
 from topsbottg.services import queue_admin_event
 
 MAX_CHAT_ATTEMPTS = 5
@@ -213,6 +213,14 @@ async def create_outgoing_attachment(
     return message, True
 
 
+async def _sync_campaign_recipient(session: AsyncSession, outbox: ChatMessageOutbox) -> None:
+    await session.execute(
+        update(CampaignRecipient)
+        .where(CampaignRecipient.outbox_id == outbox.id)
+        .values(status=outbox.status, error_code=outbox.error_code, updated_at=func.now())
+    )
+
+
 async def claim_chat_outbox(
     session: AsyncSession, *, limit: int = 1, now: datetime | None = None
 ) -> list[ChatOutboxClaim]:
@@ -242,6 +250,7 @@ async def claim_chat_outbox(
         if row.attempts >= MAX_CHAT_ATTEMPTS:
             row.status = "failed"
             row.error_code = "attempts_exhausted"
+            await _sync_campaign_recipient(session, row)
             row.claimed_until = None
             row.claim_token = None
             row.retry_at = None
@@ -256,6 +265,7 @@ async def claim_chat_outbox(
         ):
             row.status = "failed"
             row.error_code = "staging_file_missing"
+            await _sync_campaign_recipient(session, row)
             row.claimed_until = None
             row.claim_token = None
             row.retry_at = None
@@ -286,6 +296,7 @@ async def claim_chat_outbox(
                 if target_status == "failed":
                     row.status = "failed"
                     row.error_code = "reply_unavailable"
+                    await _sync_campaign_recipient(session, row)
                     row.retry_at = None
                     row.claimed_until = None
                     row.claim_token = None
@@ -300,6 +311,7 @@ async def claim_chat_outbox(
 
         token = secrets.token_hex(16)
         row.status = "sending"
+        await _sync_campaign_recipient(session, row)
         row.attempts += 1
         row.claim_token = token
         row.claimed_until = now + (
@@ -378,5 +390,6 @@ async def settle_chat_outbox(
             row.retry_at = now + timedelta(seconds=max(float(delay), retry_after or 0))
     row.claimed_until = None
     row.claim_token = None
+    await _sync_campaign_recipient(session, row)
     queue_admin_event(session, "chat.changed", {"conversation_id": row.conversation_id})
     return True

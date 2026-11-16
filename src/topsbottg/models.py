@@ -214,6 +214,62 @@ class ChatMessageOutbox(Base, TimestampMixin):
     )
 
 
+class MessageCampaign(Base, TimestampMixin):
+    __tablename__ = "message_campaigns"
+    __table_args__ = (
+        UniqueConstraint("admin_telegram_id", "idempotency_key", name="uq_message_campaign_actor_key"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    admin_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    user_ids: Mapped[list[int]] = mapped_column(json_type, nullable=False)
+    study_group_ids: Mapped[list[int]] = mapped_column(json_type, nullable=False)
+    recipient_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+    recipients: Mapped[list[CampaignRecipient]] = relationship(
+        back_populates="campaign", lazy="raise",
+    )
+
+
+class CampaignRecipient(Base, TimestampMixin):
+    __tablename__ = "campaign_recipients"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "user_id", name="uq_campaign_recipients_user"),
+        CheckConstraint(
+            "status IN ('queued', 'sending', 'sent', 'failed')",
+            name="ck_campaign_recipients_status",
+        ),
+        Index("ix_campaign_recipients_campaign_status", "campaign_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    campaign_id: Mapped[int] = mapped_column(
+        ForeignKey("message_campaigns.id", ondelete="CASCADE"), nullable=False,
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
+    )
+    full_name: Mapped[str] = mapped_column(Text, nullable=False)
+    study_group_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False,
+    )
+    message_id: Mapped[int] = mapped_column(
+        ForeignKey("chat_messages.id", ondelete="CASCADE"), unique=True, nullable=False,
+    )
+    outbox_id: Mapped[int] = mapped_column(
+        ForeignKey("chat_message_outbox.id", ondelete="CASCADE"), unique=True, nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(8), nullable=False, server_default="queued")
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", default=0)
+
+    campaign: Mapped[MessageCampaign] = relationship(back_populates="recipients")
+
+
 class ChatAttachment(Base):
     __tablename__ = "chat_attachments"
     __table_args__ = (Index("ix_chat_attachments_staging_key", "staging_key"),)
