@@ -65,6 +65,9 @@ async function withBackend(run) {
     createFailureAfterCommit: false,
     createWait: null,
     releaseCreate: null,
+    retryWaitCampaignId: null,
+    releaseRetry: null,
+    detailFailureIds: new Set(),
   };
 
   const json = (route, payload, status = 200) => route.fulfill({
@@ -258,9 +261,14 @@ async function withBackend(run) {
       if (campaignMatch) {
         const item = db.campaigns.find((value) => value.id === Number(campaignMatch[1]));
         if (!item) return json(route, { detail: "not found" }, 404);
-        if (method === "GET" && !campaignMatch[2])
+        if (method === "GET" && !campaignMatch[2]) {
+          if (db.detailFailureIds.has(item.id))
+            return json(route, { detail: "detail temporarily unavailable" }, 503);
           return json(route, { ...campaignSummary(item), recipients: item.recipients });
+        }
         if (method === "POST" && campaignMatch[2]) {
+          if (db.retryWaitCampaignId === item.id)
+            await new Promise((done) => { db.releaseRetry = done; });
           for (const recipient of item.recipients) {
             if (recipient.status !== "failed") continue;
             recipient.status = "queued";
