@@ -49,6 +49,7 @@ const inbox = {
   draftFile: null,
   draftPending: null,
   mediaUrls: new Map(),
+  mediaSizes: new Map(),
   mediaRequests: new Map(),
   mediaErrors: new Map(),
   mediaObserver: null,
@@ -75,6 +76,9 @@ const statusText = {
 };
 const key = () => window.crypto?.randomUUID?.() || String(Date.now()) + "-" + Math.random().toString(36).slice(2);
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
+const MAX_MEDIA_CACHE_BYTES = 32 * 1024 * 1024;
+const MAX_MEDIA_CACHE_ITEMS = 8;
 const PHOTO_TYPES = new Set(["image/jpeg", "image/png"]);
 const FILE_TYPES = new Set([
   "application/pdf", "application/zip", "text/plain",
@@ -97,6 +101,7 @@ function clearMedia() {
   inbox.mediaRequests.clear();
   for (const url of inbox.mediaUrls.values()) URL.revokeObjectURL(url);
   inbox.mediaUrls.clear();
+  inbox.mediaSizes.clear();
   inbox.mediaErrors.clear();
   const viewer = el("inbox-photo-viewer");
   if (viewer?.open) viewer.close();
@@ -830,14 +835,20 @@ function normalizedFile(file) {
   return mimes[ext] ? new File([file], file.name, { type: mimes[ext] }) : file;
 }
 
+function maxUploadBytes(kind) {
+  return kind === "photo" ? MAX_PHOTO_BYTES : MAX_UPLOAD_BYTES;
+}
+
 function chooseAttachment(file) {
   inbox.draftFile = file ? { file: normalizedFile(file), kind: fileKind(normalizedFile(file)) } : null;
   inbox.draftPending = null;
   renderFilePreview();
   status("inbox-file-status", "");
   if (!inbox.draftFile) return;
-  if (inbox.draftFile.file.size > MAX_UPLOAD_BYTES) {
-    status("inbox-file-status", "Файл превышает 20 МБ. Выберите файл меньшего размера.");
+  if (inbox.draftFile.file.size > maxUploadBytes(inbox.draftFile.kind)) {
+    status("inbox-file-status", inbox.draftFile.kind === "photo"
+      ? "Фото превышает 10 МиБ. Выберите файл меньшего размера."
+      : "Файл превышает 20 МиБ. Выберите файл меньшего размера.");
   } else if (!FILE_TYPES.has(inbox.draftFile.file.type)) {
     status("inbox-file-status", "Формат файла не поддерживается.");
   }
@@ -846,8 +857,10 @@ function chooseAttachment(file) {
 function sendAttachment(caption, replyTo = null) {
   if (!inbox.client || !inbox.current || !inbox.draftFile || inbox.sending) return;
   const { file, kind } = inbox.draftFile;
-  if (file.size > MAX_UPLOAD_BYTES) {
-    status("inbox-file-status", "Файл превышает 20 МБ. Выберите файл меньшего размера.");
+  if (file.size > maxUploadBytes(kind)) {
+    status("inbox-file-status", kind === "photo"
+      ? "Фото превышает 10 МиБ. Выберите файл меньшего размера."
+      : "Файл превышает 20 МиБ. Выберите файл меньшего размера.");
     return;
   }
   if (!FILE_TYPES.has(file.type)) {
