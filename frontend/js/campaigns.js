@@ -42,6 +42,7 @@ const campaign = {
   historyGeneration: 0,
   historyController: null,
   detail: null,
+  selectedCampaignId: null,
   detailGeneration: 0,
   detailController: null,
   retryBusy: false,
@@ -218,6 +219,7 @@ export function leaveCampaignScreens() {
   setHidden("inbox-campaign-compose-screen", true);
   setHidden("inbox-campaign-history-screen", true);
   campaign.detail = null;
+  campaign.selectedCampaignId = null;
   campaign.retryBusy = false;
 }
 
@@ -244,7 +246,8 @@ export function openCampaignHistory(client, onAuthError) {
   campaign.onAuthError = onAuthError;
   showScreen("history");
   campaign.detail = null;
-  setHidden("campaign-detail", true);
+  campaign.selectedCampaignId = null;
+  renderDetail();
   void loadHistory(true);
 }
 
@@ -409,9 +412,16 @@ async function loadHistory(reset = false) {
 }
 
 function renderDetail() {
-  const detail = campaign.detail;
-  setHidden("campaign-detail", !detail);
-  if (!detail) return;
+  const detail = campaign.detail?.id === campaign.selectedCampaignId ? campaign.detail : null;
+  setHidden("campaign-detail", campaign.selectedCampaignId == null);
+  if (!detail) {
+    message("campaign-detail-id", campaign.selectedCampaignId == null
+      ? "" : "#" + campaign.selectedCampaignId);
+    message("campaign-detail-summary", "");
+    el("campaign-detail-recipients").replaceChildren();
+    setHidden("campaign-retry-button", true);
+    return;
+  }
   message("campaign-detail-id", "#" + detail.id);
   message("campaign-detail-summary", (statuses[detail.status] || detail.status) +
     " · Адресатов: " + detail.recipient_count + " · " + campaignCounts(detail));
@@ -430,40 +440,52 @@ async function loadDetail(id) {
   if (campaign.screen !== "history" || !campaign.client) return;
   const token = ++campaign.detailGeneration;
   campaign.detailController?.abort();
+  campaign.selectedCampaignId = id;
+  campaign.detail = null;
+  renderDetail();
   const controller = new AbortController();
   campaign.detailController = controller;
   message("campaign-detail-status", "Загружаем доставки…");
   try {
     const detail = await campaign.client.campaignDetail(id, { signal: controller.signal });
-    if (token !== campaign.detailGeneration || campaign.screen !== "history") return;
+    if (token !== campaign.detailGeneration || campaign.screen !== "history" ||
+        campaign.selectedCampaignId !== id) return;
     campaign.detail = detail;
     renderDetail();
     message("campaign-detail-status", "");
   } catch (error) {
-    if (token === campaign.detailGeneration) failure(error, "campaign-detail-status");
+    if (token === campaign.detailGeneration && campaign.screen === "history" &&
+        campaign.selectedCampaignId === id) failure(error, "campaign-detail-status");
+  } finally {
+    if (campaign.detailController === controller) campaign.detailController = null;
   }
 }
 
 async function retryFailed() {
   if (!campaign.client || campaign.screen !== "history" ||
+      campaign.detail?.id !== campaign.selectedCampaignId ||
       !campaign.detail?.failed_count || campaign.retryBusy) return;
-  const id = campaign.detail.id;
+  const id = campaign.selectedCampaignId;
   campaign.retryBusy = true;
   renderDetail();
   message("campaign-detail-status", "Повторяем только неуспешные доставки…");
   try {
     const summary = await campaign.client.campaignRetry(id);
     if (campaign.screen !== "history") return;
-    message("campaign-detail-status", "Поставлены в очередь только неуспешные доставки.");
     const index = campaign.history.findIndex((item) => item.id === id);
     if (index >= 0) campaign.history[index] = summary;
     renderHistory();
-    await loadDetail(id);
+    if (campaign.selectedCampaignId === id) {
+      message("campaign-detail-status", "Поставлены в очередь только неуспешные доставки.");
+      await loadDetail(id);
+    }
   } catch (error) {
-    failure(error, "campaign-detail-status");
+    if (error?.status === 401 || error?.status === 403) failure(error, "campaign-detail-status");
+    else if (campaign.screen === "history" && campaign.selectedCampaignId === id)
+      failure(error, "campaign-detail-status");
   } finally {
     campaign.retryBusy = false;
-    renderDetail();
+    if (campaign.screen === "history") renderDetail();
   }
 }
 
@@ -472,7 +494,7 @@ export function refreshCampaignsFromEvent() {
   clearTimeout(campaign.eventTimer);
   campaign.eventTimer = window.setTimeout(() => {
     if (campaign.screen !== "history") return;
-    const id = campaign.detail?.id;
+    const id = campaign.selectedCampaignId;
     void loadHistory(true);
     if (id) void loadDetail(id);
   }, 350);
