@@ -57,6 +57,14 @@ async function withBackend(run) {
     delayedQuery: null,
     delayedOpenUserId: null,
     releaseOpen: null,
+    groups: [{ id: 9, code: "Г-9" }, { id: 10, code: "Г-10" }],
+    campaigns: [],
+    campaignKeys: new Map(),
+    nextCampaignId: 1,
+    previewFailure: false,
+    createFailureAfterCommit: false,
+    createWait: null,
+    releaseCreate: null,
   };
 
   const json = (route, payload, status = 200) => route.fulfill({
@@ -77,6 +85,29 @@ async function withBackend(run) {
     return {
       id: conv.id, user: userOut(conv.user_id), last_message: latest,
       last_message_at: latest?.created_at || null, unread_count: unreadFor(admin, conv.id),
+    };
+  };
+
+  const resolveRecipients = ({ user_ids = [], study_group_ids = [] }) =>
+    db.users.filter((user) => user.registered !== false &&
+      (user_ids.includes(user.id) ||
+        (user.study_group && study_group_ids.includes(user.study_group.id))))
+      .map((user) => ({
+        user_id: user.id, full_name: user.full_name,
+        study_group_name: user.study_group?.code || null,
+      }));
+  const campaignSummary = (item) => {
+    const counts = { queued: 0, sending: 0, sent: 0, failed: 0 };
+    for (const recipient of item.recipients) counts[recipient.status]++;
+    return {
+      id: item.id, text: item.text, recipient_count: item.recipients.length,
+      status: counts.sent === item.recipients.length ? "sent" :
+        counts.failed === item.recipients.length ? "failed" :
+          counts.queued === item.recipients.length ? "queued" :
+            counts.queued || counts.sending ? "sending" : "partially_failed",
+      created_at: item.created_at, admin_telegram_id: item.actor,
+      queued_count: counts.queued, sending_count: counts.sending,
+      sent_count: counts.sent, failed_count: counts.failed,
     };
   };
 
@@ -175,10 +206,70 @@ async function withBackend(run) {
           has_more: offset + limit < matches.length,
         });
       }
-      if (path === "/api/admin/study-groups") return json(route, [{ id: 9, code: "Г-9" }]);
+      if (path === "/api/admin/study-groups") return json(route, db.groups);
       if (path === "/api/admin/payouts" ||
           path === "/api/admin/admin-directory" ||
           path === "/api/admin/admin-invitations") return json(route, []);
+      if (path === "/api/admin/message-campaigns/preview" && method === "POST") {
+        if (db.previewFailure) return json(route, { detail: "preview unavailable" }, 503);
+        const body = JSON.parse(req.postData() || "{}");
+        const recipients = resolveRecipients(body);
+        return json(route, { recipient_count: recipients.length, recipients });
+      }
+      if (path === "/api/admin/message-campaigns" && method === "POST") {
+        const body = JSON.parse(req.postData() || "{}");
+        const key = actor + ":" + req.headers()["idempotency-key"];
+        const existing = db.campaignKeys.get(key);
+        if (existing) {
+          if (JSON.stringify(existing.payload) !== JSON.stringify(body))
+            return json(route, { detail: "idempotency key reused with different payload" }, 409);
+          return json(route, campaignSummary(existing.item), 202);
+        }
+        if (!body.text?.trim()) return json(route, { detail: "blank text" }, 422);
+        const recipients = resolveRecipients(body);
+        if (!recipients.length) return json(route, { detail: "no registered recipients" }, 422);
+        const item = {
+          id: db.nextCampaignId++, text: body.text, actor,
+          created_at: "2026-11-16T12:30:00Z",
+          recipients: recipients.map((recipient) =>
+            ({ ...recipient, status: "queued", error_code: null, retry_count: 0,
+              conversation_id: 10 + recipient.user_id, message_id: 1000 + recipient.user_id })),
+        };
+        db.campaigns.unshift(item);
+        db.campaignKeys.set(key, { payload: body, item });
+        if (db.createWait) await new Promise((done) => { db.releaseCreate = done; });
+        if (db.createFailureAfterCommit) {
+          db.createFailureAfterCommit = false;
+          return route.abort("failed");
+        }
+        return json(route, campaignSummary(item), 202);
+      }
+      if (path === "/api/admin/message-campaigns" && method === "GET") {
+        const cursor = url.searchParams.get("cursor");
+        const offset = cursor ? Number(cursor.slice("offset:".length)) : 0;
+        const limit = Number(url.searchParams.get("limit") || 50);
+        return json(route, {
+          items: db.campaigns.slice(offset, offset + limit).map(campaignSummary),
+          next_cursor: offset + limit < db.campaigns.length ?
+            "offset:" + (offset + limit) : null,
+        });
+      }
+      const campaignMatch = /^\/api\/admin\/message-campaigns\/(\d+)(\/retry-failed)?$/.exec(path);
+      if (campaignMatch) {
+        const item = db.campaigns.find((value) => value.id === Number(campaignMatch[1]));
+        if (!item) return json(route, { detail: "not found" }, 404);
+        if (method === "GET" && !campaignMatch[2])
+          return json(route, { ...campaignSummary(item), recipients: item.recipients });
+        if (method === "POST" && campaignMatch[2]) {
+          for (const recipient of item.recipients) {
+            if (recipient.status !== "failed") continue;
+            recipient.status = "queued";
+            recipient.error_code = null;
+            recipient.retry_count++;
+          }
+          return json(route, campaignSummary(item));
+        }
+      }
       if (path === "/api/admin/conversations/summary") {
         return json(route, { unread_count: db.conversations.reduce((sum, conv) =>
           sum + unreadFor(actor, conv.id), 0) });
