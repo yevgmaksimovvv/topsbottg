@@ -752,6 +752,19 @@ test("Multipart upload preserves caption, file and key across 202 loss, rejects 
     assert.equal(db.uploadByKey.size, 1);
     assert.equal(db.messages.filter((message) => message.caption === "Подпись к PDF").length, 1);
 
+    const postsBeforeOversizePhoto = db.requests.filter((request) =>
+      request.method === "POST" && request.path.endsWith("/attachments")).length;
+    await page.locator("#inbox-file").setInputFiles({
+      name: "large-photo.jpg", mimeType: "image/jpeg",
+      buffer: Buffer.alloc(11 * 1024 * 1024),
+    });
+    await page.locator("#inbox-file-status").getByText(/10 МиБ/).waitFor();
+    await page.locator("#inbox-send").click();
+    assert.equal(db.requests.filter((request) =>
+      request.method === "POST" && request.path.endsWith("/attachments")).length,
+    postsBeforeOversizePhoto, "Photo >10 MiB must be rejected before multipart upload");
+    assert.equal(await page.locator("#inbox-file-preview").isVisible(), true);
+
     await page.locator("#inbox-file").setInputFiles({
       name: "image.jpg", mimeType: "image/jpeg", buffer: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
     });
