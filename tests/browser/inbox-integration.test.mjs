@@ -883,7 +883,7 @@ test("Multipart upload preserves caption, file and key across 202 loss, rejects 
       buffer: Buffer.alloc(20 * 1024 * 1024 + 1),
     });
     await page.locator("#inbox-send").click();
-    await page.locator("#inbox-file-status").getByText(/превышает 20 МБ/).waitFor();
+    await page.locator("#inbox-file-status").getByText(/превышает 20 МиБ/).waitFor();
     assert.equal(db.uploadByKey.size, 3);
     await page.locator("#inbox-remove-file").click();
     assert.equal(await page.locator("#inbox-file-preview").isVisible(), false);
