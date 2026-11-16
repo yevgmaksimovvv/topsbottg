@@ -1560,7 +1560,6 @@ test("responsive Mini App and payout workflows", async (t) => {
       return state.payouts.find((payout) => payout.id === 40)?.workflow_state === "no_active_recipients" &&
         row?.innerText.includes(String.fromCodePoint(1053, 1077, 1090, 32, 1072, 1082, 1090, 1080, 1074, 1085, 1099, 1093, 32, 1087, 1086, 1083, 1091, 1095, 1072, 1090, 1077, 1083, 1077, 1081));
     });
-    assert.ok((await page.locator('.payout-row[data-payout-id="40"]').innerText()).includes(String.fromCodePoint(1053, 1077, 1090, 32, 1072, 1082, 1090, 1080, 1074, 1085, 1099, 1093, 32, 1087, 1086, 1083, 1091, 1095, 1072, 1090, 1077, 1083, 1077, 1081)));
     await page.evaluate(async () => {
       const { clearNotification } = await import("/miniapp/js/store.js");
       clearNotification();
