@@ -316,7 +316,9 @@ class BotFSMState(Base):
     storage_key: Mapped[str] = mapped_column(String(512), primary_key=True)
     state: Mapped[str | None] = mapped_column(String(128), nullable=True)
     data: Mapped[dict] = mapped_column(json_type, nullable=False, default=dict)
-    inbox_trusted_after_start: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    inbox_trusted_after_start: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false",
+    )
 
 
 class BotSensitiveMessage(Base):
