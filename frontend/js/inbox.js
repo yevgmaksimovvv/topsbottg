@@ -53,6 +53,7 @@ const inbox = {
   mediaRequests: new Map(),
   mediaErrors: new Map(),
   mediaObserver: null,
+  viewerPendingId: null,
 };
 let bound = false;
 
@@ -94,6 +95,53 @@ const fileSize = (size) => size == null ? "" :
 const fileKind = (file) => PHOTO_TYPES.has(file.type) ? "photo" :
   file.type === "audio/ogg" ? "voice" : "document";
 
+function touchMedia(id) {
+  const url = inbox.mediaUrls.get(id);
+  if (!url) return;
+  inbox.mediaUrls.delete(id);
+  inbox.mediaUrls.set(id, url);
+}
+
+function mediaNearViewport(id) {
+  const history = el("inbox-history");
+  const message = el("inbox-messages")?.querySelector('[data-inbox-message="' + id + '"]');
+  if (!history || !message || el("inbox-history-screen")?.hidden) return false;
+  const viewport = history.getBoundingClientRect();
+  const box = message.getBoundingClientRect();
+  return box.bottom >= viewport.top - 180 && box.top <= viewport.bottom + 180;
+}
+
+function mediaPinned(id) {
+  const viewer = el("inbox-photo-viewer");
+  if ((viewer?.open && Number(viewer.dataset.mediaId) === id) ||
+      inbox.viewerPendingId === id) return true;
+  const audio = el("inbox-messages")?.querySelector('[data-inbox-audio-player="' + id + '"]');
+  return Boolean(audio && !audio.paused && !audio.ended) || mediaNearViewport(id);
+}
+
+function trimMediaCache() {
+  let bytes = [...inbox.mediaSizes.values()].reduce((sum, size) => sum + size, 0);
+  let changed = false;
+  for (const [id, url] of inbox.mediaUrls) {
+    if (bytes <= MAX_MEDIA_CACHE_BYTES && inbox.mediaUrls.size <= MAX_MEDIA_CACHE_ITEMS) break;
+    if (mediaPinned(id)) continue;
+    URL.revokeObjectURL(url);
+    inbox.mediaUrls.delete(id);
+    bytes -= inbox.mediaSizes.get(id) || 0;
+    inbox.mediaSizes.delete(id);
+    for (const photo of el("inbox-messages")?.querySelectorAll('[data-inbox-photo="' + id + '"]') || [])
+      photo.removeAttribute("src");
+    const audio = el("inbox-messages")?.querySelector('[data-inbox-audio-player="' + id + '"]');
+    if (audio) {
+      const attachment = audio.closest(".inbox-attachment");
+      const message = inbox.messages.find((item) => Number(item.id) === id);
+      if (attachment && message) attachment.outerHTML = mediaMarkup(message);
+    }
+    changed = true;
+  }
+  if (changed) syncMedia();
+}
+
 function clearMedia() {
   inbox.mediaObserver?.disconnect();
   inbox.mediaObserver = null;
@@ -103,8 +151,10 @@ function clearMedia() {
   inbox.mediaUrls.clear();
   inbox.mediaSizes.clear();
   inbox.mediaErrors.clear();
+  inbox.viewerPendingId = null;
   const viewer = el("inbox-photo-viewer");
   if (viewer?.open) viewer.close();
+  if (viewer) delete viewer.dataset.mediaId;
   const image = el("inbox-photo-full");
   if (image) image.removeAttribute("src");
 }
@@ -434,8 +484,12 @@ function syncMedia() {
   for (const photo of photos) {
     const id = Number(photo.dataset.inboxPhoto);
     const url = inbox.mediaUrls.get(id);
-    if (url) photo.src = url;
-    else if (!inbox.mediaErrors.has(id) && !inbox.mediaRequests.has(id)) pending.push(photo);
+    if (url) {
+      if (photo.getAttribute("src") !== url) photo.src = url;
+      if (mediaNearViewport(id)) touchMedia(id);
+    } else if (!inbox.mediaErrors.has(id) && !inbox.mediaRequests.has(id)) {
+      pending.push(photo);
+    }
   }
   if (pending.length && typeof IntersectionObserver !== "undefined") {
     const observer = new IntersectionObserver((entries) => {
@@ -456,7 +510,10 @@ async function loadMedia(message, { download = false } = {}) {
   const id = Number(message.id);
   if (!Number.isSafeInteger(id) || id <= 0 || !message.attachment?.available ||
       !inbox.client || inbox.mediaRequests.has(id)) return;
-  if (!download && inbox.mediaUrls.has(id)) return inbox.mediaUrls.get(id);
+  if (!download && inbox.mediaUrls.has(id)) {
+    touchMedia(id);
+    return inbox.mediaUrls.get(id);
+  }
   const conversationId = inbox.current?.id;
   const client = inbox.client;
   const controller = new AbortController();
@@ -479,9 +536,11 @@ async function loadMedia(message, { download = false } = {}) {
       window.setTimeout(() => URL.revokeObjectURL(url), 1500);
     } else {
       inbox.mediaUrls.set(id, url);
+      inbox.mediaSizes.set(id, blob.size);
     }
     inbox.mediaErrors.delete(id);
     renderHistory({ preserveScroll: true });
+    trimMediaCache();
     return url;
   } catch (error) {
     if (controller.signal.aborted || isAbort(error)) return;
@@ -1124,10 +1183,15 @@ export function bindInbox() {
         else if (voice) void loadMedia(message);
         else if (reload) void loadMedia(message, { download: message.kind === "document" });
         else if (photo) {
+          inbox.viewerPendingId = messageId;
           const show = (url) => {
+            inbox.viewerPendingId = null;
             if (!url || inbox.current?.id !== message.conversation_id || !isOpen()) return;
+            const viewer = el("inbox-photo-viewer");
+            viewer.dataset.mediaId = String(messageId);
+            touchMedia(messageId);
             el("inbox-photo-full").src = url;
-            el("inbox-photo-viewer").showModal();
+            viewer.showModal();
           };
           const url = inbox.mediaUrls.get(messageId);
           if (url) show(url);
@@ -1157,6 +1221,7 @@ export function bindInbox() {
     if (list.scrollTop < 48 && inbox.historyCursor && !inbox.historyLoading)
       void loadMessages({ older: true });
     void markRead();
+    trimMediaCache();
   }, { passive: true });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") void markRead();
@@ -1170,6 +1235,10 @@ export function bindInbox() {
   });
   el("inbox-text")?.addEventListener("input", resizeComposer);
   el("inbox-photo-close")?.addEventListener("click", () => el("inbox-photo-viewer")?.close());
+  el("inbox-photo-viewer")?.addEventListener("close", (event) => {
+    delete event.target.dataset.mediaId;
+    trimMediaCache();
+  });
   el("inbox-photo-viewer")?.addEventListener("click", (event) => {
     if (event.target.id === "inbox-photo-viewer") event.target.close();
   });
