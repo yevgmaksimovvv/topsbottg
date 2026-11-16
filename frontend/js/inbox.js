@@ -108,7 +108,7 @@ function mediaNearViewport(id) {
   if (!history || !message || el("inbox-history-screen")?.hidden) return false;
   const viewport = history.getBoundingClientRect();
   const box = message.getBoundingClientRect();
-  return box.bottom >= viewport.top - 180 && box.top <= viewport.bottom + 180;
+  return box.bottom >= viewport.top && box.top <= viewport.bottom;
 }
 
 function mediaPinned(id) {
@@ -500,7 +500,7 @@ function syncMedia() {
         const message = inbox.messages.find((item) => Number(item.id) === id);
         if (message) void loadMedia(message);
       }
-    }, { root: el("inbox-history"), rootMargin: "180px" });
+    }, { root: el("inbox-history"), rootMargin: "0px" });
     inbox.mediaObserver = observer;
     for (const photo of pending) observer.observe(photo);
   }
@@ -667,6 +667,7 @@ function renderHistory({ preserveScroll = false } = {}) {
       : '<span class="inbox-message-reply">' + text(quoteText) + '</span>';
     return (isUnread ? '<div class="inbox-unread-divider">Непрочитанные сообщения</div>' : "") +
       '<article class="inbox-message ' + (outgoing ? "is-outgoing" : "is-incoming") +
+      (message.kind === "photo" && message.attachment?.available ? " has-photo" : "") +
       (delivery === "failed" ? ' has-failure' : "") + '" data-inbox-message="' + text(message.id) +
       '" tabindex="0">' +
       (showAuthor ? '<span class="inbox-message-author" title="Telegram ID: ' + text(authorId) +
