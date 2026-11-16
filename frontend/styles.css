@@ -1415,6 +1415,9 @@ textarea::placeholder {
   background: color-mix(in srgb, var(--accent) 17%, var(--surface));
   border-radius: 13px 13px 4px 13px;
 }
+.inbox-message.has-photo {
+  width: min(280px, 82%);
+}
 .inbox-message-author {
   align-self: flex-start;
   color: var(--accent);
