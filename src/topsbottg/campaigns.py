@@ -6,6 +6,7 @@ import base64
 import binascii
 import hashlib
 import json
+from collections.abc import Sequence
 from datetime import UTC
 
 from sqlalchemy import func, or_, select
@@ -173,28 +174,44 @@ def _campaign_status(counts: dict[str, int], total: int) -> str:
     return "partially_failed"
 
 
-async def campaign_summary(session: AsyncSession, campaign: MessageCampaign) -> CampaignOut:
-    # Delivery statuses are read from the actual outbox, never from a stale cached total.
-    counts = {"queued": 0, "sending": 0, "sent": 0, "failed": 0}
+async def campaign_summaries(
+    session: AsyncSession, campaigns: Sequence[MessageCampaign],
+) -> list[CampaignOut]:
+    if not campaigns:
+        return []
+    # Read actual delivery states for the whole page without hydrating recipients.
+    counts_by_id = {
+        campaign.id: {"queued": 0, "sending": 0, "sent": 0, "failed": 0}
+        for campaign in campaigns
+    }
     result = await session.execute(
-        select(ChatMessageOutbox.status, func.count(ChatMessageOutbox.id))
-        .join(CampaignRecipient, CampaignRecipient.outbox_id == ChatMessageOutbox.id)
-        .where(CampaignRecipient.campaign_id == campaign.id)
-        .group_by(ChatMessageOutbox.status)
+        select(CampaignRecipient.campaign_id, ChatMessageOutbox.status, func.count(ChatMessageOutbox.id))
+        .join(ChatMessageOutbox, ChatMessageOutbox.id == CampaignRecipient.outbox_id)
+        .where(CampaignRecipient.campaign_id.in_(counts_by_id))
+        .group_by(CampaignRecipient.campaign_id, ChatMessageOutbox.status)
     )
-    for status, count in result.all():
-        counts[status] = int(count)
-    created_at = campaign.created_at
-    if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=UTC)
-    return CampaignOut(
-        id=campaign.id, recipient_count=campaign.recipient_count,
-        status=_campaign_status(counts, campaign.recipient_count),
-        created_at=created_at,
-        admin_telegram_id=campaign.admin_telegram_id,
-        queued_count=counts["queued"], sending_count=counts["sending"],
-        sent_count=counts["sent"], failed_count=counts["failed"],
-    )
+    for campaign_id, status, count in result.all():
+        counts_by_id[campaign_id][status] = int(count)
+
+    summaries = []
+    for campaign in campaigns:
+        counts = counts_by_id[campaign.id]
+        created_at = campaign.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=UTC)
+        summaries.append(CampaignOut(
+            id=campaign.id, recipient_count=campaign.recipient_count,
+            status=_campaign_status(counts, campaign.recipient_count),
+            created_at=created_at,
+            admin_telegram_id=campaign.admin_telegram_id,
+            queued_count=counts["queued"], sending_count=counts["sending"],
+            sent_count=counts["sent"], failed_count=counts["failed"],
+        ))
+    return summaries
+
+
+async def campaign_summary(session: AsyncSession, campaign: MessageCampaign) -> CampaignOut:
+    return (await campaign_summaries(session, [campaign]))[0]
 
 
 async def campaign_detail(session: AsyncSession, campaign: MessageCampaign) -> CampaignDetailOut:

@@ -230,7 +230,7 @@ class MessageCampaign(Base, TimestampMixin):
     recipient_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
     recipients: Mapped[list[CampaignRecipient]] = relationship(
-        back_populates="campaign", lazy="selectin",
+        back_populates="campaign", lazy="raise",
     )
 
 

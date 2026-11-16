@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from topsbottg.campaigns import (
     campaign_detail,
+    campaign_summaries,
     campaign_summary,
     create_campaign,
     decode_campaign_cursor,
@@ -88,7 +89,7 @@ def register_campaign_routes(
             query = query.where(MessageCampaign.id < before)
         campaigns = (await session.scalars(query)).all()
         selected = campaigns[:limit]
-        items = [await campaign_summary(session, item) for item in selected]
+        items = await campaign_summaries(session, selected)
         next_cursor = (
             encode_campaign_cursor(selected[-1].id) if len(campaigns) > limit else None
         )
