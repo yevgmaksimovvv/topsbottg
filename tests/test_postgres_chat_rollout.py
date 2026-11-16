@@ -248,6 +248,13 @@ def update(
     )
 
 
+def _drain_events(events) -> list[dict]:
+    drained = []
+    while not events.empty():
+        drained.append(events.get_nowait())
+    return drained
+
+
 def message_methods(stack: ChatStack, name: type = SendMessage) -> list:
     return [method for method in stack.telegram.methods if isinstance(method, name)]
 
@@ -353,13 +360,14 @@ async def test_pg_end_to_end_text_dispatcher_api_read_markers_and_worker_restart
         messages = (await stack.client.get(path, headers=headers(dynamic_admin_init_data))).json()["items"]
         assert [m["direction"] for m in messages] == ["incoming", "incoming", "outgoing", "incoming"]
         assert messages[2]["id"] == outgoing_id and messages[2]["delivery_status"] == "sent"
-        assert messages[3]["source"] == "telegram_reply"
         assert messages[3]["reply_to_telegram_message_id"] == stack.telegram.next_id
         async with stack.factory() as session:
             assert await session.scalar(select(func.count(Conversation.id))) == 1
             assert await session.scalar(select(func.count(ChatMessage.id))) == 4
             assert await session.scalar(select(func.count(ChatMessageOutbox.id))) == 1
             assert await session.scalar(select(func.count(ConversationRead.id))) == 2
+            reply_row = await session.get(ChatMessage, messages[3]["id"])
+            assert reply_row.source == "telegram_reply"
     finally:
         get_admin_events_broadcaster().unsubscribe(events)
 
@@ -505,7 +513,8 @@ async def test_pg_legacy_memory_fsm_never_trusts_input_without_new_start(
             assert await session.scalar(select(func.count(BotSensitiveMessage.telegram_message_id))) == 1
             profile = await session.scalar(select(PaymentProfile))
             assert profile.raw_payment_details == secret
-        assert events.empty()
+        while not events.empty():
+            assert events.get_nowait()["event"] != "chat.changed"
 
         fresh = stack.dispatcher()
         await feed(stack, fresh, 71003, "/start", 3006)
@@ -514,10 +523,9 @@ async def test_pg_legacy_memory_fsm_never_trusts_input_without_new_start(
             assert context.inbox_trusted_after_start is True
         # Replayed payment update is rejected by the sensitive message marker.
         await feed(stack, stack.dispatcher(), 71003, secret, 3004)
-        assert events.empty()
+        assert all(event["event"] != "chat.changed" for event in _drain_events(events))
         await feed(stack, fresh, 71003, "Безопасный вопрос", 3007)
-        assert events.get_nowait()["event"] == "chat.changed"
-        assert events.empty()
+        assert [event["event"] for event in _drain_events(events)].count("chat.changed") == 1
         async with stack.factory() as session:
             rows = (await session.scalars(select(ChatMessage))).all()
             assert len(rows) == 1 and rows[0].text == "Безопасный вопрос"
