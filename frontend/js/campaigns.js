@@ -348,6 +348,7 @@ function renderHistory() {
     '<time>' + html(new Date(item.created_at).toLocaleString("ru-RU")) + "</time></span>" +
     '<span class="campaign-history-state">' + html(statuses[item.status] || item.status) +
     " · " + item.recipient_count + " адресатов</span>" +
+    '<span class="campaign-history-text">' + html(item.text || "") + "</span>" +
     '<small>' + html(campaignCounts(item)) + "</small></button>").join("");
   if (!campaign.history.length && !campaign.historyBusy)
     node.innerHTML = '<p class="campaign-empty">Кампаний пока нет.</p>';
