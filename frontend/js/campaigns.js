@@ -1,5 +1,5 @@
 import { SEARCH_DEBOUNCE_MS } from "./constants.js";
-import { state } from "./store.js";
+import { setToast, state } from "./store.js";
 import { escapeHtml } from "./utils.js";
 
 const el = (id) => document.getElementById(id);
@@ -106,6 +106,10 @@ function updateSubmit() {
   if (preview) preview.disabled = campaign.previewBusy || campaign.sending;
   if (confirm) confirm.disabled = campaign.sending || !campaign.preview ||
     campaign.preview.version !== campaign.version || campaign.preview.recipient_count === 0;
+  for (const field of el("inbox-campaign-compose-screen")?.querySelectorAll(
+    'input, select, textarea') || []) field.disabled = campaign.sending;
+  if (el("campaign-more-users")) el("campaign-more-users").disabled =
+    campaign.sending || campaign.userBusy;
   const count = campaign.userIds.size;
   const groups = campaign.groupIds.size;
   message("campaign-selection", "Выбрано вручную: " + count + " · Групп: " + groups +
@@ -312,8 +316,10 @@ async function confirmCampaign() {
   updateSubmit();
   try {
     const created = await campaign.client.campaignCreate(submission);
-    if (campaign.screen !== "compose") return;
-    if (generation !== campaign.version) return;
+    if (generation !== campaign.version) {
+      setToast("Кампания #" + created.id + " создана.", "success");
+      return;
+    }
     campaign.userIds.clear();
     campaign.groupIds.clear();
     campaign.text = "";
@@ -323,11 +329,19 @@ async function confirmCampaign() {
     message("campaign-send-status", "Кампания #" + created.id + " создана. Адресатов: " +
       created.recipient_count + ".");
     el("campaign-text").value = "";
-    openCampaignHistory(campaign.client, campaign.onAuthError);
-    message("campaign-history-status", "Кампания #" + created.id +
-      " поставлена в очередь для " + created.recipient_count + " получателей.");
+    if (campaign.screen === "compose") {
+      openCampaignHistory(campaign.client, campaign.onAuthError);
+      message("campaign-history-status", "Кампания #" + created.id +
+        " поставлена в очередь для " + created.recipient_count + " получателей.");
+    } else {
+      setToast("Кампания #" + created.id + " создана для " +
+        created.recipient_count + " адресатов.", "success");
+    }
   } catch (error) {
-    if (generation === campaign.version) failure(error, "campaign-compose-error");
+    if (generation === campaign.version) {
+      if (!failure(error, "campaign-compose-error") && campaign.screen !== "compose")
+        setToast("Не удалось подтвердить кампанию. Выбор и ключ повтора сохранены.", "warning");
+    }
   } finally {
     campaign.sending = false;
     updateSubmit();
@@ -477,11 +491,15 @@ export function bindCampaignControls() {
   });
   el("campaign-user-search")?.addEventListener("input", (event) => {
     campaign.search = event.target.value;
+    ++campaign.userGeneration;
+    campaign.userController?.abort();
     clearTimeout(campaign.searchTimer);
     campaign.searchTimer = window.setTimeout(() => void loadUsers(true), SEARCH_DEBOUNCE_MS);
   });
   el("campaign-user-filter")?.addEventListener("change", (event) => {
     campaign.filterGroup = event.target.value;
+    ++campaign.userGeneration;
+    campaign.userController?.abort();
     clearTimeout(campaign.searchTimer);
     void loadUsers(true);
   });
