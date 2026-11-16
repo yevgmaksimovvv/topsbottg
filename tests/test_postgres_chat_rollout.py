@@ -448,6 +448,21 @@ async def test_pg_media_history_download_and_upload_idempotency(
             attachment = await session.get(ChatAttachment, mid)
             assert attachment.available and attachment.staging_key is None
             assert attachment.telegram_file_id.startswith("out-")
+    # Active database administrators may send; the same principal loses access after revocation.
+    assert (await stack.client.get(
+        history_path, headers=headers(dynamic_admin_init_data),
+    )).status_code == 200
+    admin_send = await stack.client.post(
+        f"/api/admin/conversations/{cid}/messages",
+        json={"text": "Ответ второго администратора"},
+        headers=headers(dynamic_admin_init_data, "dynamic-admin-reply"),
+    )
+    assert admin_send.status_code == 202
+    await deliver_chat_outbox(stack.bot, stack.factory, stack.settings.chat_staging_dir)
+    assert (await stack.client.get(
+        history_path, headers=headers(admin_init_data),
+    )).json()["items"][-1]["delivery_status"] == "sent"
+
     async with stack.factory() as session:
         grant_row = await session.scalar(select(AdminGrant).where(AdminGrant.telegram_id == 555))
         grant_row.revoked_at = datetime.now(UTC)
@@ -468,6 +483,18 @@ async def test_pg_media_history_download_and_upload_idempotency(
         headers=headers(dynamic_admin_init_data, "revoked-upload"),
     )).status_code == 403
     assert (await stack.client.get(download, headers=headers(admin_init_data))).status_code == 200
+
+    # A new HTTP application instance sees the same committed messages and attachment bytes.
+    reopened = create_app(stack.settings, stack.factory)
+    reopened.state.bot = stack.bot
+    async with AsyncClient(
+        transport=ASGITransport(app=reopened), base_url="http://restarted",
+    ) as fresh_client:
+        saved = await fresh_client.get(history_path, headers=headers(admin_init_data))
+        assert saved.status_code == 200
+        assert len(saved.json()["items"]) == 7
+        again = await fresh_client.get(download, headers=headers(admin_init_data))
+        assert again.status_code == 200 and again.content == PDF
 
 
 @pytest.mark.postgres

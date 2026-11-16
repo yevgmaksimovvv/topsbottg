@@ -1366,11 +1366,20 @@ async def test_payment_details_survive_dispatcher_restart_and_never_enter_chat(
     # The payment update can be replayed after the FSM was cleared or the service restarted.
     another = create_bot_dispatcher(session_factory, settings)
     await another.feed_update(bot, _make_update(bot, 711, secret, 801))
-    await another.feed_update(bot, _make_update(bot, 711, "Обычный вопрос", 802))
+    await another.feed_update(bot, _make_update(bot, 711, "Обычный вопрос до /start", 802))
+    async with session_factory() as session:
+        assert (await session.scalars(select(ChatMessage))).all() == []
+        assert (await session.scalar(select(BotFSMState))).inbox_trusted_after_start is False
+
+    await another.feed_update(bot, _make_update(bot, 711, "/start", 803))
+    restarted = create_bot_dispatcher(session_factory, settings)
+    await restarted.feed_update(bot, _make_update(bot, 711, secret, 801))
+    await restarted.feed_update(bot, _make_update(bot, 711, "Обычный вопрос", 804))
     async with session_factory() as session:
         messages = list((await session.scalars(select(ChatMessage))).all())
         assert len(messages) == 1
         assert messages[0].text == "Обычный вопрос"
+        assert (await session.scalar(select(BotFSMState))).inbox_trusted_after_start is True
     assert secret not in caplog.text
 
 
