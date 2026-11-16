@@ -1139,8 +1139,14 @@ test("Campaign composition, preview and history have mobile and desktop screensh
         assert.equal(await page.evaluate(() =>
           document.documentElement.scrollWidth <= window.innerWidth + 1), true);
         assert.equal(await page.locator("#campaign-confirm-button").isVisible(), true);
+        await page.locator("#campaign-preview").scrollIntoViewIfNeeded();
         await page.screenshot({ path: resolve(screenshots,
           "campaign-preview-" + theme + "-" + width + ".png") });
+        await page.evaluate(() => {
+          document.querySelector("#inbox-campaign-compose-screen .campaign-content").scrollTop = 0;
+        });
+        await page.screenshot({ path: resolve(screenshots,
+          "campaign-selection-" + theme + "-" + width + ".png") });
       }
     }
     await page.locator("#campaign-confirm-button").click();
