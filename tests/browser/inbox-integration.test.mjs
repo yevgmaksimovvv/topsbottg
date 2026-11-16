@@ -43,6 +43,11 @@ async function withBackend(run) {
     seen: new Map([[123, new Map()], [555, new Map()]]),
     granted: new Set([123, 555]),
     sendByKey: new Map(),
+    uploadByKey: new Map(),
+    media: new Map(),
+    mediaFaults: new Map(),
+    revokeOnMediaGet: new Set(),
+    failUpload: false,
     requests: [],
     failSend: false,
     failList: false,
@@ -127,6 +132,7 @@ async function withBackend(run) {
       const identity = req.headers()["x-telegram-init-data"] || "";
       const actor = Number(identity.replace("admin:", ""));
       db.requests.push({ method, path, query: url.search, actor,
+        contentType: req.headers()["content-type"] || "",
         key: req.headers()["idempotency-key"] || null });
       if (path === "/api/admin/events") return json(route, { detail: "SSE mocked separately" }, 501);
       if (!db.granted.has(actor) && path !== "/api/admin/me") return json(route, { detail: "admin only" }, 403);
@@ -136,6 +142,26 @@ async function withBackend(run) {
           : json(route, { detail: "admin only" }, 403);
       }
       if (path === "/api/admin/events-token") return json(route, { expires_in: 60 });
+      const mediaMatch = /^\/api\/admin\/chat-messages\/(\d+)\/attachment$/.exec(path);
+      if (mediaMatch && method === "GET") {
+        if (db.revokeOnMediaGet.delete(actor)) {
+          db.granted.delete(actor);
+          return json(route, { detail: "admin only" }, 403);
+        }
+        const id = Number(mediaMatch[1]);
+        const fault = db.mediaFaults.get(id);
+        if (fault) return json(route, { detail: fault === 502 ? "attachment unavailable" :
+          fault === 415 ? "unsupported attachment type" : "attachment too large" }, fault);
+        const blob = db.media.get(id);
+        if (!blob) return json(route, { detail: "not found" }, 404);
+        return route.fulfill({
+          status: 200,
+          headers: { "Content-Type": blob.type || "application/octet-stream",
+            "Content-Disposition": "attachment; filename*=UTF-8''file",
+            "Cache-Control": "private, no-store" },
+          body: blob.content,
+        });
+      }
       if (path === "/api/admin/users") {
         const search = (url.searchParams.get("search") || "").toLowerCase();
         const group = url.searchParams.get("study_group_id");
@@ -183,7 +209,7 @@ async function withBackend(run) {
         if (!conv) { conv = { id: db.nextConversationId++, user_id }; db.conversations.push(conv); }
         return json(route, { conversation_id: conv.id });
       }
-      const match = /^\/api\/admin\/conversations\/(\d+)\/(messages|read)$/.exec(path);
+      const match = /^\/api\/admin\/conversations\/(\d+)\/(messages|read|attachments)$/.exec(path);
       if (match) {
         const cid = Number(match[1]), action = match[2];
         if (!db.conversations.some((conv) => conv.id === cid)) return json(route, { detail: "not found" }, 404);
@@ -195,6 +221,45 @@ async function withBackend(run) {
           const page = all.slice(-limit);
           return json(route, { items: page,
             next_cursor: all.length > page.length ? String(page[0].id) : null });
+        }
+        if (action === "attachments" && method === "POST") {
+          const rawType = req.headers()["content-type"] || "";
+          if (!/^multipart\/form-data;\s*boundary=/.test(rawType))
+            return json(route, { detail: "multipart/form-data required" }, 415);
+          const raw = req.postDataBuffer().toString("utf8");
+          const field = (name) => {
+            const found = new RegExp('name="' + name + '"\\r\\n\\r\\n([^\\r]*)\\r\\n').exec(raw);
+            return found?.[1] ?? null;
+          };
+          const kind = field("kind");
+          const caption = field("caption") || "";
+          const reply = field("reply_to_message_id");
+          const filename = /name="file"; filename="([^"]+)"/.exec(raw)?.[1];
+          if (!filename || !kind) return json(route, { detail: "file and kind required" }, 422);
+          const key = req.headers()["idempotency-key"];
+          const existing = db.uploadByKey.get(key);
+          if (existing && (existing.caption !== caption || existing.kind !== kind ||
+            existing.filename !== filename || existing.reply !== reply))
+            return json(route, { detail: "key conflict" }, 409);
+          const fault = db.uploadFault || null;
+          if (fault) return json(route, { detail: fault === 413 ? "file_too_large" :
+            fault === 415 ? "file_signature_mismatch" : "telegram temporarily unavailable" }, fault);
+          const message = existing?.message || {
+            id: db.nextMessageId++, conversation_id: cid, direction: "outgoing",
+            kind, text: null, caption, created_at: "2026-11-15T13:01:00Z",
+            author_admin_telegram_id: actor, telegram_message_id: null,
+            reply_to_telegram_message_id: null, delivery_status: "queued",
+            delivery_error_code: null,
+            attachment: { kind, filename, size: req.postDataBuffer().length,
+              mime_type: kind === "photo" ? "image/jpeg" : kind === "voice" ?
+                "audio/ogg" : "application/pdf", available: false },
+          };
+          if (!existing) {
+            db.uploadByKey.set(key, { kind, caption, reply, filename, message, raw });
+            db.messages.push(message);
+          }
+          if (db.failUpload) { db.failUpload = false; return route.abort("failed"); }
+          return json(route, { message }, 202);
         }
         if (action === "messages" && method === "POST") {
           const body = JSON.parse(req.postData());
@@ -523,6 +588,307 @@ test("Upward scrolling loads older messages without jumping to the newest", asyn
     await page.locator("#inbox-history [data-inbox-message='1']").waitFor();
     assert.equal(await page.locator("#inbox-history .is-incoming").count(), 130);
     assert.equal(await page.locator("#inbox-older").isVisible(), false);
+    assert.deepEqual(errors, []);
+  });
+});
+
+
+test("Authorized photo, document and voice stay in history after reload, faults and revocation", async () => {
+  await withBackend(async ({ db, createPage }) => {
+    const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL1swAAAABJRU5ErkJggg==", "base64");
+    const mediaMessage = (id, kind, caption, attachment, reply = null) => ({
+      id, conversation_id: 11, direction: "incoming", kind, text: null, caption,
+      created_at: "2026-11-15T13:00:00Z", author_admin_telegram_id: null,
+      telegram_message_id: id + 100, reply_to_telegram_message_id: reply,
+      delivery_status: null, delivery_error_code: null, attachment: { kind, ...attachment, available: true },
+    });
+    db.messages.push(
+      mediaMessage(203, "photo", "Фотография с подписью",
+        { filename: null, size: image.length, width: 1, height: 1, mime_type: "image/jpeg" }, 301),
+      mediaMessage(204, "document", "Документ в истории",
+        { filename: "план.pdf", size: 26, mime_type: "application/pdf" }),
+      mediaMessage(205, "voice", "Слышу сообщение",
+        { filename: null, size: 25, mime_type: "audio/ogg", duration: 8 }),
+    );
+    db.media.set(203, { type: "image/jpeg", content: image });
+    db.media.set(204, { type: "application/octet-stream", content: Buffer.from("%PDF-1.7\nTest page\n%%EOF\n") });
+    db.media.set(205, { type: "audio/ogg", content: Buffer.from("T2dnUwACAAAAAAAAAAB8rLP3AAAAAFkXjjQBE09wdXNIZWFkAQE4AYC7AAAAAABPZ2dTAAAAAAAAAAAAAHyss/cBAAAAgVS/aQE9T3B1c1RhZ3MMAAAATGF2ZjYxLjcuMTAzAQAAAB0AAABlbmNvZGVyPUxhdmM2MS4xOS4xMDEgbGlib3B1c09nZ1MAAEC/AAAAAAAAfKyz9wIAAAA5vckwEQ8ODg4ODg4ODg4ODg4ODg4OGAL5jsjhz5S+lx76gm6wGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENJPZ2dTAACAfgEAAAAAAHyss/cDAAAAHw7+BxEODg4ODg4ODg4ODg4ODg4ODhgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENJPZ2dTAADAPQIAAAAAAHyss/cEAAAAjhbikhEODg4ODg4ODg4ODg4ODg4ODhgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENJPZ2dTAAR4kQIAAAAAAHyss/cFAAAAucVC7wgODg4ODg4ODhgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENIYAissw4zYC9cFtr0Q0hgCKyzDjNgL1wW2vRDSGAIrLMOM2AvXBba9ENI=", "base64") });
+
+    const { page, errors } = await createPage(123, 390);
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.locator('[data-inbox-message="203"]').waitFor({ state: "attached" });
+    await page.evaluate(() => document.querySelector('[data-inbox-message="203"]')?.scrollIntoView({ block: "center" }));
+    await page.locator('[data-inbox-photo="203"][src^="blob:"]').waitFor();
+    assert.match(await page.locator('[data-inbox-message="203"]').innerText(), /Фотография с подписью/);
+    assert.match(await page.locator('[data-inbox-message="204"]').innerText(), /план.pdf/);
+    assert.match(await page.locator('[data-inbox-message="205"]').innerText(), /Слышу сообщение/);
+    assert.equal(await page.locator('[data-inbox-jump="201"]').count(), 1);
+    await page.locator('[data-inbox-jump="201"]').click();
+    assert.equal(await page.locator('[data-inbox-message="201"]').evaluate(
+      (node) => document.activeElement === node), true);
+    await page.locator('[data-inbox-view-photo="203"]').click();
+    await page.locator("#inbox-photo-viewer").waitFor({ state: "visible" });
+    assert.match(await page.locator("#inbox-photo-full").getAttribute("src"), /^blob:/);
+    await page.locator("#inbox-photo-close").click();
+
+    db.mediaFaults.set(204, 502);
+    await page.locator('[data-inbox-download="204"]').click();
+    await page.locator('[data-inbox-message="204"] .inbox-media-error').waitFor();
+    assert.match(await page.locator('[data-inbox-message="204"]').innerText(), /Документ в истории/);
+    db.mediaFaults.delete(204);
+    const downloaded = page.waitForEvent("download");
+    await page.locator('[data-inbox-reload-media="204"]').click();
+    const result = await downloaded;
+    assert.equal(result.suggestedFilename(), "план.pdf");
+    await page.locator('[data-inbox-message="204"] .inbox-media-error').waitFor({ state: "detached" });
+    await page.locator('[data-inbox-load-voice="205"]').click();
+    await page.locator('[data-inbox-audio-player="205"][src^="blob:"]').waitFor();
+    await page.evaluate(async () => {
+      const audio = document.querySelector('[data-inbox-audio-player="205"]');
+      window.__playingVoice = audio;
+      await audio.play();
+    });
+    await page.waitForFunction(() => window.__playingVoice.currentTime > 0.2);
+    const beforeVoiceRefetch = await page.evaluate(() => window.__playingVoice.currentTime);
+    const refetch = page.waitForResponse((response) =>
+      response.url().includes("/api/admin/conversations/11/messages?") && response.request().method() === "GET");
+    await page.evaluate(() => window.__sse.at(-1).emit("chat.changed", { conversation_id: 11 }));
+    await refetch;
+    await page.waitForTimeout(140);
+    assert.deepEqual(await page.evaluate((previousTime) => ({
+      sameElement: window.__playingVoice === document.querySelector('[data-inbox-audio-player="205"]'),
+      playing: !window.__playingVoice.paused,
+      progressed: window.__playingVoice.currentTime > previousTime,
+    }), beforeVoiceRefetch), { sameElement: true, playing: true, progressed: true });
+
+    for (const theme of ["light", "dark"]) {
+      await page.evaluate((value) => {
+        window.Telegram.WebApp.colorScheme = value;
+        for (const cb of window.Telegram.WebApp.__callbacks.themeChanged || []) cb();
+      }, theme);
+      for (const width of [320, 390, 768, 1280]) {
+        await page.setViewportSize({ width, height: 844 });
+        await page.evaluate(() => {
+          window.Telegram.WebApp.viewportHeight = 844;
+          for (const cb of window.Telegram.WebApp.__callbacks.viewportChanged || []) cb();
+        });
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+        assert.ok(await page.locator("#inbox-send").evaluate((node) => node.getBoundingClientRect().height >= 44));
+        await mkdir(screenshots, { recursive: true });
+        await page.screenshot({ path: resolve(screenshots, "inbox-media-" + theme + "-" + width + ".png") });
+      }
+    }
+    assert.equal(await page.locator('[data-inbox-write]').count(), 0);
+    assert.equal(await page.locator('[data-mobile-view]').count(), 4);
+    assert.equal(await page.evaluate(() => !!document.querySelector('[src*="api.telegram.org"]')), false);
+    assert.equal(await page.locator("#inbox-messages").getAttribute("data-telegram-file-id"), null);
+
+    await page.reload();
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.locator('[data-inbox-message="205"]').waitFor();
+    await page.locator('[data-inbox-message="203"]').waitFor({ state: "attached" });
+    await page.evaluate(() => document.querySelector('[data-inbox-message="203"]')?.scrollIntoView({ block: "center" }));
+    await page.locator('[data-inbox-photo="203"][src^="blob:"]').waitFor();
+    await page.locator('[data-inbox-load-voice="205"]').click();
+    await page.locator('[data-inbox-audio-player="205"][src^="blob:"]').waitFor();
+
+    db.mediaFaults.set(205, 415);
+    await page.locator("#inbox-back").click();
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.locator('[data-inbox-load-voice="205"]').click();
+    await page.locator('[data-inbox-message="205"] .inbox-media-error').waitFor();
+    assert.match(await page.locator('[data-inbox-message="205"]').innerText(), /Формат файла не поддерживается/);
+    db.mediaFaults.delete(205);
+
+    const other = await createPage(555, 390);
+    await other.page.locator("#inbox-open").click();
+    await other.page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await other.page.locator('[data-inbox-download="204"]').waitFor();
+    db.revokeOnMediaGet.add(555);
+    await other.page.locator('[data-inbox-download="204"]').click();
+    await other.page.locator("#inbox-dialog").waitFor({ state: "hidden" });
+    assert.equal(await other.page.locator("#inbox-open").isVisible(), false);
+    assert.ok(db.requests.some((request) => request.path ===
+      "/api/admin/chat-messages/204/attachment" && request.actor === 555));
+    assert.deepEqual(errors, []);
+    assert.deepEqual(other.errors, []);
+  });
+});
+
+
+test("Long photo history evicts offscreen Blob URLs and reloads them on demand", async () => {
+  await withBackend(async ({ db, createPage }) => {
+    const jpeg = Buffer.from(
+      "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA0JCgsKCA0LCgsODg0PEyAVExISEyccHhcgLikxMC4pLSwzOko+MzZGNywtQFdBRkxOUlNSMj5aYVpQYEpRUk//2wBDAQ4ODhMREyYVFSZPNS01T09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0//wAARCAACAAIDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAABAb/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCQAV4T/9k=",
+      "base64",
+    );
+    const payload = Buffer.concat([jpeg, Buffer.alloc(6 * 1024 * 1024)]);
+    const photoIds = Array.from({ length: 36 }, (_, index) => index + 300);
+    for (const id of photoIds) {
+      db.messages.push({
+        ...incoming(id), kind: "photo", text: null, caption: "Фото " + id,
+        attachment: { kind: "photo", filename: "photo.jpg", mime_type: "image/jpeg",
+          size: payload.length, available: true },
+      });
+      db.media.set(id, { type: "image/jpeg", content: payload });
+    }
+    const { page, errors } = await createPage(123, 390);
+    await page.evaluate(() => {
+      const create = URL.createObjectURL.bind(URL);
+      const revoke = URL.revokeObjectURL.bind(URL);
+      window.__blobStats = { alive: new Map(), created: 0, revoked: 0 };
+      URL.createObjectURL = (blob) => {
+        const url = create(blob);
+        window.__blobStats.alive.set(url, blob.size);
+        window.__blobStats.created++;
+        return url;
+      };
+      URL.revokeObjectURL = (url) => {
+        window.__blobStats.alive.delete(url);
+        window.__blobStats.revoked++;
+        return revoke(url);
+      };
+    });
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.locator('[data-inbox-message="335"]').waitFor({ state: "attached" });
+
+    for (const id of photoIds.slice(0, 16)) {
+      await page.evaluate((messageId) => {
+        const row = document.querySelector('[data-inbox-message="' + messageId + '"]');
+        row?.scrollIntoView({ block: "center" });
+      }, id);
+      await page.waitForFunction((messageId) =>
+        !!document.querySelector('[data-inbox-photo="' + messageId + '"][src^="blob:"]'), id);
+    }
+    const result = await page.evaluate(() => {
+      const stats = window.__blobStats;
+      return {
+        count: stats.alive.size,
+        bytes: [...stats.alive.values()].reduce((sum, size) => sum + size, 0),
+        created: stats.created,
+        revoked: stats.revoked,
+      };
+    });
+    assert.ok(result.created >= 16, "Media was loaded as it entered the viewport");
+    assert.ok(result.revoked > 0, "Offscreen photos must be released");
+    assert.ok(result.count <= 8, "Media cache must cap the number of Blob URLs");
+    assert.ok(result.bytes <= 32 * 1024 * 1024,
+      "Media cache must stay within the byte budget: " + JSON.stringify(result));
+
+    const before = db.requests.filter((request) =>
+      request.path === "/api/admin/chat-messages/300/attachment").length;
+    await page.evaluate(() =>
+      document.querySelector('[data-inbox-message="300"]')?.scrollIntoView({ block: "center" }));
+    await page.waitForFunction(() =>
+      !!document.querySelector('[data-inbox-photo="300"][src^="blob:"]'));
+    assert.ok(db.requests.filter((request) =>
+      request.path === "/api/admin/chat-messages/300/attachment").length > before,
+      "Evicted photos must be downloadable again");
+
+    await page.locator('[data-inbox-view-photo="300"]').click();
+    await page.locator("#inbox-photo-viewer").waitFor({ state: "visible" });
+    const viewerUrl = await page.locator("#inbox-photo-full").getAttribute("src");
+    await page.evaluate(() => {
+      const list = document.getElementById("inbox-history");
+      list.scrollTop = list.scrollHeight;
+      list.dispatchEvent(new Event("scroll"));
+    });
+    assert.equal(await page.evaluate((url) => window.__blobStats.alive.has(url), viewerUrl),
+      true, "Open photo viewer must retain its Blob URL");
+    await page.locator("#inbox-photo-close").click();
+    assert.deepEqual(errors, []);
+  });
+});
+
+test("Multipart upload preserves caption, file and key across 202 loss, rejects 413/415", async () => {
+  await withBackend(async ({ db, createPage }) => {
+    const { page, errors } = await createPage(123, 390);
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.locator('[data-inbox-reply="201"]').click();
+    db.failUpload = true;
+    await page.locator("#inbox-file").setInputFiles({
+      name: "report.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7\nTest report\n"),
+    });
+    await page.locator("#inbox-text").fill("Подпись к PDF");
+    await page.locator("#inbox-send").click();
+    await page.locator("#inbox-history").getByText("Ошибка отправки").waitFor();
+    assert.equal(await page.locator("#inbox-file-preview").isVisible(), true);
+    assert.equal(await page.locator("#inbox-text").inputValue(), "Подпись к PDF");
+    assert.equal(db.uploadByKey.size, 1);
+    const [key, stored] = [...db.uploadByKey.entries()][0];
+    assert.equal(stored.kind, "document");
+    assert.equal(stored.caption, "Подпись к PDF");
+    assert.equal(stored.reply, "201");
+    assert.equal(stored.filename, "report.pdf");
+    assert.ok(stored.raw.includes("%PDF-1.7"));
+    assert.ok(db.requests.find((r) => r.path.endsWith("/attachments")).contentType.includes("boundary="));
+
+    await page.locator("#inbox-send").click();
+    await page.locator("#inbox-history").getByText("Подпись к PDF").waitFor();
+    await page.locator("#inbox-file-preview").waitFor({ state: "hidden" });
+    const attempts = db.requests.filter((r) => r.method === "POST" &&
+      r.path === "/api/admin/conversations/11/attachments");
+    assert.equal(attempts.length, 2);
+    assert.equal(attempts[0].key, attempts[1].key);
+    assert.equal(attempts[0].key, key);
+    assert.equal(db.uploadByKey.size, 1);
+    assert.equal(db.messages.filter((message) => message.caption === "Подпись к PDF").length, 1);
+
+    const postsBeforeOversizePhoto = db.requests.filter((request) =>
+      request.method === "POST" && request.path.endsWith("/attachments")).length;
+    await page.locator("#inbox-file").setInputFiles({
+      name: "large-photo.jpg", mimeType: "image/jpeg",
+      buffer: Buffer.alloc(11 * 1024 * 1024),
+    });
+    await page.locator("#inbox-file-status").getByText(/10 МиБ/).waitFor();
+    await page.locator("#inbox-send").click();
+    assert.equal(db.requests.filter((request) =>
+      request.method === "POST" && request.path.endsWith("/attachments")).length,
+    postsBeforeOversizePhoto, "Photo >10 MiB must be rejected before multipart upload");
+    assert.equal(await page.locator("#inbox-file-preview").isVisible(), true);
+
+    await page.locator("#inbox-file").setInputFiles({
+      name: "image.jpg", mimeType: "image/jpeg", buffer: Buffer.from([0xff, 0xd8, 0xff, 0xd9]),
+    });
+    db.uploadFault = 415;
+    await page.locator("#inbox-text").fill("Неправильная фотография");
+    await page.locator("#inbox-send").click();
+    await page.locator("#inbox-compose-status").getByText("file_signature_mismatch").waitFor();
+    assert.equal(await page.locator("#inbox-file-preview").isVisible(), true);
+    assert.equal(await page.locator("#inbox-text").inputValue(), "Неправильная фотография");
+    db.uploadFault = null;
+    await page.locator("#inbox-send").click();
+    await page.locator("#inbox-file-preview").waitFor({ state: "hidden" });
+    const photo = [...db.uploadByKey.values()].find((entry) => entry.kind === "photo");
+    assert.ok(photo && photo.caption === "Неправильная фотография");
+
+    await page.locator("#inbox-file").setInputFiles({
+      name: "voice.ogg", mimeType: "audio/ogg", buffer: Buffer.from("OggS..OpusHead"),
+    });
+    db.uploadFault = 413;
+    await page.locator("#inbox-send").click();
+    await page.locator("#inbox-compose-status").getByText("file_too_large").waitFor();
+    assert.equal(await page.locator("#inbox-file-preview").isVisible(), true);
+    db.uploadFault = null;
+    await page.locator("#inbox-send").click();
+    await page.locator("#inbox-file-preview").waitFor({ state: "hidden" });
+    assert.ok([...db.uploadByKey.values()].some((entry) => entry.kind === "voice"));
+
+    await page.locator("#inbox-file").setInputFiles({
+      name: "oversize.pdf", mimeType: "application/pdf",
+      buffer: Buffer.alloc(20 * 1024 * 1024 + 1),
+    });
+    await page.locator("#inbox-send").click();
+    await page.locator("#inbox-file-status").getByText(/превышает 20 МиБ/).waitFor();
+    assert.equal(db.uploadByKey.size, 3);
+    await page.locator("#inbox-remove-file").click();
+    assert.equal(await page.locator("#inbox-file-preview").isVisible(), false);
+    await mkdir(screenshots, { recursive: true });
+    await page.screenshot({ path: resolve(screenshots, "inbox-media-upload-mobile.png") });
     assert.deepEqual(errors, []);
   });
 });

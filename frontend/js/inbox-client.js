@@ -39,6 +39,23 @@ export function createInboxApiClient(request) {
         body: JSON.stringify(payload),
       });
     },
+    upload(conversation_id, { file, kind, caption = "", reply_to_message_id = null, idempotency_key }) {
+      const form = new FormData();
+      form.append("file", file, file.name);
+      form.append("kind", kind);
+      if (caption) form.append("caption", caption);
+      if (reply_to_message_id != null) form.append("reply_to_message_id", String(reply_to_message_id));
+      return request(BASE + "/" + encodeURIComponent(conversation_id) + "/attachments", {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotency_key },
+        body: form,
+      });
+    },
+    download(message_id, { signal } = {}) {
+      return request("/admin/chat-messages/" + encodeURIComponent(message_id) + "/attachment", {
+        signal, responseType: "blob",
+      });
+    },
     read(conversation_id, last_read_message_id, { signal } = {}) {
       return request(BASE + "/" + encodeURIComponent(conversation_id) + "/read", {
         method: "POST",

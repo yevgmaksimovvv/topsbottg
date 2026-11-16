@@ -46,6 +46,14 @@ const inbox = {
   backHandler: null,
   sending: false,
   openingUser: false,
+  draftFile: null,
+  draftPending: null,
+  mediaUrls: new Map(),
+  mediaSizes: new Map(),
+  mediaRequests: new Map(),
+  mediaErrors: new Map(),
+  mediaObserver: null,
+  viewerPendingId: null,
 };
 let bound = false;
 
@@ -68,6 +76,88 @@ const statusText = {
   failed: "Ошибка отправки",
 };
 const key = () => window.crypto?.randomUUID?.() || String(Date.now()) + "-" + Math.random().toString(36).slice(2);
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
+const MAX_MEDIA_CACHE_BYTES = 32 * 1024 * 1024;
+const MAX_MEDIA_CACHE_ITEMS = 8;
+const PHOTO_TYPES = new Set(["image/jpeg", "image/png"]);
+const FILE_TYPES = new Set([
+  "application/pdf", "application/zip", "text/plain",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ...PHOTO_TYPES, "audio/ogg",
+]);
+const fileSize = (size) => size == null ? "" :
+  (size < 1024 ? size + " Б" :
+    size < 1024 * 1024 ? (size / 1024).toFixed(1) + " КБ" :
+      (size / (1024 * 1024)).toFixed(1) + " МБ");
+const fileKind = (file) => PHOTO_TYPES.has(file.type) ? "photo" :
+  file.type === "audio/ogg" ? "voice" : "document";
+
+function touchMedia(id) {
+  const url = inbox.mediaUrls.get(id);
+  if (!url) return;
+  inbox.mediaUrls.delete(id);
+  inbox.mediaUrls.set(id, url);
+}
+
+function mediaNearViewport(id) {
+  const history = el("inbox-history");
+  const message = el("inbox-messages")?.querySelector('[data-inbox-message="' + id + '"]');
+  if (!history || !message || el("inbox-history-screen")?.hidden) return false;
+  const viewport = history.getBoundingClientRect();
+  const box = message.getBoundingClientRect();
+  return box.bottom >= viewport.top && box.top <= viewport.bottom;
+}
+
+function mediaPinned(id) {
+  const viewer = el("inbox-photo-viewer");
+  if ((viewer?.open && Number(viewer.dataset.mediaId) === id) ||
+      inbox.viewerPendingId === id) return true;
+  const audio = el("inbox-messages")?.querySelector('[data-inbox-audio-player="' + id + '"]');
+  return Boolean(audio && !audio.paused && !audio.ended) || mediaNearViewport(id);
+}
+
+function trimMediaCache() {
+  let bytes = [...inbox.mediaSizes.values()].reduce((sum, size) => sum + size, 0);
+  let changed = false;
+  for (const [id, url] of inbox.mediaUrls) {
+    if (bytes <= MAX_MEDIA_CACHE_BYTES && inbox.mediaUrls.size <= MAX_MEDIA_CACHE_ITEMS) break;
+    if (mediaPinned(id)) continue;
+    URL.revokeObjectURL(url);
+    inbox.mediaUrls.delete(id);
+    bytes -= inbox.mediaSizes.get(id) || 0;
+    inbox.mediaSizes.delete(id);
+    for (const photo of el("inbox-messages")?.querySelectorAll('[data-inbox-photo="' + id + '"]') || [])
+      photo.removeAttribute("src");
+    const audio = el("inbox-messages")?.querySelector('[data-inbox-audio-player="' + id + '"]');
+    if (audio) {
+      const attachment = audio.closest(".inbox-attachment");
+      const message = inbox.messages.find((item) => Number(item.id) === id);
+      if (attachment && message) attachment.outerHTML = mediaMarkup(message);
+    }
+    changed = true;
+  }
+  if (changed) syncMedia();
+}
+
+function clearMedia() {
+  inbox.mediaObserver?.disconnect();
+  inbox.mediaObserver = null;
+  for (const controller of inbox.mediaRequests.values()) controller.abort();
+  inbox.mediaRequests.clear();
+  for (const url of inbox.mediaUrls.values()) URL.revokeObjectURL(url);
+  inbox.mediaUrls.clear();
+  inbox.mediaSizes.clear();
+  inbox.mediaErrors.clear();
+  inbox.viewerPendingId = null;
+  const viewer = el("inbox-photo-viewer");
+  if (viewer?.open) viewer.close();
+  if (viewer) delete viewer.dataset.mediaId;
+  const image = el("inbox-photo-full");
+  if (image) image.removeAttribute("src");
+}
 
 export function isInboxEnabled() {
   return Boolean(inbox.client);
@@ -91,6 +181,7 @@ function handleRequestError(error) {
 }
 
 function cancelRequests() {
+  clearMedia();
   for (const prop of ["listController", "summaryController", "historyController", "openController", "readController", "newController"]) {
     inbox[prop]?.abort();
     inbox[prop] = null;
@@ -346,6 +437,195 @@ function messageClock(value) {
     : new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(date);
 }
 
+function mediaMarkup(message) {
+  const attachment = message.attachment;
+  if (!attachment) return "";
+  const id = Number(message.id);
+  const kind = attachment.kind || message.kind;
+  const name = attachment.filename || (kind === "voice" ? "Голосовое сообщение" :
+    kind === "photo" ? "Фотография" : "Документ");
+  const size = fileSize(attachment.size);
+  const meta = size ? " · " + size : "";
+  const unavailable = !attachment.available || !Number.isSafeInteger(id) || id <= 0;
+  const error = inbox.mediaErrors.get(id);
+  let content;
+  if (kind === "photo" && !unavailable) {
+    content = '<button type="button" class="inbox-photo-button" data-inbox-view-photo="' + id +
+      '" aria-label="Открыть фотографию">' +
+      '<img data-inbox-photo="' + id + '" alt="Фотография" />' +
+      '<span class="inbox-photo-placeholder">Фотография' + text(meta) + '</span></button>';
+  } else if (kind === "voice" && !unavailable) {
+    const cached = inbox.mediaUrls.get(id);
+    content = cached
+      ? '<audio controls preload="metadata" data-inbox-audio-player="' + id +
+        '" src="' + text(cached) + '" aria-label="Голосовое сообщение"></audio>'
+      : '<button type="button" class="inbox-media-link" data-inbox-load-voice="' + id +
+        '">▶ Голосовое сообщение' + text(attachment.duration ? " · " + attachment.duration + " с" : "") +
+        text(meta) + '</button>';
+  } else if (!unavailable) {
+    content = '<button type="button" class="inbox-media-link" data-inbox-download="' + id +
+      '">↓ ' + text(name) + text(meta) + '</button>';
+  } else {
+    content = '<span class="inbox-media-unavailable">' + text(name) + text(meta) +
+      (message.delivery_status === "queued" || message.delivery_status === "sending"
+        ? " · Ожидает отправки" : " · Недоступно") + '</span>';
+  }
+  return '<div class="inbox-attachment">' + content +
+    (error ? '<div class="inbox-media-error" role="status">' + text(error) +
+      '<button type="button" data-inbox-reload-media="' + id + '">Повторить</button></div>' : "") +
+    '</div>';
+}
+
+function syncMedia() {
+  inbox.mediaObserver?.disconnect();
+  inbox.mediaObserver = null;
+  const photos = [...(el("inbox-messages")?.querySelectorAll("[data-inbox-photo]") || [])];
+  const pending = [];
+  for (const photo of photos) {
+    const id = Number(photo.dataset.inboxPhoto);
+    const url = inbox.mediaUrls.get(id);
+    if (url) {
+      if (photo.getAttribute("src") !== url) photo.src = url;
+      if (mediaNearViewport(id)) touchMedia(id);
+    } else if (!inbox.mediaErrors.has(id) && !inbox.mediaRequests.has(id)) {
+      pending.push(photo);
+    }
+  }
+  if (pending.length && typeof IntersectionObserver !== "undefined") {
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        observer.unobserve(entry.target);
+        const id = Number(entry.target.dataset.inboxPhoto);
+        const message = inbox.messages.find((item) => Number(item.id) === id);
+        if (message) void loadMedia(message);
+      }
+    }, { root: el("inbox-history"), rootMargin: "0px" });
+    inbox.mediaObserver = observer;
+    for (const photo of pending) observer.observe(photo);
+  }
+}
+
+async function loadMedia(message, { download = false } = {}) {
+  const id = Number(message.id);
+  if (!Number.isSafeInteger(id) || id <= 0 || !message.attachment?.available ||
+      !inbox.client || inbox.mediaRequests.has(id)) return;
+  if (!download && inbox.mediaUrls.has(id)) {
+    touchMedia(id);
+    return inbox.mediaUrls.get(id);
+  }
+  const conversationId = inbox.current?.id;
+  const client = inbox.client;
+  const controller = new AbortController();
+  inbox.mediaRequests.set(id, controller);
+  inbox.mediaErrors.delete(id);
+  try {
+    const blob = await client.download(id, { signal: controller.signal });
+    if (controller.signal.aborted || client !== inbox.client ||
+        inbox.current?.id !== conversationId || !isOpen()) return;
+    if (!(blob instanceof Blob)) throw new Error("Файл недоступен.");
+    const url = URL.createObjectURL(blob);
+    if (download) {
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = (message.attachment.filename || (message.kind === "photo" ? "photo.jpg" :
+        message.kind === "voice" ? "voice.ogg" : "document")).replaceAll("\\", "/").split("/").at(-1);
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+    } else {
+      inbox.mediaUrls.set(id, url);
+      inbox.mediaSizes.set(id, blob.size);
+    }
+    inbox.mediaErrors.delete(id);
+    renderHistory({ preserveScroll: true });
+    trimMediaCache();
+    return url;
+  } catch (error) {
+    if (controller.signal.aborted || isAbort(error)) return;
+    if (handleRequestError(error)) return;
+    if (inbox.current?.id !== conversationId || client !== inbox.client) return;
+    const label = error?.status === 413 ? "Файл превышает допустимый размер." :
+      error?.status === 415 ? "Формат файла не поддерживается." :
+        error?.status === 404 ? "Файл больше недоступен." :
+          error?.message || "Не удалось загрузить файл.";
+    inbox.mediaErrors.set(id, label);
+    renderHistory({ preserveScroll: true });
+  } finally {
+    if (inbox.mediaRequests.get(id) === controller) inbox.mediaRequests.delete(id);
+  }
+}
+
+function renderFilePreview() {
+  const preview = el("inbox-file-preview");
+  if (!preview) return;
+  if (!inbox.draftFile) {
+    preview.hidden = true;
+    preview.replaceChildren();
+    status("inbox-file-status", "");
+    return;
+  }
+  const { file, kind } = inbox.draftFile;
+  const name = document.createElement("span");
+  name.textContent = (kind === "photo" ? "Фото: " : kind === "voice" ? "Голосовое: " : "Файл: ") +
+    file.name + " · " + fileSize(file.size);
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.textContent = "×";
+  remove.setAttribute("aria-label", "Убрать вложение");
+  remove.id = "inbox-remove-file";
+  preview.replaceChildren(name, remove);
+  preview.hidden = false;
+}
+
+function reconcileHistory(list, markup) {
+  const next = document.createElement("div");
+  next.innerHTML = markup;
+  const oldById = new Map([...list.querySelectorAll(":scope > [data-inbox-message]")].map(
+    (node) => [node.dataset.inboxMessage, node]));
+  const prepared = [];
+  for (const proposed of [...next.children]) {
+    const previous = proposed.dataset.inboxMessage
+      ? oldById.get(proposed.dataset.inboxMessage) : null;
+    const oldAudio = previous?.querySelector(".inbox-attachment [data-inbox-audio-player]");
+    const newAudio = proposed.querySelector(".inbox-attachment [data-inbox-audio-player]");
+    let node = proposed;
+    if (oldAudio && newAudio && oldAudio.getAttribute("src") === newAudio.getAttribute("src")) {
+      const oldMedia = previous.querySelector(":scope > .inbox-attachment");
+      const newMedia = proposed.querySelector(":scope > .inbox-attachment");
+      for (const child of [...previous.children]) {
+        if (child !== oldMedia) child.remove();
+      }
+      let afterMedia = false;
+      for (const child of [...proposed.children]) {
+        if (child === newMedia) {
+          afterMedia = true;
+        } else if (afterMedia) {
+          previous.append(child);
+        } else {
+          previous.insertBefore(child, oldMedia);
+        }
+      }
+      previous.className = proposed.className;
+      node = previous;
+    } else if (previous) {
+      const comparable = previous.cloneNode(true);
+      for (const img of comparable.querySelectorAll("[data-inbox-photo]")) img.removeAttribute("src");
+      if (comparable.outerHTML === proposed.outerHTML) node = previous;
+    }
+    prepared.push(node);
+  }
+  const retained = new Set(prepared.filter((node) => node.parentElement === list));
+  for (const existing of [...list.children]) {
+    if (!retained.has(existing)) existing.remove();
+  }
+  prepared.forEach((node, index) => {
+    if (list.children[index] !== node) list.insertBefore(node, list.children[index] || null);
+  });
+}
+
+
 function renderHistory({ preserveScroll = false } = {}) {
   const scroll = el("inbox-history");
   const list = el("inbox-messages");
@@ -364,31 +644,37 @@ function renderHistory({ preserveScroll = false } = {}) {
     }
   }
   const multipleAuthors = inbox.authorLabels.size > 1;
-  list.innerHTML = inbox.messages.map((message, index) => {
+  const markup = inbox.messages.map((message, index) => {
     const outgoing = message.direction === "outgoing";
     const delivery = outgoing && message.delivery_status ? message.delivery_status : null;
-    const body = message.text || message.caption || (message.attachment
-      ? ({ photo: "Фотография", document: "Документ", voice: "Голосовое сообщение" }[message.kind] || "Вложение")
-      : "");
+    const body = message.text || message.caption || "";
     const isUnread = unreadStart === message.id;
     const authorId = message.author_admin_telegram_id;
     const previous = inbox.messages[index - 1];
     const showAuthor = outgoing && multipleAuthors && authorId != null &&
       (!previous || previous.direction !== "outgoing" || previous.author_admin_telegram_id !== authorId);
-    const quoted = message.reply_to_telegram_message_id == null ? null :
-      inbox.messages.find((item) => Number(item.telegram_message_id) === Number(message.reply_to_telegram_message_id));
-    const quote = message.reply_to_telegram_message_id == null ? "" :
-      '<span class="inbox-message-reply">' + text(
-        quoted?.text || quoted?.caption || (quoted?.attachment ? "Вложение" : "Ответ на сообщение")
-      ).slice(0, 110) + '</span>';
+    const replyId = message._replyTo || null;
+    const quoted = replyId != null
+      ? inbox.messages.find((item) => Number(item.id) === Number(replyId))
+      : message.reply_to_telegram_message_id == null ? null
+        : inbox.messages.find((item) => Number(item.telegram_message_id) === Number(message.reply_to_telegram_message_id));
+    const hasReply = replyId != null || message.reply_to_telegram_message_id != null;
+    const quoteText = quoted?.text || quoted?.caption ||
+      (quoted?.attachment ? "Вложение" : "Ответ на сообщение");
+    const quote = !hasReply ? "" : quoted
+      ? '<button type="button" class="inbox-message-reply" data-inbox-jump="' +
+        text(quoted.id) + '">' + text(quoteText.slice(0, 110)) + '</button>'
+      : '<span class="inbox-message-reply">' + text(quoteText) + '</span>';
     return (isUnread ? '<div class="inbox-unread-divider">Непрочитанные сообщения</div>' : "") +
       '<article class="inbox-message ' + (outgoing ? "is-outgoing" : "is-incoming") +
+      (message.kind === "photo" && message.attachment?.available ? " has-photo" : "") +
       (delivery === "failed" ? ' has-failure' : "") + '" data-inbox-message="' + text(message.id) +
       '" tabindex="0">' +
       (showAuthor ? '<span class="inbox-message-author" title="Telegram ID: ' + text(authorId) +
         '">' + text(inbox.authorLabels.get(String(authorId))) + '</span>' : "") +
       quote +
-      '<span class="inbox-message-body">' + text(body) + '</span>' +
+      mediaMarkup(message) +
+      (body ? '<span class="inbox-message-body">' + text(body) + '</span>' : "") +
       '<span class="inbox-message-meta"><time>' + text(messageClock(message.created_at)) + '</time>' +
       (delivery ? '<span class="inbox-delivery' + (delivery === "failed" ? ' inbox-failed' : "") +
         '">' + text(statusText[delivery] || delivery) + '</span>' : "") +
@@ -400,11 +686,13 @@ function renderHistory({ preserveScroll = false } = {}) {
         text(message.id) + '">' + (message._sendRequest ? "Повторить" : "Отправить заново") + '</button>' : "") +
       '</span></article>';
   }).join("");
+  reconcileHistory(list, markup);
   el("inbox-older")?.classList.toggle("hidden", !inbox.historyCursor);
   if (el("inbox-older")) el("inbox-older").disabled = inbox.historyLoading;
   status("inbox-history-status", inbox.historyLoading
     ? "Загружаем сообщения…" : inbox.historyError || (inbox.messages.length ? "" : "Сообщений пока нет."));
   renderReply();
+  syncMedia();
   if (preserveScroll) scroll.scrollTop = oldTop + scroll.scrollHeight - oldHeight;
   else if (atBottom || !oldHeight) scroll.scrollTop = scroll.scrollHeight;
   else scroll.scrollTop = oldTop;
@@ -530,9 +818,14 @@ async function openConversation(conversation) {
   inbox.historyController?.abort();
   inbox.readController?.abort();
   inbox.current = conversation;
+  clearMedia();
   inbox.messages = [];
   inbox.seenIncoming.clear();
   inbox.authorLabels.clear();
+  inbox.draftFile = null;
+  inbox.draftPending = null;
+  el("inbox-file").value = "";
+  renderFilePreview();
   inbox.historyCursor = null;
   inbox.readThrough = null;
   inbox.readingId = null;
@@ -592,10 +885,26 @@ async function deliverPending(pending) {
   pending.delivery_status = "sending";
   renderHistory();
   try {
-    const { message } = await client.send(id, pending._sendRequest);
+    const { message } = pending._sendRequest.file
+      ? await client.upload(id, pending._sendRequest)
+      : await client.send(id, pending._sendRequest);
     if (client !== inbox.client || inbox.current?.id !== id) return;
+    if (pending._sendRequest.file && inbox.draftPending === pending) {
+      const { file, caption } = pending._sendRequest;
+      if (inbox.draftFile?.file === file && el("inbox-text").value === caption) {
+        inbox.draftFile = null;
+        inbox.draftPending = null;
+        el("inbox-file").value = "";
+        el("inbox-text").value = "";
+        inbox.replyTo = null;
+        resizeComposer();
+        renderFilePreview();
+      } else {
+        inbox.draftPending = null;
+      }
+    }
     inbox.messages = inbox.messages.filter((item) => item !== pending && item.id !== message.id);
-    inbox.messages.push(message);
+    inbox.messages.push({ ...message, _replyTo: pending._replyTo });
     inbox.messages.sort((a, b) => Number(a.id) - Number(b.id));
     status("inbox-compose-status", "");
     renderHistory();
@@ -618,6 +927,90 @@ function resizeComposer() {
   if (!field) return;
   field.style.height = "44px";
   field.style.height = Math.min(140, Math.max(44, field.scrollHeight)) + "px";
+}
+
+function normalizedFile(file) {
+  if (file.type) return file;
+  const ext = file.name.split(".").at(-1)?.toLowerCase();
+  const mimes = {
+    jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+    pdf: "application/pdf", zip: "application/zip", txt: "text/plain",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ogg: "audio/ogg", oga: "audio/ogg",
+  };
+  return mimes[ext] ? new File([file], file.name, { type: mimes[ext] }) : file;
+}
+
+function maxUploadBytes(kind) {
+  return kind === "photo" ? MAX_PHOTO_BYTES : MAX_UPLOAD_BYTES;
+}
+
+function chooseAttachment(file) {
+  inbox.draftFile = file ? { file: normalizedFile(file), kind: fileKind(normalizedFile(file)) } : null;
+  inbox.draftPending = null;
+  renderFilePreview();
+  status("inbox-file-status", "");
+  if (!inbox.draftFile) return;
+  if (inbox.draftFile.file.size > maxUploadBytes(inbox.draftFile.kind)) {
+    status("inbox-file-status", inbox.draftFile.kind === "photo"
+      ? "Фото превышает 10 МиБ. Выберите файл меньшего размера."
+      : "Файл превышает 20 МиБ. Выберите файл меньшего размера.");
+  } else if (!FILE_TYPES.has(inbox.draftFile.file.type)) {
+    status("inbox-file-status", "Формат файла не поддерживается.");
+  }
+}
+
+function sendAttachment(caption, replyTo = null) {
+  if (!inbox.client || !inbox.current || !inbox.draftFile || inbox.sending) return;
+  const { file, kind } = inbox.draftFile;
+  if (file.size > maxUploadBytes(kind)) {
+    status("inbox-file-status", kind === "photo"
+      ? "Фото превышает 10 МиБ. Выберите файл меньшего размера."
+      : "Файл превышает 20 МиБ. Выберите файл меньшего размера.");
+    return;
+  }
+  if (!FILE_TYPES.has(file.type)) {
+    status("inbox-file-status", "Формат файла не поддерживается.");
+    return;
+  }
+  if (caption.length > 1024) {
+    status("inbox-file-status", "Подпись не должна превышать 1024 символа.");
+    return;
+  }
+  const old = inbox.draftPending;
+  if (old && old._sendRequest?.file === file &&
+      old._sendRequest.caption === caption &&
+      old._sendRequest.reply_to_message_id === replyTo) {
+    void deliverPending(old);
+    return;
+  }
+  const request = Object.freeze({
+    file, kind, caption, reply_to_message_id: replyTo, idempotency_key: key(),
+  });
+  const pending = {
+    id: "pending-" + request.idempotency_key,
+    conversation_id: inbox.current.id,
+    direction: "outgoing",
+    kind,
+    text: null,
+    caption,
+    created_at: new Date().toISOString(),
+    author_admin_telegram_id: null,
+    telegram_message_id: null,
+    reply_to_telegram_message_id: null,
+    delivery_status: "queued",
+    delivery_error_code: null,
+    attachment: { kind, filename: file.name, size: file.size, mime_type: file.type, available: false },
+    _replyTo: replyTo,
+    _sendRequest: request,
+  };
+  inbox.messages.push(pending);
+  inbox.draftPending = pending;
+  status("inbox-file-status", "");
+  renderHistory();
+  void deliverPending(pending);
 }
 
 function sendMessage(textValue, replyTo = null) {
@@ -693,10 +1086,11 @@ function cleanup() {
     inbox.opener.focus();
   inbox.opener = null;
   inbox.readingId = null;
+  clearMedia();
 }
 
 export function configureInboxClient(client) {
-  if (client !== null && (!client || ["summary", "conversations", "users", "open", "messages", "send", "read"].some((method) => typeof client[method] !== "function")))
+  if (client !== null && (!client || ["summary", "conversations", "users", "open", "messages", "send", "upload", "download", "read"].some((method) => typeof client[method] !== "function")))
     throw new TypeError("Inbox client does not implement contract #24");
   if (isOpen()) closeInbox();
   inbox.client = client;
@@ -706,6 +1100,8 @@ export function configureInboxClient(client) {
     ++inbox.summaryRequest;
     inbox.conversations = [];
     inbox.messages = [];
+    inbox.draftFile = null;
+    inbox.draftPending = null;
     inbox.newUsers = [];
     inbox.seenIncoming.clear();
     inbox.authorLabels.clear();
@@ -775,6 +1171,43 @@ export function bindInbox() {
   el("inbox-history")?.addEventListener("click", (event) => {
     const reply = event.target.closest("[data-inbox-reply]");
     const retry = event.target.closest("[data-inbox-retry]");
+    const jump = event.target.closest("[data-inbox-jump]");
+    if (jump) {
+      const target = el("inbox-messages")?.querySelector(
+        '[data-inbox-message="' + Number(jump.dataset.inboxJump) + '"]');
+      target?.scrollIntoView({ block: "center", behavior: "smooth" });
+      target?.focus({ preventScroll: true });
+    }
+    const photo = event.target.closest("[data-inbox-view-photo]");
+    const voice = event.target.closest("[data-inbox-load-voice]");
+    const download = event.target.closest("[data-inbox-download]");
+    const reload = event.target.closest("[data-inbox-reload-media]");
+    const mediaTarget = photo || voice || download || reload;
+    if (mediaTarget) {
+      const messageId = Number(photo?.dataset.inboxViewPhoto || voice?.dataset.inboxLoadVoice ||
+        download?.dataset.inboxDownload || reload?.dataset.inboxReloadMedia);
+      const message = inbox.messages.find((item) => Number(item.id) === messageId);
+      if (message) {
+        if (download) void loadMedia(message, { download: true });
+        else if (voice) void loadMedia(message);
+        else if (reload) void loadMedia(message, { download: message.kind === "document" });
+        else if (photo) {
+          inbox.viewerPendingId = messageId;
+          const show = (url) => {
+            inbox.viewerPendingId = null;
+            if (!url || inbox.current?.id !== message.conversation_id || !isOpen()) return;
+            const viewer = el("inbox-photo-viewer");
+            viewer.dataset.mediaId = String(messageId);
+            touchMedia(messageId);
+            el("inbox-photo-full").src = url;
+            viewer.showModal();
+          };
+          const url = inbox.mediaUrls.get(messageId);
+          if (url) show(url);
+          else void loadMedia(message).then(show);
+        }
+      }
+    }
     if (reply) {
       const message = inbox.messages.find((item) => String(item.id) === reply.dataset.inboxReply);
       if (message && Number.isInteger(Number(message.id))) {
@@ -787,7 +1220,8 @@ export function bindInbox() {
       const message = inbox.messages.find((item) => String(item.id) === retry.dataset.inboxRetry);
       if (message?.delivery_status === "failed") {
         if (message._sendRequest) void deliverPending(message);
-        else if (message.text) sendMessage(message.text);
+        else if (message.kind === "text" && message.text) sendMessage(message.text);
+        else status("inbox-compose-status", "Для повторной отправки вложения выберите исходный файл.");
       }
     }
   });
@@ -796,6 +1230,7 @@ export function bindInbox() {
     if (list.scrollTop < 48 && inbox.historyCursor && !inbox.historyLoading)
       void loadMessages({ older: true });
     void markRead();
+    trimMediaCache();
   }, { passive: true });
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") void markRead();
@@ -808,10 +1243,29 @@ export function bindInbox() {
     el("inbox-text").focus();
   });
   el("inbox-text")?.addEventListener("input", resizeComposer);
+  el("inbox-photo-close")?.addEventListener("click", () => el("inbox-photo-viewer")?.close());
+  el("inbox-photo-viewer")?.addEventListener("close", (event) => {
+    delete event.target.dataset.mediaId;
+    trimMediaCache();
+  });
+  el("inbox-photo-viewer")?.addEventListener("click", (event) => {
+    if (event.target.id === "inbox-photo-viewer") event.target.close();
+  });
+  el("inbox-file")?.addEventListener("change", (event) => {
+    chooseAttachment(event.target.files?.[0] || null);
+  });
+  el("inbox-file-preview")?.addEventListener("click", (event) => {
+    if (!event.target.closest("#inbox-remove-file")) return;
+    inbox.draftFile = null;
+    inbox.draftPending = null;
+    el("inbox-file").value = "";
+    renderFilePreview();
+  });
   el("inbox-composer")?.addEventListener("submit", (event) => {
     event.preventDefault();
     status("inbox-compose-status", "");
-    void sendMessage(el("inbox-text").value, inbox.replyTo);
+    if (inbox.draftFile) sendAttachment(el("inbox-text").value, inbox.replyTo);
+    else void sendMessage(el("inbox-text").value, inbox.replyTo);
   });
 }
 

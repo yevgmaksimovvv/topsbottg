@@ -119,21 +119,22 @@ async function api(path, options = {}) {
     throw new Error("Нет доступа к данным");
   }
   const controller = new AbortController();
+  const { responseType, timeoutMs, ...fetchOptions } = options;
   const externalSignal = options.signal;
   const abortExternally = () => controller.abort();
   if (externalSignal?.aborted) abortExternally();
   else externalSignal?.addEventListener("abort", abortExternally, { once: true });
   const timeoutId = window.setTimeout(
     () => controller.abort("timeout"),
-    API_TIMEOUT_MS,
+    timeoutMs ?? (options.body instanceof FormData ? 120000 : API_TIMEOUT_MS),
   );
   try {
     const response = await fetch(`/api${path}`, {
-      ...options,
+      ...fetchOptions,
       signal: controller.signal,
       headers: {
+        ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
         ...(options.headers || {}),
-        "Content-Type": "application/json",
         "X-Telegram-Init-Data": state.initData,
       },
     });
@@ -147,6 +148,7 @@ async function api(path, options = {}) {
       throw error;
     }
     if (response.status === 204) return null;
+    if (responseType === "blob") return response.blob();
     if (isJsonResponse(response)) return response.json();
     return response.text();
   } catch (error) {
