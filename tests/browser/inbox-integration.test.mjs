@@ -717,6 +717,92 @@ test("Authorized photo, document and voice stay in history after reload, faults 
   });
 });
 
+
+test("Long photo history evicts offscreen Blob URLs and reloads them on demand", async () => {
+  await withBackend(async ({ db, createPage }) => {
+    const jpeg = Buffer.from(
+      "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA0JCgsKCA0LCgsODg0PEyAVExISEyccHhcgLikxMC4pLSwzOko+MzZGNywtQFdBRkxOUlNSMj5aYVpQYEpRUk//2wBDAQ4ODhMREyYVFSZPNS01T09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0//wAARCAACAAIDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAABAb/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwCQAV4T/9k=",
+      "base64",
+    );
+    const payload = Buffer.concat([jpeg, Buffer.alloc(6 * 1024 * 1024)]);
+    const photoIds = Array.from({ length: 36 }, (_, index) => index + 300);
+    for (const id of photoIds) {
+      db.messages.push({
+        ...incoming(id), kind: "photo", text: null, caption: "Фото " + id,
+        attachment: { kind: "photo", filename: "photo.jpg", mime_type: "image/jpeg",
+          size: payload.length, available: true },
+      });
+      db.media.set(id, { type: "image/jpeg", content: payload });
+    }
+    const { page, errors } = await createPage(123, 390);
+    await page.evaluate(() => {
+      const create = URL.createObjectURL.bind(URL);
+      const revoke = URL.revokeObjectURL.bind(URL);
+      window.__blobStats = { alive: new Map(), created: 0, revoked: 0 };
+      URL.createObjectURL = (blob) => {
+        const url = create(blob);
+        window.__blobStats.alive.set(url, blob.size);
+        window.__blobStats.created++;
+        return url;
+      };
+      URL.revokeObjectURL = (url) => {
+        window.__blobStats.alive.delete(url);
+        window.__blobStats.revoked++;
+        return revoke(url);
+      };
+    });
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-conversations").getByText("Анна Петрова").click();
+    await page.locator('[data-inbox-message="335"]').waitFor({ state: "attached" });
+
+    for (const id of photoIds.slice(0, 16)) {
+      await page.evaluate((messageId) => {
+        const row = document.querySelector('[data-inbox-message="' + messageId + '"]');
+        row?.scrollIntoView({ block: "center" });
+      }, id);
+      await page.waitForFunction((messageId) =>
+        !!document.querySelector('[data-inbox-photo="' + messageId + '"][src^="blob:"]'), id);
+    }
+    const result = await page.evaluate(() => {
+      const stats = window.__blobStats;
+      return {
+        count: stats.alive.size,
+        bytes: [...stats.alive.values()].reduce((sum, size) => sum + size, 0),
+        created: stats.created,
+        revoked: stats.revoked,
+      };
+    });
+    assert.ok(result.created >= 16, "Media was loaded as it entered the viewport");
+    assert.ok(result.revoked > 0, "Offscreen photos must be released");
+    assert.ok(result.count <= 8, "Media cache must cap the number of Blob URLs");
+    assert.ok(result.bytes <= 32 * 1024 * 1024,
+      "Media cache must stay within the byte budget: " + JSON.stringify(result));
+
+    const before = db.requests.filter((request) =>
+      request.path === "/api/admin/chat-messages/300/attachment").length;
+    await page.evaluate(() =>
+      document.querySelector('[data-inbox-message="300"]')?.scrollIntoView({ block: "center" }));
+    await page.waitForFunction(() =>
+      !!document.querySelector('[data-inbox-photo="300"][src^="blob:"]'));
+    assert.ok(db.requests.filter((request) =>
+      request.path === "/api/admin/chat-messages/300/attachment").length > before,
+      "Evicted photos must be downloadable again");
+
+    await page.locator('[data-inbox-view-photo="300"]').click();
+    await page.locator("#inbox-photo-viewer").waitFor({ state: "visible" });
+    const viewerUrl = await page.locator("#inbox-photo-full").getAttribute("src");
+    await page.evaluate(() => {
+      const list = document.getElementById("inbox-history");
+      list.scrollTop = list.scrollHeight;
+      list.dispatchEvent(new Event("scroll"));
+    });
+    assert.equal(await page.evaluate((url) => window.__blobStats.alive.has(url), viewerUrl),
+      true, "Open photo viewer must retain its Blob URL");
+    await page.locator("#inbox-photo-close").click();
+    assert.deepEqual(errors, []);
+  });
+});
+
 test("Multipart upload preserves caption, file and key across 202 loss, rejects 413/415", async () => {
   await withBackend(async ({ db, createPage }) => {
     const { page, errors } = await createPage(123, 390);
