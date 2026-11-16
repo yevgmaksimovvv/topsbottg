@@ -520,6 +520,45 @@ function renderFilePreview() {
   preview.hidden = false;
 }
 
+function reconcileHistory(list, markup) {
+  const next = document.createElement("div");
+  next.innerHTML = markup;
+  const oldById = new Map([...list.querySelectorAll(":scope > [data-inbox-message]")].map(
+    (node) => [node.dataset.inboxMessage, node]));
+  let position = 0;
+  for (const proposed of [...next.children]) {
+    const previous = proposed.dataset.inboxMessage
+      ? oldById.get(proposed.dataset.inboxMessage) : null;
+    const oldAudio = previous?.querySelector(".inbox-attachment [data-inbox-audio-player]");
+    const newAudio = proposed.querySelector(".inbox-attachment [data-inbox-audio-player]");
+    let node = proposed;
+    if (oldAudio && newAudio && oldAudio.getAttribute("src") === newAudio.getAttribute("src")) {
+      const oldMedia = previous.querySelector(":scope > .inbox-attachment");
+      const newMedia = proposed.querySelector(":scope > .inbox-attachment");
+      for (const child of [...previous.children]) {
+        if (child !== oldMedia) child.remove();
+      }
+      let afterMedia = false;
+      for (const child of [...proposed.children]) {
+        if (child === newMedia) {
+          afterMedia = true;
+        } else if (afterMedia) {
+          previous.append(child);
+        } else {
+          previous.insertBefore(child, oldMedia);
+        }
+      }
+      previous.className = proposed.className;
+      node = previous;
+    }
+    if (list.children[position] !== node) {
+      list.insertBefore(node, list.children[position] || null);
+    }
+    position++;
+  }
+  while (list.children.length > position) list.lastElementChild.remove();
+}
+
 function renderHistory({ preserveScroll = false } = {}) {
   const scroll = el("inbox-history");
   const list = el("inbox-messages");
@@ -538,7 +577,7 @@ function renderHistory({ preserveScroll = false } = {}) {
     }
   }
   const multipleAuthors = inbox.authorLabels.size > 1;
-  list.innerHTML = inbox.messages.map((message, index) => {
+  const markup = inbox.messages.map((message, index) => {
     const outgoing = message.direction === "outgoing";
     const delivery = outgoing && message.delivery_status ? message.delivery_status : null;
     const body = message.text || message.caption || "";
@@ -579,6 +618,7 @@ function renderHistory({ preserveScroll = false } = {}) {
         text(message.id) + '">' + (message._sendRequest ? "Повторить" : "Отправить заново") + '</button>' : "") +
       '</span></article>';
   }).join("");
+  reconcileHistory(list, markup);
   el("inbox-older")?.classList.toggle("hidden", !inbox.historyCursor);
   if (el("inbox-older")) el("inbox-older").disabled = inbox.historyLoading;
   status("inbox-history-status", inbox.historyLoading
