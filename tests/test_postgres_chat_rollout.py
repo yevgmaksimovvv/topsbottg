@@ -463,3 +463,248 @@ async def test_pg_media_history_download_and_upload_idempotency(
         headers=headers(dynamic_admin_init_data, "revoked-upload"),
     )).status_code == 403
     assert (await stack.client.get(download, headers=headers(admin_init_data))).status_code == 200
+
+
+@pytest.mark.postgres
+async def test_pg_legacy_memory_fsm_never_trusts_input_without_new_start(
+    chat_stack, caplog,
+):
+    stack = chat_stack
+    caplog.set_level(logging.INFO)
+    await register(stack, 71003)
+    old = Dispatcher(storage=MemoryStorage())
+    old.include_router(build_router(stack.factory, stack.settings))
+    await feed(stack, old, 71003, CHANGE_PAYMENT_DETAILS_BUTTON_TEXT, 3001)
+    old_context = old.fsm.get_context(bot=stack.bot, chat_id=71003, user_id=71003)
+    assert await old_context.get_state() == "RegistrationFSM:payment_details"
+    async with stack.factory() as session:
+        assert await session.scalar(select(func.count(BotFSMState.storage_key))) == 0
+
+    new = stack.dispatcher()
+    secret = "PRIVATE-PAYMENT-DETAIL-DO-NOT-LOG-51"
+    events = get_admin_events_broadcaster().subscribe()
+    try:
+        await feed(stack, new, 71003, secret, 3002)
+        assert events.empty()
+        async with stack.factory() as session:
+            assert await session.scalar(select(func.count(ChatMessage.id))) == 0
+            assert await session.scalar(select(func.count(BotFSMState.storage_key))) == 0
+
+        # A post-migration FSM row from a button does not authorize chat capture.
+        await feed(stack, new, 71003, CHANGE_PAYMENT_DETAILS_BUTTON_TEXT, 3003)
+        async with stack.factory() as session:
+            context = await session.scalar(select(BotFSMState))
+            assert context is not None
+            assert context.state == "RegistrationFSM:payment_details"
+            assert context.inbox_trusted_after_start is False
+        await feed(stack, new, 71003, secret, 3004)
+        await feed(stack, stack.dispatcher(), 71003, "Текст без /start", 3005)
+        async with stack.factory() as session:
+            context = await session.scalar(select(BotFSMState))
+            assert context is not None and context.state is None
+            assert context.inbox_trusted_after_start is False
+            assert await session.scalar(select(func.count(ChatMessage.id))) == 0
+            assert await session.scalar(select(func.count(Conversation.id))) == 0
+            assert await session.scalar(select(func.count(BotSensitiveMessage.telegram_message_id))) == 1
+            profile = await session.scalar(select(PaymentProfile))
+            assert profile.raw_payment_details == secret
+        assert events.empty()
+
+        fresh = stack.dispatcher()
+        await feed(stack, fresh, 71003, "/start", 3006)
+        async with stack.factory() as session:
+            context = await session.scalar(select(BotFSMState))
+            assert context.inbox_trusted_after_start is True
+        # Replayed payment update is rejected by the sensitive message marker.
+        await feed(stack, stack.dispatcher(), 71003, secret, 3004)
+        assert events.empty()
+        await feed(stack, fresh, 71003, "Безопасный вопрос", 3007)
+        assert events.get_nowait()["event"] == "chat.changed"
+        assert events.empty()
+        async with stack.factory() as session:
+            rows = (await session.scalars(select(ChatMessage))).all()
+            assert len(rows) == 1 and rows[0].text == "Безопасный вопрос"
+    finally:
+        get_admin_events_broadcaster().unsubscribe(events)
+    assert secret not in caplog.text
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("inbox,entrypoint", [
+    (False, False), (False, True), (True, False), (True, True),
+])
+async def test_pg_flag_matrix_requires_start_for_inbox_and_both_flags_for_button(
+    chat_stack, inbox, entrypoint,
+):
+    stack = chat_stack
+    await register(stack, 71004)
+    dispatcher = stack.dispatcher(inbox=inbox, entrypoint=entrypoint)
+    await feed(stack, dispatcher, 71004, "До /start", 4001)
+    async with stack.factory() as session:
+        assert await session.scalar(select(func.count(ChatMessage.id))) == 0
+    await feed(stack, dispatcher, 71004, "/start", 4002)
+    markup = message_methods(stack)[-1].reply_markup
+    button_texts = [button.text for row in markup.keyboard for button in row]
+    assert (CHAT_ENTRYPOINT_TEXT in button_texts) is (inbox and entrypoint)
+    if inbox and entrypoint:
+        await feed(stack, dispatcher, 71004, CHAT_ENTRYPOINT_TEXT, 4003)
+        assert message_methods(stack)[-1].text == "Напишите сообщение администратору."
+        async with stack.factory() as session:
+            assert await session.scalar(select(func.count(ChatMessage.id))) == 0
+
+    await feed(stack, dispatcher, 71004, "Тестовый вопрос", 4004)
+    async with stack.factory() as session:
+        messages = (await session.scalars(select(ChatMessage))).all()
+        assert len(messages) == int(inbox)
+        if inbox:
+            assert messages[0].text == "Тестовый вопрос"
+        context = await session.scalar(select(BotFSMState))
+        assert context.inbox_trusted_after_start is True
+
+
+def callback_update(bot: Bot, telegram_id: int, recipient_id: int, number: int) -> Update:
+    return Update.model_validate({
+        "update_id": number,
+        "callback_query": {
+            "id": f"callback-{number}",
+            "from": {"id": telegram_id, "first_name": "Sandbox", "is_bot": False},
+            "chat_instance": "sandbox",
+            "message": {
+                "message_id": 8000 + number,
+                "date": int(datetime.now(UTC).timestamp()),
+                "chat": {"id": telegram_id, "type": "private"},
+                "from": {"id": 9000, "first_name": "Bot", "is_bot": True},
+                "text": "Заполнить платёжные данные",
+            },
+            "data": f"fill_payment:{recipient_id}",
+        },
+    }, context={"bot": bot})
+
+
+@pytest.mark.postgres
+async def test_pg_registration_edit_payout_callback_and_commands_never_enter_inbox(
+    chat_stack, caplog,
+):
+    stack = chat_stack
+    caplog.set_level(logging.INFO)
+    dispatcher = stack.dispatcher()
+    await feed(stack, dispatcher, 71005, "/start", 5001)
+    await feed(stack, dispatcher, 71005, "Иванов Иван Иванович", 5002)
+    await feed(stack, dispatcher, 71005, "М3О-207СВ-25", 5003)
+    await feed(stack, dispatcher, 71005, "Заполнить позже", 5004)
+    await feed(stack, dispatcher, 71005, CHANGE_NAME_BUTTON_TEXT, 5005)
+    await feed(stack, dispatcher, 71005, "Петров Пётр Петрович", 5006)
+    await feed(stack, dispatcher, 71005, CHANGE_GROUP_BUTTON_TEXT, 5007)
+    await feed(stack, dispatcher, 71005, "М3О-107СВ-26", 5008)
+    await feed(stack, dispatcher, 71005, "/admin", 5009)
+    await feed(stack, dispatcher, 71005, "/unknown_command", 5010)
+    await feed(stack, dispatcher, 71005, MY_DATA_BUTTON_TEXT, 5011)
+    await feed(stack, dispatcher, 71005, "Текст группы", 5012, chat_type="supergroup")
+    async with stack.factory() as session:
+        user = await session.scalar(select(User).where(User.telegram_id == 71005))
+        assert user.full_name == "Петров Пётр Петрович"
+        assert user.registration_completed_at is not None
+        assert await session.scalar(select(func.count(ChatMessage.id))) == 0
+        payout = await create_payout(session, actor_telegram_id=123, payload={
+            "period_start_day": 1, "period_start_month": 11,
+            "period_end_day": 30, "period_end_month": 11,
+            "message_template": None,
+        })
+        payout.status = PayoutStatus.sending.value
+        [recipient] = await add_recipients(session, payout, [user.id])
+        recipient.status = RecipientStatus.sent.value
+        await session.commit()
+        recipient_id = recipient.id
+
+    await dispatcher.feed_update(stack.bot, callback_update(stack.bot, 71005, recipient_id, 5013))
+    assert any(isinstance(method, AnswerCallbackQuery) for method in stack.telegram.methods)
+    payment_secret = "REDACT-BANK-DETAILS-TEST-51"
+    await feed(stack, dispatcher, 71005, payment_secret, 5014)
+    await feed(stack, dispatcher, 71005, "Обычный вопрос после платежа", 5015)
+    async with stack.factory() as session:
+        profile = await session.scalar(select(PaymentProfile))
+        assert profile.raw_payment_details == payment_secret
+        recipient = await session.get(PayoutRecipient, recipient_id)
+        assert recipient.status == RecipientStatus.payment_received.value
+        messages = (await session.scalars(select(ChatMessage))).all()
+        assert len(messages) == 1
+        assert messages[0].text == "Обычный вопрос после платежа"
+        assert await session.scalar(select(func.count(BotSensitiveMessage.telegram_message_id))) == 1
+    assert payment_secret not in caplog.text
+
+
+@pytest.mark.postgres
+async def test_pg_worker_retries_429_and_recovers_lease_after_restart(
+    chat_stack, admin_init_data,
+):
+    stack = chat_stack
+    await register(stack, 71006)
+    dispatcher = stack.dispatcher()
+    await feed(stack, dispatcher, 71006, "/start", 6001)
+    await feed(stack, dispatcher, 71006, "Обращение", 6002)
+    async with stack.factory() as session:
+        cid = (await session.scalar(select(Conversation))).id
+    path = f"/api/admin/conversations/{cid}/messages"
+    payload = {"text": "Ответ после ограничений"}
+    result = await stack.client.post(
+        path, json=payload, headers=headers(admin_init_data, "retry-429"),
+    )
+    assert result.status_code == 202
+    outgoing_id = result.json()["message"]["id"]
+    stack.telegram.fail_next_send = TelegramRetryAfter(
+        method=SendMessage(chat_id=71006, text=payload["text"]),
+        message="Too Many Requests", retry_after=3,
+    )
+    await deliver_chat_outbox(stack.bot, stack.factory, stack.settings.chat_staging_dir)
+    async with stack.factory() as session:
+        job = await session.scalar(select(ChatMessageOutbox))
+        assert job.status == "queued" and job.error_code == "rate_limited"
+        assert job.attempts == 1
+        assert job.retry_at is not None
+        assert job.retry_at.replace(tzinfo=UTC) > datetime.now(UTC)
+
+    # Restart with a different Bot/session object but the same PostgreSQL schema.
+    next_session = FakeTelegramSession()
+    next_bot = Bot(TOKEN, session=next_session)
+    try:
+        await deliver_chat_outbox(next_bot, stack.factory, stack.settings.chat_staging_dir)
+        assert not any(isinstance(method, SendMessage) for method in next_session.methods)
+        async with stack.factory() as session:
+            job = await session.scalar(select(ChatMessageOutbox))
+            job.retry_at = datetime.now(UTC) - timedelta(seconds=1)
+            await session.commit()
+        await deliver_chat_outbox(next_bot, stack.factory, stack.settings.chat_staging_dir)
+        assert len([method for method in next_session.methods if isinstance(method, SendMessage)]) == 1
+    finally:
+        await next_bot.session.close()
+    async with stack.factory() as session:
+        job = await session.scalar(select(ChatMessageOutbox))
+        assert job.status == "sent" and job.attempts == 2
+        assert job.message_id == outgoing_id
+        assert await session.scalar(select(func.count(ChatMessageOutbox.id))) == 1
+        assert await session.scalar(select(func.count(ChatMessage.id))) == 2
+
+    # Telegram accepted a separate message, but the worker died before settlement.
+    another = await stack.client.post(
+        path, json={"text": "Неоднозначная доставка"},
+        headers=headers(admin_init_data, "ambiguous"),
+    )
+    assert another.status_code == 202
+    async with stack.factory() as session:
+        [claim] = await claim_chat_outbox(session)
+        await session.commit()
+    await stack.bot.send_message(71006, "Неоднозначная доставка")
+    async with stack.factory() as session:
+        row = await session.get(ChatMessageOutbox, claim.id)
+        row.claimed_until = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
+    await deliver_chat_outbox(stack.bot, stack.factory, stack.settings.chat_staging_dir)
+    async with stack.factory() as session:
+        row = await session.get(ChatMessageOutbox, claim.id)
+        assert row.status == "sent" and row.attempts == 2
+        assert row.message_id == another.json()["message"]["id"]
+        assert await session.scalar(select(func.count(ChatMessageOutbox.id))) == 2
+    assert len([
+        method for method in stack.telegram.methods
+        if isinstance(method, SendMessage) and method.text == "Неоднозначная доставка"
+    ]) == 2
