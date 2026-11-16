@@ -193,6 +193,7 @@ class CampaignOut(BaseModel):
     sending_count: int
     sent_count: int
     failed_count: int
+    text: str | None = None
 
 
 class CampaignRecipientOut(BaseModel):

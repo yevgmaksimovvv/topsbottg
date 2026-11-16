@@ -1782,3 +1782,171 @@ textarea::placeholder {
   .inbox-send-row { gap: 6px; }
   .inbox-message { max-width: 84%; }
 }
+
+
+.campaign-menu {
+  display: flex;
+  flex: none;
+  gap: 8px;
+  padding: 12px 14px 0;
+}
+.campaign-menu .button { flex: 1; min-width: 0; }
+.campaign-menu-primary { background: var(--accent); color: var(--accent-contrast); }
+.campaign-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  min-height: 0;
+}
+.campaign-intro, .campaign-warning, .campaign-selection {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.campaign-groups {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  margin: 0;
+  min-width: 0;
+}
+.campaign-groups legend {
+  font-size: 14px;
+  font-weight: 600;
+  padding-inline: 6px;
+}
+.campaign-group-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.campaign-group {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 11px;
+  min-height: 40px;
+  border-radius: 12px;
+  background: var(--field);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+.campaign-group input, .campaign-user input { width: 18px; height: 18px; flex: none; accent-color: var(--accent); }
+.campaign-filters { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; }
+.campaign-filters label, .campaign-text-label { font-size: 14px; font-weight: 600; }
+.campaign-filters input, .campaign-filters select, #campaign-text {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--field);
+  color: var(--text);
+  padding: 11px 12px;
+  font-size: 15px;
+}
+.campaign-users {
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overscroll-behavior: contain;
+}
+.campaign-user, .campaign-recipient {
+  display: flex;
+  gap: 11px;
+  align-items: center;
+  min-width: 0;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.campaign-user:last-child, .campaign-recipient:last-child { border-bottom: none; }
+.campaign-user span, .campaign-recipient span { min-width: 0; flex: 1; }
+.campaign-user strong, .campaign-recipient strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.campaign-user small, .campaign-recipient small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.campaign-selection { padding: 8px 10px; border-radius: 10px; background: var(--field); }
+#campaign-text { display: block; resize: vertical; min-height: 130px; max-height: 280px; }
+.campaign-action { width: 100%; min-height: 46px; }
+.campaign-preview, .campaign-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: var(--surface);
+}
+.campaign-preview h3, .campaign-detail h3 { font-size: 15px; margin: 0; }
+.campaign-preview p { margin: 0; }
+.campaign-preview-message {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-radius: 10px;
+  padding: 12px;
+  background: var(--field);
+}
+.campaign-preview-users, .campaign-detail-recipients { max-height: 250px; overflow-y: auto; }
+.campaign-preview-user {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.campaign-preview-user small { color: var(--muted); }
+.campaign-history-tools { display: flex; gap: 8px; }
+.campaign-history-tools .button { flex: 1; min-height: 44px; }
+.campaign-history-list { display: flex; flex-direction: column; gap: 8px; }
+.campaign-history-item {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  width: 100%;
+  min-height: 84px;
+  text-align: left;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text);
+  background: var(--surface);
+}
+.campaign-history-item:hover, .campaign-history-item:focus-visible { background: var(--field); }
+.campaign-history-title { display: flex; justify-content: space-between; gap: 8px; font-weight: 650; }
+.campaign-history-title time { font-size: 11px; color: var(--muted); font-weight: 400; }
+.campaign-history-state { font-size: 13px; }
+.campaign-history-text {
+  font-size: 13px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+.campaign-history-item small { color: var(--muted); font-size: 11px; }
+.campaign-detail-recipients { border: 1px solid var(--border); border-radius: 10px; }
+.campaign-recipient { justify-content: space-between; font-size: 12px; }
+.campaign-recipient > span:last-child { text-align: right; }
+.campaign-recipient .campaign-error { color: var(--danger); }
+.campaign-empty { padding: 12px; color: var(--muted); font-size: 13px; }
+@media (max-width: 420px) {
+  .campaign-content { padding: 12px; }
+  .campaign-menu { padding: 10px 10px 0; gap: 6px; }
+  .campaign-menu .button { font-size: 12px; padding-inline: 8px; }
+  .campaign-history-tools { flex-wrap: wrap; }
+}

@@ -343,6 +343,10 @@
           <button type="button" id="inbox-close" class="header-icon-button" aria-label="Закрыть сообщения">×</button>
         </header>
         <section id="inbox-list-screen" class="inbox-screen" aria-label="Список диалогов">
+          <div class="campaign-menu">
+            <button id="inbox-campaign-new" type="button" class="button campaign-menu-primary hidden">Новое сообщение</button>
+            <button id="inbox-campaign-history" type="button" class="button button-quiet hidden">История рассылок</button>
+          </div>
           <div class="inbox-filters">
             <label class="sr-only" for="inbox-search">Поиск диалога по ФИО</label>
             <input id="inbox-search" type="search" autocomplete="off" placeholder="Поиск диалога" />
@@ -365,6 +369,56 @@
           <div id="inbox-new-users" class="inbox-scroll inbox-chat-list" aria-label="Найденные пользователи"></div>
           <button type="button" id="inbox-new-retry" class="button button-quiet inbox-page-button hidden">Повторить поиск</button>
           <button type="button" id="inbox-new-more" class="button button-quiet inbox-page-button hidden">Загрузить ещё</button>
+        </section>
+        <section id="inbox-campaign-compose-screen" class="inbox-screen" aria-label="Новая текстовая кампания" hidden>
+          <div class="campaign-content inbox-scroll">
+            <p class="campaign-intro">Сообщение отправляется каждому выбранному пользователю в личный диалог.</p>
+            <fieldset class="campaign-groups">
+              <legend>Группы</legend>
+              <div id="campaign-group-options" class="campaign-group-options"></div>
+            </fieldset>
+            <div class="campaign-filters">
+              <label for="campaign-user-search">Добавить пользователей вручную</label>
+              <input id="campaign-user-search" type="search" autocomplete="off" placeholder="Поиск по ФИО">
+              <label for="campaign-user-filter">Фильтр списка по группе</label>
+              <select id="campaign-user-filter"><option value="">Все группы</option></select>
+            </div>
+            <p id="campaign-user-status" class="inbox-feedback" role="status"></p>
+            <div id="campaign-users" class="campaign-users" aria-label="Поиск адресатов"></div>
+            <button type="button" id="campaign-more-users" class="button button-quiet" hidden>Ещё пользователи</button>
+            <p id="campaign-selection" class="campaign-selection" aria-live="polite"></p>
+            <label for="campaign-text" class="campaign-text-label">Текст сообщения</label>
+            <textarea id="campaign-text" rows="5" maxlength="4096" placeholder="Напишите сообщение для адресатов"></textarea>
+            <p id="campaign-compose-error" class="inbox-feedback" role="alert"></p>
+            <button type="button" id="campaign-preview-button" class="button button-primary campaign-action">Предпросмотр адресатов</button>
+            <section id="campaign-preview" class="campaign-preview" aria-label="Предпросмотр кампании" hidden>
+              <h3>Перед отправкой</h3>
+              <p id="campaign-preview-count"></p>
+              <p id="campaign-preview-text" class="campaign-preview-message"></p>
+              <div id="campaign-preview-users" class="campaign-preview-users"></div>
+              <p class="campaign-warning">После подтверждения сообщение будет поставлено в очередь. Отменить доставку через этот экран нельзя.</p>
+              <button type="button" id="campaign-confirm-button" class="button button-primary campaign-action">Подтвердить и отправить</button>
+            </section>
+            <p id="campaign-send-status" class="inbox-feedback" role="status" aria-live="polite"></p>
+          </div>
+        </section>
+        <section id="inbox-campaign-history-screen" class="inbox-screen" aria-label="История текстовых кампаний" hidden>
+          <div class="campaign-content inbox-scroll">
+            <div class="campaign-history-tools">
+              <button type="button" id="campaign-history-refresh" class="button button-quiet">Обновить статусы</button>
+              <button type="button" id="campaign-history-new" class="button button-quiet">Новая кампания</button>
+            </div>
+            <p id="campaign-history-status" class="inbox-feedback" role="status"></p>
+            <div id="campaign-history-list" class="campaign-history-list"></div>
+            <button type="button" id="campaign-history-more" class="button button-quiet" hidden>Загрузить ещё</button>
+            <section id="campaign-detail" class="campaign-detail" hidden>
+              <h3>Доставки кампании <span id="campaign-detail-id"></span></h3>
+              <p id="campaign-detail-summary" class="campaign-selection"></p>
+              <p id="campaign-detail-status" class="inbox-feedback" role="status"></p>
+              <div id="campaign-detail-recipients" class="campaign-detail-recipients"></div>
+              <button type="button" id="campaign-retry-button" class="button button-quiet" hidden>Повторить неуспешные</button>
+            </section>
+          </div>
         </section>
         <section id="inbox-history-screen" class="inbox-screen" aria-label="История диалога" hidden>
           <p id="inbox-history-status" class="inbox-feedback" role="status"></p>

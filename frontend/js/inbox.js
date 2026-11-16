@@ -2,6 +2,10 @@ import { SEARCH_DEBOUNCE_MS } from "./constants.js";
 import { setToast, state } from "./store.js";
 import { telegramWebApp } from "./telegram.js";
 import { escapeHtml } from "./utils.js";
+import {
+  bindCampaignControls, campaignsActive, leaveCampaignScreens,
+  openCampaignCompose, openCampaignHistory, refreshCampaignsFromEvent,
+} from "./campaigns.js";
 
 const inbox = {
   client: null,
@@ -386,6 +390,7 @@ function showNewDialog() {
 }
 
 function showList() {
+  leaveCampaignScreens();
   ++inbox.historyRequest;
   ++inbox.newRequest;
   ++inbox.openRequest;
@@ -1070,6 +1075,7 @@ function closeInbox() {
 }
 
 function cleanup() {
+  leaveCampaignScreens();
   ++inbox.listRequest;
   ++inbox.historyRequest;
   ++inbox.summaryRequest;
@@ -1096,6 +1102,7 @@ export function configureInboxClient(client) {
   inbox.client = client;
   inbox.unread = 0;
   if (!client) {
+    leaveCampaignScreens();
     cancelRequests();
     ++inbox.summaryRequest;
     inbox.conversations = [];
@@ -1115,6 +1122,9 @@ export function configureInboxClient(client) {
   }
   paintBadge();
   el("inbox-open")?.classList.toggle("hidden", !client);
+  const hasCampaigns = Boolean(client?.campaignPreview && client?.campaignList);
+  el("inbox-campaign-new")?.classList.toggle("hidden", !hasCampaigns);
+  el("inbox-campaign-history")?.classList.toggle("hidden", !hasCampaigns);
   if (client) void loadSummary();
 }
 
@@ -1122,6 +1132,11 @@ export function bindInbox() {
   if (bound) return;
   bound = true;
   el("inbox-open")?.addEventListener("click", openInbox);
+  bindCampaignControls();
+  el("inbox-campaign-new")?.addEventListener("click", () =>
+    openCampaignCompose(inbox.client, handleRequestError));
+  el("inbox-campaign-history")?.addEventListener("click", () =>
+    openCampaignHistory(inbox.client, handleRequestError));
   el("inbox-close")?.addEventListener("click", closeInbox);
   el("inbox-back")?.addEventListener("click", showList);
   el("inbox-new")?.addEventListener("click", showNewDialog);
@@ -1273,6 +1288,10 @@ export function refreshInboxFromEvent(conversationId = null, { reconnect = false
   if (!inbox.client) return;
   void loadSummary();
   if (!isOpen()) return;
+  if (campaignsActive()) {
+    refreshCampaignsFromEvent();
+    return;
+  }
   if (!el("inbox-list-screen")?.hidden || inbox.current) void loadConversations(true);
   if (el("inbox-list-screen")?.hidden && inbox.current &&
       (reconnect || conversationId == null || Number(inbox.current.id) === Number(conversationId))) {

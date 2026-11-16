@@ -56,6 +56,33 @@ export function createInboxApiClient(request) {
         signal, responseType: "blob",
       });
     },
+    campaignPreview({ user_ids = [], study_group_ids = [] }, { signal } = {}) {
+      return request("/admin/message-campaigns/preview", {
+        method: "POST",
+        signal,
+        body: JSON.stringify({ user_ids, study_group_ids }),
+      });
+    },
+    campaignCreate({ user_ids, study_group_ids, text, idempotency_key }) {
+      return request("/admin/message-campaigns", {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotency_key },
+        body: JSON.stringify({ user_ids, study_group_ids, text }),
+      });
+    },
+    campaignList({ cursor = null, limit = 50, signal } = {}) {
+      const params = new URLSearchParams({ limit: String(limit) });
+      if (cursor) params.set("cursor", cursor);
+      return request("/admin/message-campaigns?" + params.toString(), { signal });
+    },
+    campaignDetail(id, { signal } = {}) {
+      return request("/admin/message-campaigns/" + encodeURIComponent(id), { signal });
+    },
+    campaignRetry(id) {
+      return request("/admin/message-campaigns/" + encodeURIComponent(id) + "/retry-failed", {
+        method: "POST",
+      });
+    },
     read(conversation_id, last_read_message_id, { signal } = {}) {
       return request(BASE + "/" + encodeURIComponent(conversation_id) + "/read", {
         method: "POST",

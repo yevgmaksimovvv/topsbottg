@@ -84,6 +84,7 @@ async def test_campaign_preview_and_snapshot_deduplicate_users(client, session_f
     assert result.status_code == 202, result.text
     campaign_id = result.json()["id"]
     assert result.json()["recipient_count"] == 7
+    assert result.json()["text"] == body["text"]
     assert result.json()["queued_count"] == 7
     assert result.json()["status"] == "queued"
 
@@ -101,6 +102,7 @@ async def test_campaign_preview_and_snapshot_deduplicate_users(client, session_f
 
     detail = await client.get(f"/api/admin/message-campaigns/{campaign_id}", headers=headers)
     assert detail.status_code == 200
+    assert detail.json()["text"] == body["text"]
     assert [row["user_id"] for row in detail.json()["recipients"]] == ids[:7]
     assert detail.json()["recipients"][0]["study_group_name"] == "М3О-101"
     assert len({row["conversation_id"] for row in detail.json()["recipients"]}) == 7
@@ -116,6 +118,7 @@ async def test_campaign_preview_and_snapshot_deduplicate_users(client, session_f
     listed = await client.get("/api/admin/message-campaigns", headers=headers)
     assert listed.status_code == 200
     assert listed.json()["items"][0]["id"] == campaign_id
+    assert listed.json()["items"][0]["text"] == body["text"]
     assert (await client.get("/api/admin/message-campaigns?cursor=bad", headers=headers)).status_code == 422
     assert (await client.get("/api/admin/message-campaigns/999999", headers=headers)).status_code == 404
     assert (await client.post("/api/admin/message-campaigns/999999/retry-failed",

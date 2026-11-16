@@ -201,7 +201,7 @@ async def campaign_summaries(
             created_at = created_at.replace(tzinfo=UTC)
         summaries.append(CampaignOut(
             id=campaign.id, recipient_count=campaign.recipient_count,
-            status=_campaign_status(counts, campaign.recipient_count),
+            status=_campaign_status(counts, campaign.recipient_count), text=campaign.text,
             created_at=created_at,
             admin_telegram_id=campaign.admin_telegram_id,
             queued_count=counts["queued"], sending_count=counts["sending"],
