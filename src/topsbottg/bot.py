@@ -383,6 +383,8 @@ def build_router(session_factory: async_sessionmaker, _settings) -> Router:
             needs_group = not needs_name and user.registration_completed_at is None
             await session.commit()
         await state.clear()
+        if isinstance(state.storage, DatabaseFSMStorage):
+            await state.storage.trust_after_start(state.key)
         if needs_name:
             await state.set_state(RegistrationFSM.registration_full_name)
             log_event(

@@ -66,15 +66,32 @@ class DatabaseFSMStorage(BaseStorage):
             )
             await session.commit()
 
-    async def has_context(self, key: StorageKey) -> bool:
-        """Only contexts touched since the switch from MemoryStorage are safe for inbox capture."""
+    async def trust_after_start(self, key: StorageKey) -> None:
+        """Trust only a completed /start from the current dispatcher."""
         async with self._session_factory() as session:
-            value = await session.scalar(
-                select(BotFSMState.storage_key).where(
-                    BotFSMState.storage_key == self._storage_key(key)
+            await session.execute(
+                self._insert(session)
+                .values(
+                    storage_key=self._storage_key(key),
+                    state=None,
+                    data={},
+                    inbox_trusted_after_start=True,
+                )
+                .on_conflict_do_update(
+                    index_elements=[BotFSMState.storage_key],
+                    set_={"inbox_trusted_after_start": True},
                 )
             )
-            return value is not None
+            await session.commit()
+
+    async def has_context(self, key: StorageKey) -> bool:
+        """A pre-existing FSM row alone does not authorize free-text capture."""
+        async with self._session_factory() as session:
+            return bool(await session.scalar(
+                select(BotFSMState.inbox_trusted_after_start).where(
+                    BotFSMState.storage_key == self._storage_key(key)
+                )
+            ))
 
     async def get_state(self, key: StorageKey) -> str | None:
         async with self._session_factory() as session:
