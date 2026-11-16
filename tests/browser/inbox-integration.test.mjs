@@ -1103,8 +1103,10 @@ test("Campaign network loss reuses idempotency key; error and revocation preserv
     await page.locator("#inbox-campaign-new").click();
     await page.locator('[data-campaign-group="9"]').check();
     await page.locator("#campaign-text").fill("Проверка прав доступа");
-    db.granted.delete(555);
     await page.locator("#campaign-preview-button").click();
+    await page.locator("#campaign-preview").waitFor({ state: "visible" });
+    db.granted.delete(555);
+    await page.locator("#campaign-confirm-button").click();
     await page.locator("#inbox-dialog").waitFor({ state: "hidden" });
     assert.equal(await page.locator("#inbox-open").isVisible(), false);
     assert.deepEqual(errors, []);
