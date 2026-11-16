@@ -584,7 +584,7 @@ function reconcileHistory(list, markup) {
   next.innerHTML = markup;
   const oldById = new Map([...list.querySelectorAll(":scope > [data-inbox-message]")].map(
     (node) => [node.dataset.inboxMessage, node]));
-  let position = 0;
+  const prepared = [];
   for (const proposed of [...next.children]) {
     const previous = proposed.dataset.inboxMessage
       ? oldById.get(proposed.dataset.inboxMessage) : null;
@@ -609,14 +609,22 @@ function reconcileHistory(list, markup) {
       }
       previous.className = proposed.className;
       node = previous;
+    } else if (previous) {
+      const comparable = previous.cloneNode(true);
+      for (const img of comparable.querySelectorAll("[data-inbox-photo]")) img.removeAttribute("src");
+      if (comparable.outerHTML === proposed.outerHTML) node = previous;
     }
-    if (list.children[position] !== node) {
-      list.insertBefore(node, list.children[position] || null);
-    }
-    position++;
+    prepared.push(node);
   }
-  while (list.children.length > position) list.lastElementChild.remove();
+  const retained = new Set(prepared.filter((node) => node.parentElement === list));
+  for (const existing of [...list.children]) {
+    if (!retained.has(existing)) existing.remove();
+  }
+  prepared.forEach((node, index) => {
+    if (list.children[index] !== node) list.insertBefore(node, list.children[index] || null);
+  });
 }
+
 
 function renderHistory({ preserveScroll = false } = {}) {
   const scroll = el("inbox-history");
