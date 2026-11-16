@@ -1175,3 +1175,67 @@ test("Campaign composition, preview and history have mobile and desktop screensh
     assert.deepEqual(errors, []);
   });
 });
+
+
+test("Late retry of campaign A must not override selected campaign B or expose stale retry", async () => {
+  await withBackend(async ({ db, createPage }) => {
+    const recipient = (user_id, full_name, status) => ({
+      user_id, full_name, study_group_name: null,
+      status, error_code: status === "failed" ? "bot_blocked" : null,
+      retry_count: 0, conversation_id: 10 + user_id, message_id: 1000 + user_id,
+    });
+    db.campaigns.push(
+      { id: 2, text: "Сообщение B", actor: 123, created_at: "2026-11-16T12:32:00Z",
+        recipients: [recipient(2, "Иван Иванов", "sent")] },
+      { id: 1, text: "Сообщение A", actor: 123, created_at: "2026-11-16T12:31:00Z",
+        recipients: [recipient(1, "Анна Петрова", "failed")] },
+    );
+    db.nextCampaignId = 3;
+    const { page, errors } = await createPage(123, 390);
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-campaign-history").click();
+    await page.locator('[data-campaign-id="1"]').click();
+    await page.locator("#campaign-detail-recipients").getByText("Анна Петрова").waitFor();
+    assert.equal(await page.locator("#campaign-retry-button").isVisible(), true);
+
+    db.retryWaitCampaignId = 1;
+    const retryRequest = page.waitForRequest((request) =>
+      request.method() === "POST" &&
+      request.url().endsWith("/api/admin/message-campaigns/1/retry-failed"));
+    await page.locator("#campaign-retry-button").click();
+    await retryRequest;
+
+    db.detailFailureIds.add(2);
+    await page.locator('[data-campaign-id="2"]').click();
+    await page.locator("#campaign-detail-status").getByText(/Backend временно недоступен/).waitFor();
+    assert.equal(await page.locator("#campaign-detail-id").innerText(), "#2");
+    assert.equal(await page.locator("#campaign-detail-recipients").innerText(), "",
+      "A's details must be cleared immediately when B is selected");
+    assert.equal(await page.locator("#campaign-retry-button").isVisible(), false,
+      "A's retry button must never apply to selected B after B load fails");
+
+    db.detailFailureIds.delete(2);
+    await page.locator('[data-campaign-id="2"]').click();
+    await page.locator("#campaign-detail-recipients").getByText("Иван Иванов").waitFor();
+    assert.equal(await page.locator("#campaign-detail-id").innerText(), "#2");
+    assert.equal(await page.locator("#campaign-retry-button").isVisible(), false);
+
+    assert.equal(typeof db.releaseRetry, "function", "Retry A is still in flight");
+    const retryResponse = page.waitForResponse((response) =>
+      response.request().method() === "POST" &&
+      response.url().endsWith("/api/admin/message-campaigns/1/retry-failed"));
+    db.releaseRetry();
+    await retryResponse;
+    await page.locator('[data-campaign-id="1"]').getByText(/Ошибок: 0/).waitFor();
+    assert.equal(await page.locator("#campaign-detail-id").innerText(), "#2",
+      "Late retry A must not switch away from B");
+    assert.match(await page.locator("#campaign-detail-recipients").innerText(), /Иван Иванов/);
+    assert.doesNotMatch(await page.locator("#campaign-detail-recipients").innerText(), /Анна Петрова/);
+    assert.equal(await page.locator("#campaign-retry-button").isVisible(), false);
+    assert.equal(db.campaigns[0].recipients[0].status, "sent");
+    assert.equal(db.campaigns[0].recipients[0].retry_count, 0);
+    assert.equal(db.campaigns[1].recipients[0].status, "queued");
+    assert.equal(db.campaigns[1].recipients[0].retry_count, 1);
+    assert.deepEqual(errors, []);
+  });
+});
