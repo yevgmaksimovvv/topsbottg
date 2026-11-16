@@ -984,3 +984,175 @@ test("Multipart upload preserves caption, file and key across 202 loss, rejects 
     assert.deepEqual(errors, []);
   });
 });
+
+
+test("Campaign preview uses the server union, invalidates on selection changes and preserves payouts", async () => {
+  await withBackend(async ({ db, createPage }) => {
+    db.users.push({ id: 4, full_name: "Ольга Сидорова", study_group: { id: 10, code: "Г-10" } });
+    const { page, errors } = await createPage(123, 390);
+    await page.evaluate(async () => {
+      const { state } = await import("/miniapp/js/store.js");
+      state.selectedPayoutId = 71;
+      state.selectedUsers = new Set([1, 3]);
+      state.selectedUsersByPayout.set(71, new Set([1, 3]));
+    });
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-campaign-new").click();
+    await page.locator('[data-campaign-group="9"]').waitFor();
+    await page.locator('[data-campaign-user="1"]').check();
+    await page.locator('[data-campaign-group="9"]').check();
+    await page.locator("#campaign-user-search").fill("Иван");
+    await page.locator('[data-campaign-user="2"]').waitFor();
+    await page.locator('[data-campaign-user="2"]').check();
+    await page.locator("#campaign-text").fill("Расписание встреч обновлено");
+    await page.locator("#campaign-preview-button").click();
+    await page.locator("#campaign-preview").waitFor({ state: "visible" });
+    assert.match(await page.locator("#campaign-preview-count").innerText(), /2$/);
+    assert.equal(await page.locator(".campaign-preview-user").count(), 2);
+    assert.match(await page.locator("#campaign-preview-users").innerText(), /Иван Иванов/);
+    assert.match(await page.locator("#campaign-preview-users").innerText(), /Анна Петрова/);
+
+    await page.locator('[data-campaign-group="10"]').check();
+    assert.equal(await page.locator("#campaign-preview").isVisible(), false,
+      "Criteria changes after preview require a new server preview");
+    await page.locator("#campaign-preview-button").click();
+    await page.locator("#campaign-preview").waitFor({ state: "visible" });
+    assert.match(await page.locator("#campaign-preview-count").innerText(), /3$/);
+    assert.match(await page.locator("#campaign-preview-users").innerText(), /Ольга Сидорова/);
+    db.createWait = true;
+    await page.evaluate(() => {
+      const button = document.getElementById("campaign-confirm-button");
+      button.click();
+      button.click();
+    });
+    await page.waitForFunction(() => document.getElementById("campaign-confirm-button").disabled);
+    assert.equal(db.requests.filter((entry) =>
+      entry.method === "POST" && entry.path === "/api/admin/message-campaigns").length, 1,
+      "Concurrent confirmation must create only one request");
+    db.releaseCreate?.();
+    await page.locator("#inbox-campaign-history-screen").waitFor({ state: "visible" });
+    await page.locator('[data-campaign-id="1"]').waitFor();
+    assert.equal(db.campaigns.length, 1);
+    assert.equal(db.campaigns[0].recipients.length, 3);
+    assert.deepEqual(db.campaigns[0].recipients.map((r) => r.user_id), [1, 2, 4]);
+    const post = db.campaignKeys.values().next().value;
+    assert.deepEqual(post.payload, {
+      user_ids: [1, 2], study_group_ids: [9, 10], text: "Расписание встреч обновлено",
+    });
+    assert.deepEqual(await page.evaluate(async () => {
+      const { state } = await import("/miniapp/js/store.js");
+      return [state.selectedPayoutId, [...state.selectedUsers],
+        [...state.selectedUsersByPayout.get(71)]];
+    }), [71, [1, 3], [1, 3]]);
+
+    const item = db.campaigns[0];
+    item.recipients[0].status = "sent";
+    item.recipients[1].status = "failed";
+    item.recipients[1].error_code = "bot_blocked";
+    await page.evaluate(() => window.__sse.at(-1).emit("chat.changed", { conversation_id: 11 }));
+    await page.locator('[data-campaign-id="1"]').getByText(/Ошибок: 1/).waitFor();
+    await page.locator('[data-campaign-id="1"]').click();
+    await page.locator("#campaign-detail-recipients").getByText("bot_blocked").waitFor();
+    assert.equal(await page.locator("#campaign-retry-button").isVisible(), true);
+    await page.locator("#campaign-retry-button").click();
+    await page.waitForFunction(() => document.querySelector("#campaign-detail-recipients")?.textContent
+      .includes("Повторов: 1"));
+    assert.equal(item.recipients[0].status, "sent");
+    assert.equal(item.recipients[0].retry_count, 0);
+    assert.equal(item.recipients[1].status, "queued");
+    assert.equal(item.recipients[1].retry_count, 1);
+    assert.equal(await page.locator("#campaign-retry-button").isVisible(), false);
+    assert.equal(await page.locator("[data-mobile-view]").count(), 4);
+    assert.equal(await page.locator("[data-inbox-write]").count(), 0);
+    assert.deepEqual(errors, []);
+  });
+});
+
+test("Campaign network loss reuses idempotency key; error and revocation preserve or close state", async () => {
+  await withBackend(async ({ db, createPage }) => {
+    const { page, errors } = await createPage(555, 390);
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-campaign-new").click();
+    await page.locator('[data-campaign-group="9"]').check();
+    await page.locator("#campaign-text").fill("Важная информация");
+    db.previewFailure = true;
+    await page.locator("#campaign-preview-button").click();
+    await page.locator("#campaign-compose-error").getByText(/Backend временно недоступен|preview unavailable/).waitFor();
+    assert.equal(await page.locator('[data-campaign-group="9"]').isChecked(), true);
+    db.previewFailure = false;
+    await page.locator("#campaign-preview-button").click();
+    await page.locator("#campaign-preview").waitFor({ state: "visible" });
+
+    db.createFailureAfterCommit = true;
+    await page.locator("#campaign-confirm-button").click();
+    await page.locator("#campaign-compose-error").getByText(/не удалось|Ошибка|недоступен|Failed to fetch|fetch/i).waitFor();
+    assert.equal(await page.locator("#campaign-preview").isVisible(), true);
+    assert.equal(await page.locator('[data-campaign-group="9"]').isChecked(), true);
+    await page.locator("#campaign-confirm-button").click();
+    await page.locator("#inbox-campaign-history-screen").waitFor({ state: "visible" });
+    const posts = db.requests.filter((request) => request.method === "POST" &&
+      request.path === "/api/admin/message-campaigns");
+    assert.equal(posts.length, 2);
+    assert.ok(posts[0].key && posts[0].key === posts[1].key);
+    assert.equal(db.campaigns.length, 1);
+
+    await page.locator("#inbox-back").click();
+    await page.locator("#inbox-campaign-new").click();
+    await page.locator('[data-campaign-group="9"]').check();
+    await page.locator("#campaign-text").fill("Проверка прав доступа");
+    db.granted.delete(555);
+    await page.locator("#campaign-preview-button").click();
+    await page.locator("#inbox-dialog").waitFor({ state: "hidden" });
+    assert.equal(await page.locator("#inbox-open").isVisible(), false);
+    assert.deepEqual(errors, []);
+  });
+});
+
+test("Campaign composition, preview and history have mobile and desktop screenshots", async () => {
+  await withBackend(async ({ db, createPage }) => {
+    db.users.push({ id: 4, full_name: "Ольга Сидорова", study_group: { id: 10, code: "Г-10" } });
+    const { page, errors } = await createPage(123, 390);
+    await page.locator("#inbox-open").click();
+    await page.locator("#inbox-campaign-new").click();
+    await page.locator('[data-campaign-group="9"]').check();
+    await page.locator('[data-campaign-group="10"]').check();
+    await page.locator("#campaign-user-search").fill("Иван");
+    await page.locator('[data-campaign-user="2"]').check();
+    await page.locator("#campaign-text").fill("Добрый день!\nНачинаем мероприятие в 12:00.");
+    await page.locator("#campaign-preview-button").click();
+    await page.locator("#campaign-preview").waitFor({ state: "visible" });
+    await mkdir(screenshots, { recursive: true });
+    for (const theme of ["light", "dark"]) {
+      await page.evaluate((value) => {
+        window.Telegram.WebApp.colorScheme = value;
+        for (const callback of window.Telegram.WebApp.__callbacks.themeChanged || []) callback();
+      }, theme);
+      for (const width of [320, 390, 768, 1280]) {
+        await page.setViewportSize({ width, height: 844 });
+        await page.evaluate(() => {
+          window.Telegram.WebApp.viewportHeight = 844;
+          for (const callback of window.Telegram.WebApp.__callbacks.viewportChanged || []) callback();
+        });
+        assert.equal(await page.evaluate(() =>
+          document.documentElement.scrollWidth <= window.innerWidth + 1), true);
+        assert.equal(await page.locator("#campaign-confirm-button").isVisible(), true);
+        await page.screenshot({ path: resolve(screenshots,
+          "campaign-preview-" + theme + "-" + width + ".png") });
+      }
+    }
+    await page.locator("#campaign-confirm-button").click();
+    await page.locator("#inbox-campaign-history-screen").waitFor({ state: "visible" });
+    await page.locator('[data-campaign-id="1"]').click();
+    await page.locator("#campaign-detail-recipients .campaign-recipient").first().waitFor();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: resolve(screenshots, "campaign-history-mobile.png") });
+    await page.setViewportSize({ width: 1280, height: 844 });
+    await page.screenshot({ path: resolve(screenshots, "campaign-history-desktop.png") });
+    await page.locator("#inbox-back").click();
+    assert.equal(await page.locator("#inbox-list-screen").isVisible(), true);
+    await page.locator("#inbox-new").click();
+    assert.equal(await page.locator("#inbox-new-screen").isVisible(), true);
+    assert.equal(await page.locator("[data-mobile-view]").count(), 4);
+    assert.deepEqual(errors, []);
+  });
+});
