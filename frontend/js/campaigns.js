@@ -209,6 +209,10 @@ export function campaignsActive() {
 
 export function leaveCampaignScreens() {
   if (!campaign.screen) return;
+  if (campaign.screen === "compose") {
+    campaign.preview = null;
+    setHidden("campaign-preview", true);
+  }
   abortRequests();
   campaign.screen = null;
   setHidden("inbox-campaign-compose-screen", true);
